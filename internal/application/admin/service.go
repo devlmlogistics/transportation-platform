@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"transportation-platform/internal/platform/postgres"
 	"transportation-platform/internal/platform/tenancy"
@@ -372,6 +373,9 @@ func (s *Service) AssignRole(ctx context.Context, principal postgres.Principal, 
 	return s.run(ctx, access, principal, postgres.AuthorizationRequest{
 		Principal: principal, ScopeType: scope, CompanyID: companyID, CompanyOperationID: operationID, PermissionCode: permission,
 	}, func(ctx context.Context, tx pgx.Tx) error {
+		if err := ensureRoleDelegation(ctx, tx, principal, input); err != nil {
+			return err
+		}
 		if err := ensureTargetScope(ctx, tx, input.PersonID, input.ScopeType, input.CompanyID, input.CompanyOperationID); err != nil {
 			return err
 		}
@@ -405,6 +409,9 @@ func (s *Service) GrantPermission(ctx context.Context, principal postgres.Princi
 	return s.run(ctx, access, principal, postgres.AuthorizationRequest{
 		Principal: principal, ScopeType: scope, CompanyID: companyID, CompanyOperationID: operationID, PermissionCode: permission,
 	}, func(ctx context.Context, tx pgx.Tx) error {
+		if err := ensurePermissionDelegation(ctx, tx, principal, input); err != nil {
+			return err
+		}
 		if err := ensureTargetScope(ctx, tx, input.PersonID, input.ScopeType, input.CompanyID, input.CompanyOperationID); err != nil {
 			return err
 		}
@@ -490,7 +497,7 @@ func (s *Service) run(ctx context.Context, access tenancy.Context, principal pos
 	}
 	decision, err := postgres.WithAuthorizedTenantTx(ctx, s.Pool, access, request, fn)
 	if err != nil {
-		return err
+		return mapDatabaseError(err)
 	}
 	if !decision.Allowed {
 		if denied, buildErr := postgres.NewDeniedAttempt(
@@ -548,6 +555,77 @@ func validateAssignmentScope(scope string, companyID, operationID *uuid.UUID) er
 		return ErrInvalidInput
 	}
 	return nil
+}
+
+// Delegation is intentionally narrower than ordinary permission evaluation.
+// A caller may have a management permission and still be unable to grant a
+// privileged role or permission unless this explicit policy allows it.
+func ensureRoleDelegation(ctx context.Context, tx pgx.Tx, principal postgres.Principal, input RoleAssignmentInput) error {
+	switch input.ScopeType {
+	case "PLATFORM":
+		// GLOBAL_ADMIN is provisioned outside this API. Only read-only platform
+		// AUDITOR delegation is exposed here.
+		if input.RoleCode != "AUDITOR" || !actorHasRole(ctx, tx, principal.PersonID, "GLOBAL_ADMIN", "PLATFORM", nil, nil) {
+			return ErrForbidden
+		}
+	case "COMPANY":
+		if !isCompanyRoleDelegable(input.RoleCode) || !actorHasRole(ctx, tx, principal.PersonID, "COMPANY_ADMIN", "COMPANY", input.CompanyID, nil) {
+			return ErrForbidden
+		}
+	case "OPERATION":
+		// No operation-level delegator is defined in the current catalog.
+		return ErrForbidden
+	default:
+		return ErrInvalidInput
+	}
+	return nil
+}
+
+func ensurePermissionDelegation(ctx context.Context, tx pgx.Tx, principal postgres.Principal, input PermissionGrantInput) error {
+	if input.ScopeType != "COMPANY" || !isCompanyPermissionDelegable(input.PermissionCode) {
+		return ErrForbidden
+	}
+	if !actorHasRole(ctx, tx, principal.PersonID, "COMPANY_ADMIN", "COMPANY", input.CompanyID, nil) {
+		return ErrForbidden
+	}
+	return nil
+}
+
+func isCompanyRoleDelegable(roleCode string) bool {
+	switch roleCode {
+	case "ADMIN_OPERATOR", "MANAGEMENT", "AUDITOR":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCompanyPermissionDelegable(permissionCode string) bool {
+	switch permissionCode {
+	case "company.read", "company.operation.read", "person.read", "membership.read", "operation.membership.read", "audit.read":
+		return true
+	default:
+		return false
+	}
+}
+
+func actorHasRole(ctx context.Context, tx pgx.Tx, personID uuid.UUID, roleCode, scope string, companyID, operationID *uuid.UUID) bool {
+	var found bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM platform.role_assignment
+			WHERE person_id = $1
+			  AND role_code = $2
+			  AND scope_type = $3
+			  AND company_id IS NOT DISTINCT FROM $4::uuid
+			  AND company_operation_id IS NOT DISTINCT FROM $5::uuid
+			  AND lifecycle_status = 'ACTIVE'
+			  AND valid_from <= now()
+			  AND (valid_until IS NULL OR valid_until > now())
+		)
+	`, personID, roleCode, scope, uuidValue(companyID), uuidValue(operationID)).Scan(&found)
+	return err == nil && found
 }
 
 func ensureTargetScope(ctx context.Context, tx pgx.Tx, personID uuid.UUID, scope string, companyID, operationID *uuid.UUID) error {
@@ -611,7 +689,28 @@ func writeAdminAudit(ctx context.Context, tx pgx.Tx, principal postgres.Principa
 }
 
 func isUniqueViolation(err error) bool {
-	return strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "unique constraint")
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+func mapDatabaseError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return err
+	}
+	switch pgErr.Code {
+	case "23505": // unique_violation
+		return ErrConflict
+	case "23503", "23514", "23502": // FK, CHECK, NOT NULL
+		return ErrInvalidInput
+	case "42501": // insufficient_privilege
+		return ErrForbidden
+	default:
+		return err
+	}
 }
 
 func ptrUUID(value uuid.UUID) *uuid.UUID {
@@ -624,6 +723,13 @@ func ptrUUID(value uuid.UUID) *uuid.UUID {
 func derefUUID(value *uuid.UUID) uuid.UUID {
 	if value == nil {
 		return uuid.Nil
+	}
+	return *value
+}
+
+func uuidValue(value *uuid.UUID) any {
+	if value == nil {
+		return nil
 	}
 	return *value
 }

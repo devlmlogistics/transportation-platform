@@ -68,6 +68,12 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotFound, "not_found", "Administrative endpoint not found.")
 		return
 	}
+	if isMutationMethod(r.Method) && r.Header.Get("Idempotency-Key") != "" {
+		// No durable idempotency store exists in this phase. Rejecting the
+		// header prevents callers from assuming replay safety we cannot provide.
+		writeError(w, r, http.StatusUnprocessableEntity, "idempotency_not_supported", "Idempotency-Key is not supported by this administrative contract yet.")
+		return
+	}
 
 	var serviceErr error
 	switch {
@@ -201,18 +207,18 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case len(parts) == 3 && parts[0] == "companies" && parts[2] == "role-assignments" && r.Method == http.MethodPost:
+		companyID, ok := parseUUIDOrError(w, r, parts[1])
+		if !ok {
+			return
+		}
 		var input admin.RoleAssignmentInput
 		if err := decodeJSON(w, r, &input); err != nil {
 			return
 		}
-		companyID, err := uuid.Parse(parts[1])
-		if err != nil {
-			writeError(w, r, http.StatusUnprocessableEntity, "invalid_uuid", "Invalid company identifier.")
+		if !validateCompanyScopedAssignment(w, r, companyID, input.ScopeType, input.CompanyID, input.CompanyOperationID) {
 			return
 		}
-		if input.CompanyID == nil {
-			input.CompanyID = &companyID
-		}
+		input.CompanyID = &companyID
 		serviceErr = h.Service.AssignRole(r.Context(), principal, input)
 		if serviceErr == nil {
 			writeNoContent(w)
@@ -229,18 +235,18 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case len(parts) == 3 && parts[0] == "companies" && parts[2] == "permission-grants" && r.Method == http.MethodPost:
+		companyID, ok := parseUUIDOrError(w, r, parts[1])
+		if !ok {
+			return
+		}
 		var input admin.PermissionGrantInput
 		if err := decodeJSON(w, r, &input); err != nil {
 			return
 		}
-		companyID, err := uuid.Parse(parts[1])
-		if err != nil {
-			writeError(w, r, http.StatusUnprocessableEntity, "invalid_uuid", "Invalid company identifier.")
+		if !validateCompanyScopedAssignment(w, r, companyID, input.ScopeType, input.CompanyID, input.CompanyOperationID) {
 			return
 		}
-		if input.CompanyID == nil {
-			input.CompanyID = &companyID
-		}
+		input.CompanyID = &companyID
 		serviceErr = h.Service.GrantPermission(r.Context(), principal, input)
 		if serviceErr == nil {
 			writeNoContent(w)
@@ -281,6 +287,30 @@ func splitAdminPath(path string) []string {
 		return nil
 	}
 	return parts
+}
+
+func isMutationMethod(method string) bool {
+	return method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete
+}
+
+func validateCompanyScopedAssignment(w http.ResponseWriter, r *http.Request, companyID uuid.UUID, scope string, payloadCompanyID, operationID *uuid.UUID) bool {
+	if strings.EqualFold(strings.TrimSpace(scope), "PLATFORM") {
+		writeError(w, r, http.StatusUnprocessableEntity, "invalid_scope", "Platform assignments are not accepted on company endpoints.")
+		return false
+	}
+	if payloadCompanyID != nil && *payloadCompanyID != companyID {
+		writeError(w, r, http.StatusUnprocessableEntity, "company_scope_mismatch", "Payload company_id must match the URL company.")
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(scope), "COMPANY") && operationID != nil {
+		writeError(w, r, http.StatusUnprocessableEntity, "invalid_scope", "Company assignments cannot include company_operation_id.")
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(scope), "OPERATION") && operationID == nil {
+		writeError(w, r, http.StatusUnprocessableEntity, "invalid_scope", "Operation assignments require company_operation_id.")
+		return false
+	}
+	return true
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {

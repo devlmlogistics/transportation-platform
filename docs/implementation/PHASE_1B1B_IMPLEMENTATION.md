@@ -29,6 +29,14 @@ No se implementaron WebAuthn, sesiones productivas, autenticación real, offline
 
 Las asignaciones requieren además que la persona destino esté activa y, para scopes `COMPANY` u `OPERATION`, que tenga membership activa y vigente en el alcance solicitado. No se permite autoasignación. `GLOBAL_ADMIN` sólo puede asignarse con scope `PLATFORM`.
 
+La delegación aplica una política adicional y no hereda automáticamente el permiso de administración:
+
+- `PLATFORM`: sólo un `GLOBAL_ADMIN` puede delegar; esta API permite únicamente el rol `AUDITOR`. `GLOBAL_ADMIN` y los permisos directos de plataforma no son delegables aquí.
+- `COMPANY`: sólo un `COMPANY_ADMIN` efectivo de la misma empresa puede delegar `ADMIN_OPERATOR`, `MANAGEMENT` o `AUDITOR`; los permisos directos se limitan a lecturas seguras.
+- `OPERATION`: no existe aún un rol delegador explícito; toda delegación de roles o permisos operacionales se deniega.
+
+La whitelist se evalúa dentro de la misma transacción que la autorización y la mutación. Esto evita que un permiso genérico de administración se convierta indirectamente en escalamiento.
+
 ### Frontera de autorización y RLS
 
 `WithTenantTx` permanece disponible para operaciones de infraestructura y sólo configura GUC transaccionales para RLS; no autentica ni autoriza. El servicio administrativo utiliza `WithAuthorizedTenantTx`, que:
@@ -46,6 +54,8 @@ RLS continúa siendo una defensa adicional y no se sustituye por un `app.tenant_
 `PrincipalResolver` es la interfaz explícita que deberá conectar una futura autenticación. El router de producción registra `ClosedAdminHandler`, que devuelve `401 authentication_required` para todas las rutas administrativas e ignora cabeceras como `X-User-ID`, `X-Person-ID` y `X-Tenant-ID`.
 
 `AdminHandler` puede construirse en tests con un resolver controlado. No existe bypass por entorno ni actor sintético fuera de ese límite de prueba.
+
+Los endpoints de asignación comparan cualquier `company_id` del JSON con el `companyID` de la URL, rechazan scopes `PLATFORM` y validan la forma del scope antes de invocar el servicio. Un `company_operation_id` se verifica además contra empresa, operación, membership y RLS dentro del servicio.
 
 ## 3. Endpoints preparados
 
@@ -76,6 +86,8 @@ Las mutaciones exitosas escriben un evento sanitizado con actor proveniente del 
 
 Las denegaciones siguen usando el mecanismo `SECURITY DEFINER` de Fase 1B.1-A. En esta entrega no se expone un endpoint público para fabricar eventos; la integración de un servicio de seguridad que registre denegaciones con `NewDeniedAttempt` y control de rate limit queda pendiente de la frontera de autenticación.
 
+Las operaciones administrativas no aceptan `Idempotency-Key` todavía: el handler responde `422 idempotency_not_supported` para no prometer replay seguro sin una tabla durable de claves y resultados. La activación productiva deberá agregar idempotencia durable y control de versión/`If-Match` antes de abrir mutaciones a clientes.
+
 ## 5. Pruebas y comandos
 
 Ejecutados localmente en esta rama:
@@ -84,16 +96,24 @@ Ejecutados localmente en esta rama:
 |---|---|
 | `gofmt` sobre archivos modificados | PASS |
 | `go test ./...` | PASS |
+| Pruebas de discrepancia URL/payload, scope `PLATFORM` e `Idempotency-Key` | PASS |
 | Router administrativo sin autenticación | PASS; `401` incluso con cabeceras de identidad. |
 | Handler con resolver inyectado sólo en test | PASS; resolver fallido devuelve `401`. |
 
 La suite PostgreSQL heredada de Fase 1B.1-A permanece como requisito para el entorno efímero: Goose `up/down/up`, RLS, aislamiento A/B, estados, auditoría, privilegios, reutilización A→B→A y `FORCE ROW LEVEL SECURITY`. Debe ejecutarse con las variables `TEST_DATABASE_URL`, `TEST_DATABASE_MIGRATOR_URL` y `TEST_DATABASE_ADMIN_URL`; sin ellas se omite de forma segura.
+
+La suite administrativa real usa una base dedicada y las variables `TEST_ADMIN_DATABASE_URL`, `TEST_ADMIN_DATABASE_MIGRATOR_URL` y `TEST_ADMIN_DATABASE_ADMIN_URL`. Cubre delegación autorizada/no autorizada, aislamiento A/B, memberships, revocación/reasignación, permisos directos, auditoría, cuentas deshabilitadas y operaciones ajenas.
 
 Antes de publicar la rama también se ejecutarán:
 
 ```powershell
 go vet ./...
 docker build --tag transportation-platform:phase1b1b .
+
+$env:TEST_ADMIN_DATABASE_URL = 'postgres://tp_runtime@127.0.0.1:15434/transportation_platform_admin?sslmode=disable'
+$env:TEST_ADMIN_DATABASE_MIGRATOR_URL = 'postgres://tp_migrator@127.0.0.1:15434/transportation_platform_admin?sslmode=disable'
+$env:TEST_ADMIN_DATABASE_ADMIN_URL = 'postgres://postgres@127.0.0.1:15434/transportation_platform_admin?sslmode=disable'
+go test ./internal/application/admin -run TestAdminServicePostgres16 -count=1 -v
 ```
 
 No se agregaron migraciones ni se ejecutó PostgreSQL desde el arranque de Go. `db/migrations` continúa siendo la fuente canónica.
@@ -101,6 +121,7 @@ No se agregaron migraciones ni se ejecutó PostgreSQL desde el arranque de Go. `
 ## 6. Archivos de esta entrega
 
 - `internal/application/admin/service.go`
+- `internal/application/admin/service_integration_test.go`
 - `internal/httpapi/admin.go`
 - `internal/httpapi/admin_test.go`
 - `internal/httpapi/router.go`
@@ -115,6 +136,9 @@ Este documento es el registro de implementación de la rama. No se modificaron l
 - **[P]** Falta un proveedor real que produzca `Principal`; por ello las rutas de producción permanecen cerradas.
 - **[P]** No se han implementado creación/attach de `CompanyMembership` ni cambios de identidad global. Deben pasar por el flujo de identidad aprobado y una política explícita de plataforma.
 - **[P]** No existe todavía listado HTTP de roles/asignaciones/permisos directos ni endpoint global de plataforma.
+- **[V]** La delegación de roles/permisos queda restringida a una whitelist explícita y deniega por defecto scopes operacionales y privilegios de plataforma no definidos.
+- **[V]** La detección de errores de unicidad usa `pgconn.PgError`/SQLSTATE; FK, CHECK, NOT NULL y privilegios se traducen a errores HTTP seguros mediante el servicio.
+- **[P]** No hay idempotencia durable ni control de versiones para mutaciones; el contrato rechaza `Idempotency-Key` hasta que exista almacenamiento persistente de replay y versionado.
 - **[P]** La expiración temporal depende de la política operativa que marque filas `EXPIRED`; la evaluación no considera activa una asignación fuera de `valid_until`, pero la limpieza de historial requiere un proceso posterior.
 - **[P]** Rate limiting, alertas y retención de denegaciones necesitan un servicio de seguridad posterior.
 - **[D]** La integración PostgreSQL de esta entrega debe ejecutarse sólo en el contenedor efímero dedicado; no se validó contra `lmlogistics` ni contra otra base existente.
