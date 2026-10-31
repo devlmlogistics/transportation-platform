@@ -1,6 +1,6 @@
 # Transportation Platform — Entrega de implementación Fase 1B.1-A
 
-Estado: completada en entorno aislado de desarrollo/pruebas. No es un pase a Fase 1B.1-B.
+Estado: completada en entorno aislado de desarrollo/pruebas, con hardening correctivo posterior. No es un pase a Fase 1B.1-B.
 
 ## 1. Alcance y evidencia
 
@@ -10,6 +10,14 @@ Estado: completada en entorno aislado de desarrollo/pruebas. No es un pase a Fas
 - **[V]** No se implementaron autenticación, WebAuthn, passkeys, sesiones reales, endpoints administrativos, Drayage, Transportation ni funcionalidades operativas.
 - **[V]** Antes de implementar se verificaron los cuatro documentos de especificación. Se corrigió la firma documentada de `record_denied_attempt` para incluir los diez parámetros reales y se alinearon el bootstrap del schema, Goose y la reversión de catálogos.
 
+### Hallazgos de auditoría y correcciones
+
+- **[V] Confirmado:** las policies iniciales permitían escrituras tenant sobre `Person`, `UserAccount` y `DriverProfile`, aunque eran identidades globales. **[V] Corregido:** `000004` elimina esas escrituras en `TENANT`; sólo permite `PLATFORM` con `platform.identity.manage`, y agrega pruebas negativas que verifican que una mutación desde A no afecta a B.
+- **[V] Confirmado:** `Authorize` validaba `UserAccount` sólo para scopes no `PLATFORM`. **[V] Corregido:** valida en todos los scopes la existencia, correspondencia con `Person`, estado activo de cuenta y estado activo de persona. Se agregaron casos de cuenta global deshabilitada, cuenta inexistente y persona inexistente.
+- **[V] Confirmado:** el registro de denegaciones podía recibir una estructura pública con actor, scope y motivo. **[V] Corregido:** `NewDeniedAttempt` deriva esos campos del `Principal` y `AuthorizationRequest` del servidor, usa reason codes tipados, y `000004` agrega `CHECK` e idempotencia por request.
+- **[V] Confirmado:** `WithTenantTx` sólo establece routing RLS. **[V] Corregido/documentado:** mantiene esa responsabilidad limitada y se agregó `WithAuthorizedTenantTx`, que no invoca el repositorio cuando el contexto no coincide o la autorización es `DENY`.
+- **[V] Confirmado:** `db/migrations` permanece como fuente única de migraciones; no se agregó una segunda copia SQL al commit.
+
 ## 2. Archivos creados o modificados
 
 ### Migraciones y bootstrap
@@ -17,6 +25,7 @@ Estado: completada en entorno aislado de desarrollo/pruebas. No es un pase a Fas
 - `db/migrations/000001_platform_schema.sql`: tablas, FK, checks, índices, estados e historial; ownership persistente transferido a `tp_owner`.
 - `db/migrations/000002_platform_catalogs.sql`: `OperationType`, roles, scopes, permisos y composición de roles.
 - `db/migrations/000003_platform_rls.sql`: funciones de contexto, función `SECURITY DEFINER`, grants, RLS y `FORCE ROW LEVEL SECURITY`.
+- `db/migrations/000004_identity_rls_audit_hardening.sql`: endurecimiento de identidad global, permiso `platform.identity.manage`, reason codes e idempotencia de denegaciones.
 - `db/bootstrap/platform_roles.sql`: procedimiento parametrizable de roles sin contraseñas.
 - `db/bootstrap/README.md`: orden de bootstrap y ejecución explícita de Goose.
 
@@ -27,7 +36,7 @@ El bootstrap crea el schema `platform` bajo `tp_owner`. Goose usa `platform.goos
 - `internal/platform/migrations/migrations.go`: wrapper Goose para `up`, `down-to` y consulta de versión; no se invoca desde el arranque de Go.
 - `internal/platform/tenancy/context.go`: contextos explícitos `TENANT` y `PLATFORM`.
 - `internal/platform/postgres/tenant_tx.go`: `SET LOCAL` dentro de una transacción y rollback/commit seguro para `pgxpool`.
-- `internal/platform/postgres/repositories.go`: repositorio de empresa, evaluación de autorización por scope exacto y auditoría de éxito/denegación.
+- `internal/platform/postgres/repositories.go`: repositorio de empresa, evaluación de autorización por scope exacto y contrato de auditoría de éxito/denegación.
 - `internal/platform/postgres/assignments.go`: alta, revocación y expiración con `SELECT ... FOR UPDATE`.
 - `internal/platform/postgres/integration_test.go`: fixtures A/B, pruebas RLS, privilegios, lifecycle, pool y auditoría.
 - `go.mod`/`go.sum`: `pgx/v5`, `pgxpool`, Goose v3.24.3 y UUID.
@@ -64,6 +73,7 @@ Reglas relevantes:
 
 - **[V]** `AdminAuditEvent` se inserta dentro de la transacción de mutación; un rollback elimina el evento de éxito junto con la mutación.
 - **[V]** `AdminDeniedAttempt` se registra mediante una llamada separada al canal `SECURITY DEFINER`, por lo que sobrevive al rollback de la operación solicitada.
+- **[V]** El contrato Go de denegación no permite construir el evento con campos públicos de actor/scope/motivo; los valores se derivan del principal y request internos. La DB valida reason codes, actor por FK y reintentos por request.
 - **[V]** Las asignaciones usan `ACTIVE`, `REVOKED` y `EXPIRED`; el índice único parcial sólo cubre `ACTIVE` y no contiene `now()`.
 - **[V]** Revocación y expiración bloquean la fila con `FOR UPDATE`. La reasignación crea una nueva fila y conserva el historial.
 - **[D]** Las mutaciones administrativas futuras deben llamar al repositorio de autorización y escribir el evento de éxito atómicamente; no basta con escribir directamente desde handlers.
@@ -74,7 +84,7 @@ Suite de integración ejecutada contra el contenedor dedicado `transportation-pl
 
 | Validación | Resultado |
 |---|---|
-| Goose `up/down/up` y versión final 3 | PASS |
+| Goose `up/down/up` y versión final 4 | PASS |
 | FK, checks, unicidad y scopes | PASS dentro de fixtures y migraciones |
 | Empresa A no lee ni inserta en B | PASS |
 | `FORCE ROW LEVEL SECURITY` sin contexto como propietario `tp_owner` | PASS: cero filas visibles |
@@ -83,6 +93,9 @@ Suite de integración ejecutada contra el contenedor dedicado `transportation-pl
 | Contexto de pool A → B → A y sin GUC filtrado | PASS |
 | Revocación, expiración, reasignación e historial | PASS |
 | Suspensión/reactivación de memberships, operación y cuenta | PASS |
+| Escrituras globales de identidad desde contexto tenant | PASS: RLS rechaza insert/update y B permanece sin cambios |
+| Autorización PLATFORM con cuenta/persona inválida o deshabilitada | PASS: DENY |
+| Frontera `WithAuthorizedTenantTx` sin permiso/contexto autorizado | PASS: callback no invocado |
 | Auditoría de éxito, rollback y denegación separada | PASS |
 | `go test ./...` | PASS |
 | `go vet ./...` | PASS |
@@ -111,6 +124,7 @@ La suite omite la integración si las tres variables no están definidas; esto e
 - **[P]** No hay API administrativa ni flujo de aprobación de cambios; la autorización implementada es un repositorio/fundación, no un producto operativo.
 - **[P]** La política de attach de una `Person` global a una empresa queda pendiente de la capa administrativa; el FK no debe convertirse en autorización.
 - **[P]** La retención, exportación y acceso break-glass de auditoría aún requieren decisión.
+- **[P]** El rate limit y la alerta ante spam de denegaciones deben vivir en el servicio de seguridad; la DB aporta idempotencia y validaciones estructurales.
 - **[D]** El `down` de desarrollo es potencialmente destructivo; nunca debe ejecutarse sobre datos reales. Para producción futura se debe preferir expand/contract y prechecks.
 - **[D]** El contenedor de prueba usa autenticación `trust` local y datos sintéticos; no representa una configuración productiva.
 

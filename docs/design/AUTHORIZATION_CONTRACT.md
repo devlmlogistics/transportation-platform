@@ -83,7 +83,7 @@ La respuesta pública no debe revelar asignaciones, empresas o personas que el a
 
 El servicio de autorización debe evaluar en este orden:
 
-1. **Actor:** existe `UserAccount`, está activa y está vinculada uno a uno a `Person`.
+1. **Actor:** existe `UserAccount`, está activa, está vinculada uno a uno a `Person` y `Person.status = ACTIVE`, incluso cuando el scope sea `PLATFORM`.
 2. **Autenticación:** una capa anterior entregó un actor verificado; esta fase no decide cómo.
 3. **Tipo de acción:** se clasifica como `PLATFORM`, `COMPANY` u `OPERATION`; no se permite que el caller lo elija para ampliar alcance.
 4. **Contexto:** las acciones `PLATFORM` allowlisted pueden omitir `company_id`; las demás requieren una empresa seleccionada y verificada por el servidor.
@@ -105,6 +105,7 @@ Dos fuentes positivas que producen el mismo permiso efectivo (por ejemplo, un ro
 | Código | Recurso | Acción | Uso inicial |
 |---|---|---|---|
 | `platform.company.create` | `company` | `create` | Crear una empresa sin tenant seleccionado; sólo plano plataforma. |
+| `platform.identity.manage` | `identity` | `manage` | Gestionar `Person`, `UserAccount` y `DriverProfile` globales mediante el servicio de identidad autorizado. |
 | `platform.catalog.read` | Catálogos | `read` | Leer `OperationType`, roles y permisos globales. |
 | `platform.role_assignment.manage` | `role_assignment` | `manage` | Gestionar únicamente asignaciones `PLATFORM`, con auditoría reforzada. |
 | `security.denied_attempt.read` | `admin_denied_attempt` | `read` | Leer intentos denegados mediante el canal de seguridad autorizado. |
@@ -133,7 +134,7 @@ La tabla muestra la intención de los roles; la autorización real requiere perm
 
 | Rol | Scope habitual | Permisos administrativos iniciales | Límites explícitos |
 |---|---|---|---|
-| `GLOBAL_ADMIN` | `PLATFORM` | `platform.company.create`, `platform.catalog.read` y gestión explícita de asignaciones `PLATFORM`. | No obtiene `company.*`, memberships ni datos operativos; para una empresa requiere grant temporal `COMPANY`/`OPERATION` y tenant verificado. |
+| `GLOBAL_ADMIN` | `PLATFORM` | `platform.company.create`, `platform.catalog.read`, `platform.identity.manage` y gestión explícita de asignaciones `PLATFORM`. | No obtiene `company.*`, memberships ni datos operativos; para una empresa requiere grant temporal `COMPANY`/`OPERATION` y tenant verificado. |
 | `COMPANY_ADMIN` | `COMPANY` | `company.read/update`, operaciones, personas y membresías, roles delegables. | No puede administrar otra empresa ni cambiar catálogos globales. |
 | `SUPERVISOR` | `OPERATION` | Lectura de contexto y membresías necesarias para supervisión; ningún permiso administrativo salvo grant explícito. | No administra empresa, roles, permisos ni otras operaciones. |
 | `DRIVER` | `OPERATION` | Lectura mínima de su propio perfil/contexto futuro. | No administra membresías, roles o empresas. |
@@ -150,7 +151,7 @@ Roles pueden combinarse. La combinación no amplía el tenant ni la operación d
 - No tiene `company_id` ni `company_operation_id`.
 - Sólo aplica a capacidades del plano de plataforma que estén explícitamente allowlisted.
 - `GLOBAL_ADMIN` y soporte break-glass requieren auditoría reforzada.
-- Sin `company_id` seleccionado sólo permite crear empresas, leer catálogos globales, administrar asignaciones `PLATFORM` y consultar el canal de seguridad autorizado.
+- Sin `company_id` seleccionado sólo permite crear empresas, leer catálogos globales, gestionar identidades globales mediante `platform.identity.manage`, administrar asignaciones `PLATFORM` y consultar el canal de seguridad autorizado.
 - No permite listar memberships, personas, operaciones, auditoría tenant ni datos operativos.
 
 ### `COMPANY`
@@ -177,6 +178,7 @@ Para recursos de instancia, el handler debe verificar además el `company_id` de
 | Leer catálogos `OperationType`, `Role`, `Permission` | No | `PLATFORM` | Son catálogos globales, no datos empresariales. |
 | Gestionar una asignación de scope `PLATFORM` | No | `PLATFORM` | Sólo afecta el plano plataforma y requiere auditoría reforzada. |
 | Leer/editar/suspender una `Company` existente | Sí, verificado | `COMPANY` | El objeto pertenece a un tenant concreto. |
+| Crear/modificar `Person`, `UserAccount` o `DriverProfile` globales | No | `PLATFORM` | El servicio de identidad usa `platform.identity.manage`; un tenant no modifica atributos que pueden afectar a otra empresa. |
 | Habilitar o suspender `CompanyOperation` | Sí, verificado | `COMPANY` | La operación se administra dentro de la empresa. |
 | Leer/modificar `Person`, `UserAccount`, `DriverProfile` o memberships | Sí, verificado | `COMPANY` o `OPERATION` según endpoint | La identidad se ve sólo por una relación tenant verificable. |
 | Asignar/revocar role o permission con scope `COMPANY` | Sí, verificado | `COMPANY` | No se satisface desde un permiso `PLATFORM` sin grant explícito. |
@@ -194,7 +196,7 @@ Aunque `Person` sea global y pueda tener varias empresas, `CompanyMembership` no
 |---|---|---|
 | FK/check/índice PostgreSQL | Forma del scope, coincidencia empresa-operación, scopes permitidos, una concesión `ACTIVE` abierta y fechas estructurales. | Que el actor humano tenga permiso o que una membership esté vigente en el instante de la request. |
 | RLS | Que el runtime sólo lea/escriba filas del contexto tenant/PLATFORM permitido por la policy, incluso para el propietario por `FORCE RLS`. | Autenticar al usuario; `app.tenant_id` no es identidad. |
-| Servicio Go | Actor, membresías vigentes, estados de Company/Operation/Account, tiempo, delegación, attach de Person y autorización exacta del endpoint. | Sustituir las FK/RLS con filtros de frontend. |
+| Servicio Go | Actor, membresías vigentes, estados de Company/Operation/Account, tiempo, delegación, attach de Person y autorización exacta del endpoint. `WithAuthorizedTenantTx` evita invocar el repositorio si la decisión es `DENY`. | `WithTenantTx` por sí solo no autentica ni autoriza; tampoco sustituye las FK/RLS con filtros de frontend. |
 | Auditoría | Evidencia de mutaciones confirmadas y denegaciones persistidas por canal separado. | Autorizar una acción por existir un registro histórico. |
 
 Una request sólo se permite cuando las tres primeras capas son compatibles. Un `ALLOW` de Go no puede escribir fuera de RLS y una fila visible por RLS no produce un `ALLOW` de Go por sí sola.
@@ -223,7 +225,9 @@ Un intento denegado que deba persistir se registra en `AdminDeniedAttempt`, tabl
 4. se confirma esa transacción aunque la operación original haya sido revertida;
 5. si falla la persistencia de seguridad, nunca se convierte el `DENY` en `ALLOW`; se genera alerta técnica y se mantiene la respuesta denegada.
 
-`tp_runtime` no lee directamente esta tabla. Una función `SECURITY DEFINER` con argumentos acotados y propiedad de `tp_security_audit_writer` es la vía propuesta para insertar eventos sanitizados. Los lectores de seguridad tienen un permiso separado.
+`tp_runtime` no lee directamente esta tabla. El servicio debe construir el evento mediante un contrato interno equivalente a `NewDeniedAttempt`: deriva el actor desde el `Principal` resuelto por autenticación, la empresa/operación desde el `AuthorizationRequest` construido por el servidor y el motivo desde un catálogo cerrado de decisiones. No acepta esos identificadores ni el reason code desde un payload HTTP.
+
+Una función `SECURITY DEFINER` con `search_path = platform, pg_catalog`, propiedad de `tp_security_audit_writer` y sin `INSERT`/`SELECT` directo para runtime es la vía para insertar eventos sanitizados. La FK del actor, el `CHECK` de reason codes y la idempotencia por `request_id/action/reason_code` reducen falsificación y reintentos duplicados. El rate limit por actor/ruta y la alerta ante volumen anómalo pertenecen al servicio de seguridad y siguen siendo un gate pendiente. Los lectores de seguridad tienen un permiso separado.
 
 No se registran secretos, tokens, passkeys, OTP, payloads completos, nombres, correos ni datos personales innecesarios. IP y metadata sólo se conservan si la política de seguridad/retención lo justifica.
 
@@ -271,4 +275,5 @@ No se crean endpoints `/webauthn/*`, tokens, cookies de sesión ni dispositivos 
 - **[P]** Políticas de rate limit y aprobación dual para grants de alto riesgo.
 - **[P]** Recursos de instancia que requerirán `WorkAssignment` en fases posteriores.
 - **[P]** Versión mínima de PostgreSQL para los índices parciales `NULLS NOT DISTINCT`.
-- **[P]** Rol/función `SECURITY DEFINER` para persistir `AdminDeniedAttempt` sin otorgar lectura al runtime.
+- **[V]** Rol/función `SECURITY DEFINER` para persistir `AdminDeniedAttempt` sin otorgar lectura al runtime.
+- **[P]** Rate limit, retención y alerta ante spam de denegaciones.

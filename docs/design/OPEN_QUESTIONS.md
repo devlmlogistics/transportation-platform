@@ -126,3 +126,14 @@ Las siguientes preguntas dejan de ser abiertas en su principio de negocio, aunqu
 La expiración de una autorización offline no autoriza borrar formularios, fotografías o documentos pendientes. La política completa está en docs/design/DEVICE_AUTHENTICATION.md.
 
 La especificación detallada está en docs/design/DEVICE_AUTHENTICATION.md.
+
+## Addendum — hardening correctivo de Fase 1B.1-A
+
+| ID | Hallazgo/decisión | Estado |
+|---|---|---|
+| H-01 | `Person`, `UserAccount` y `DriverProfile` no pueden escribirse desde `TENANT`; la identidad global se administra en `PLATFORM` con `platform.identity.manage`. | [V] Corregido en `000004` |
+| H-02 | `Authorize` debe verificar cuenta activa, correspondencia con `Person` y persona activa también para `PLATFORM`. | [V] Corregido y probado |
+| H-03 | `WithTenantTx` sólo configura RLS; el servicio futuro debe usar una frontera que autorice antes de invocar repositorios. | [V] Documentado y preparado con `WithAuthorizedTenantTx` |
+| H-04 | Actor, empresa, operación y reason code de una denegación deben derivarse de objetos internos del servidor, no de HTTP. | [V] Corregido con `NewDeniedAttempt` |
+| H-05 | ¿Qué rate limit, alertas, retención y acceso break-glass aplican a `AdminDeniedAttempt`? | [P] Seguridad/compliance |
+| H-06 | `db/migrations` es la única fuente canónica; cualquier paquete o archivo derivado requiere generación y verificación explícitas. | [V] Confirmado |

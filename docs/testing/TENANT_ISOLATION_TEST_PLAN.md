@@ -13,6 +13,8 @@ El plan cubre tres barreras:
 2. filtro tenant-aware en repositorios SQL;
 3. RLS de PostgreSQL como defensa en profundidad, cuando se apruebe y habilite.
 
+También se verifica que `Person`, `UserAccount` y `DriverProfile` son identidades globales: un contexto `TENANT` puede leerlas sólo mediante membership, pero no puede crearlas ni modificar atributos que podrían afectar a otra empresa. La creación o modificación global requiere `PLATFORM` y `platform.identity.manage`.
+
 El plan no prueba WebAuthn, passkeys, offline, viajes, formularios ni escrituras en `lmlogistics`.
 
 ## 2. Entorno de pruebas
@@ -66,6 +68,7 @@ El fixture no asigna permisos administrativos al rol `MANAGEMENT` ni al rol `SUP
 - aplicar `000001` otra vez: rechazo seguro o “already applied” según herramienta, sin duplicar tablas;
 - aplicar `000002`: catálogos exactos y claves estables;
 - aplicar `000003` sólo después del harness RLS;
+- aplicar `000004` y verificar el endurecimiento de identidad, reason codes e idempotencia de denegaciones;
 - aplicar todos los `down` en entorno sintético: esquema vuelve al estado inicial;
 - ejecutar `up/down/up`: resultado equivalente al esquema esperado;
 - checksum de migración modificada: rechazo antes de ejecutar;
@@ -91,6 +94,7 @@ El fixture no asigna permisos administrativos al rol `MANAGEMENT` ni al rol `SUP
 - el mismo permiso derivado por rol y por grant directo se evalúa una sola vez, sin convertir grants positivos en conflicto;
 - si se intenta introducir un rol/permiso conflictivo no definido por catálogo, se rechaza o queda pendiente de una policy explícita;
 - `UserAccount` duplicada para una persona: rechazo;
+- insertar/actualizar `Person`, `UserAccount` o `DriverProfile` desde A: rechazo RLS y ningún cambio visible desde B;
 - `RolePermission` duplicado: rechazo;
 - auditoría con `details` no objeto: rechazo;
 - borrar una entidad referenciada: comportamiento definido por política de estado, no borrado silencioso.
@@ -118,6 +122,9 @@ Cada caso se ejecuta con el actor indicado y el `company_id` solicitado. Se comp
 | A-15 | cualquier actor | operación suspendida | `403`/`409`; no se concede por rol histórico. |
 | A-16 | actor con membership vencida | consultar recurso de su antigua empresa | `403`/`404`, según retención aprobada. |
 | A-17 | `user-shared` | consultar A y B con el rol correcto de cada contexto | `200` sólo para el scope seleccionado; nunca mezcla de permisos. |
+| A-18 | `user-global` deshabilitado | ejecutar una acción `PLATFORM` | `403`; una cuenta global deshabilitada no autoriza. |
+| A-19 | cuenta activa + `Person` inexistente o cuenta inexistente | ejecutar una acción `PLATFORM` | `403`; no se acepta el principal inconsistente. |
+| A-20 | `user-a-admin` | crear/modificar identidad global desde contexto A | `403`; ninguna mutación en A ni B. |
 
 ## 6. Pruebas de repositorio y RLS
 
@@ -144,6 +151,7 @@ Cada caso se ejecuta con el actor indicado y el `company_id` solicitado. Se comp
 - filas `PLATFORM` sólo son visibles en modo `PLATFORM`, y filas `COMPANY`/`OPERATION` sólo en modo `TENANT` con empresa coincidente;
 - modo `PLATFORM` puede crear una empresa y leer catálogos autorizados, pero no leer memberships, personas, operaciones ni auditoría empresarial;
 - `company` no ofrece un listado global de sus datos por el simple hecho de usar el rol `GLOBAL_ADMIN`.
+- `person`, `user_account` y `driver_profile` no tienen escritura `TENANT`; el servicio de identidad usa `PLATFORM` y permiso explícito.
 
 ### Cobertura de tablas RLS
 
@@ -207,7 +215,9 @@ Para un intento denegado se verifica por separado:
 - `AdminDeniedAttempt` se confirma en una transacción independiente aunque la original haya hecho rollback;
 - un UUID inexistente solicitado no impide registrar el intento;
 - `tp_runtime` no puede leer directamente la tabla de denegaciones;
-- el writer sólo acepta campos sanitizados y no almacena secretos, PII innecesaria o payloads completos;
+- `NewDeniedAttempt` deriva actor/empresa/operación del principal y request del servidor, rechaza reason codes no catalogados y no expone campos mutables a handlers;
+- el writer sólo acepta campos sanitizados, mantiene `search_path` seguro, no almacena secretos, PII innecesaria o payloads completos y hace idempotente el mismo request;
+- los reintentos con request IDs distintos quedan sujetos a rate limit y alerta del servicio de seguridad;
 - si falla el writer, la respuesta sigue siendo `DENY` y se produce una alerta técnica, nunca `ALLOW`.
 
 ## 9. Lectura estricta de `lmlogistics`
@@ -227,7 +237,7 @@ La futura CI debe ejecutar, como mínimo:
 
 1. lint/format de Go y TypeScript;
 2. unit tests de autorización y estado;
-3. migraciones `up/down` sobre PostgreSQL efímero;
+3. migraciones `up/down` sobre PostgreSQL efímero, incluyendo `000004`;
 4. tests de repositorio con pool y contexto;
 5. tests HTTP de la matriz A/B;
 6. tests de RLS con rol runtime sin `BYPASSRLS`;
@@ -255,5 +265,6 @@ Fase 1B.1 no se acepta si:
 - **[P]** Versión mínima de PostgreSQL y estrategia si no soporta `NULLS NOT DISTINCT` en los índices parciales.
 - **[P]** Herramienta de base efímera en CI.
 - **[P]** Si RLS se habilita en 1B.1 o tras una fase de hardening separada.
-- **[P]** Función `SECURITY DEFINER`, rol writer y política de retención de eventos de denegación.
+- **[V]** Función `SECURITY DEFINER`, rol writer y contrato de campos sanitizados.
+- **[P]** Rate limit, alertas, retención y acceso break-glass de eventos de denegación.
 - **[P]** Política de limpieza de fixtures y artefactos de CI.

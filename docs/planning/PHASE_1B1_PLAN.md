@@ -23,7 +23,7 @@ Incluye:
 - asignaciones de roles y permisos directos con alcance plataforma, empresa u operación;
 - auditoría append-only de mutaciones administrativas confirmadas y canal separado para intentos denegados;
 - contratos HTTP iniciales para administración;
-- migraciones SQL versionadas, reversibles y aún no ejecutadas;
+- migraciones SQL versionadas y reversibles, ejecutadas sólo en el PostgreSQL 16 efímero de 1B.1-A;
 - pruebas con al menos dos empresas sintéticas y casos negativos de aislamiento.
 
 Queda fuera:
@@ -128,7 +128,8 @@ Secuencia sugerida:
 | `000001` | Tablas base del esquema `platform`, FK, checks e índices, incluidos estados históricos y auditoría separada. El schema lo prepara el bootstrap. | `down` elimina las tablas en orden inverso; sólo permitido en entornos no productivos o con aprobación explícita. |
 | `000002` | Catálogos iniciales de operaciones, roles y permisos. | `down` sólo elimina filas seed que no tengan dependencias. |
 | `000003` | Contexto de tenant y políticas RLS después de pasar el harness de aislamiento. | `down` elimina políticas y funciones, sin borrar datos. |
-| `000004+` | Cambios aditivos, cada uno con precheck, checksum, prueba y nota de rollback. | Preferir expand/contract; no reusar identificadores. |
+| `000004` | Endurecimiento de escrituras de identidad global, permiso `platform.identity.manage`, contrato de denegaciones e idempotencia. | `down` revierte el endurecimiento; sólo en entorno controlado. |
+| `000005+` | Cambios aditivos, cada uno con precheck, checksum, prueba y nota de rollback. | Preferir expand/contract; no reusar identificadores. |
 
 Reglas:
 

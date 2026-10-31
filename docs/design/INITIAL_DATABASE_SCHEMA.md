@@ -460,6 +460,7 @@ El rol no concede por sí mismo un scope distinto del asignado. La política de 
 
 ```text
 platform.company.create
+platform.identity.manage
 platform.catalog.read
 platform.role_assignment.manage
 company.read
@@ -483,11 +484,11 @@ security.denied_attempt.read
 
 Los permisos con prefijo `platform.` sólo aplican a scope `PLATFORM`; `company.*` y `membership.*` requieren el scope empresarial definido por el contrato. La compatibilidad de cada permiso con el scope se valida en el servicio de autorización y en el catálogo seed; no se deduce por el nombre del rol.
 
-`permission_scope` registra esa compatibilidad explícitamente. Por ejemplo, `platform.company.create` y `platform.catalog.read` sólo admiten `PLATFORM`; `company.read` sólo admite `COMPANY`; `company.operation.read` admite `OPERATION`; `operation.membership.manage`, `role.assignment.manage`, `permission.grant.manage` y `audit.read` pueden admitir `COMPANY` u `OPERATION` según la política aprobada del endpoint. El scope del permiso es el scope requerido para autorizar la acción; no es una herencia automática del scope de la fila objetivo.
+`permission_scope` registra esa compatibilidad explícitamente. Por ejemplo, `platform.company.create`, `platform.identity.manage` y `platform.catalog.read` sólo admiten `PLATFORM`; `company.read` sólo admite `COMPANY`; `company.operation.read` admite `OPERATION`; `operation.membership.manage`, `role.assignment.manage`, `permission.grant.manage` y `audit.read` pueden admitir `COMPANY` u `OPERATION` según la política aprobada del endpoint. El scope del permiso es el scope requerido para autorizar la acción; no es una herencia automática del scope de la fila objetivo.
 
 Los permisos de negocio (`trip.*`, `form.*`, `gps.*`, etc.) quedan fuera de 1B.1.
 
-## 5. RLS propuesta — migración `000003`
+## 5. RLS propuesta — migraciones `000003` y `000004`
 
 ### 5.1 Roles PostgreSQL separados
 
@@ -517,7 +518,7 @@ GRANT EXECUTE ON FUNCTION platform.record_denied_attempt(
 ) TO tp_runtime;
 ```
 
-La función `record_denied_attempt` será `SECURITY DEFINER`, tendrá `search_path` fijo (`platform, pg_catalog`), validará longitudes/códigos y será propiedad de `tp_security_audit_writer`. PostgreSQL exige un privilegio `CREATE` temporal del nuevo propietario sobre el schema para transferir ownership; `000003` lo concede y revoca dentro de la misma transacción. El runtime no obtiene `INSERT` directo ni `SELECT` sobre `admin_denied_attempt`.
+La función `record_denied_attempt` será `SECURITY DEFINER`, tendrá `search_path` fijo (`platform, pg_catalog`), validará longitudes/códigos y será propiedad de `tp_security_audit_writer`. PostgreSQL exige un privilegio `CREATE` temporal del nuevo propietario sobre el schema para transferir ownership; `000003` lo concede y revoca dentro de la misma transacción. `000004` agrega un catálogo cerrado de reason codes e idempotencia por request. El runtime no obtiene `INSERT` directo ni `SELECT` sobre `admin_denied_attempt`.
 
 Reglas:
 
@@ -625,8 +626,10 @@ CREATE POLICY operation_membership_tenant
     WITH CHECK (platform.rls_access_mode() = 'TENANT'
                 AND company_id = platform.rls_tenant_id());
 
+-- Baseline de 000003: 000004 elimina las policies de escritura TENANT y
+-- agrega policies PLATFORM condicionadas a platform.identity.manage en Go.
 -- Person, UserAccount y DriverProfile son globales en identidad, pero sólo
--- son visibles cuando la persona tiene membership en el tenant actual.
+-- son visibles en TENANT cuando la persona tiene membership en ese tenant.
 CREATE POLICY person_visible_in_tenant
     ON platform.person FOR SELECT TO tp_runtime
     USING (
@@ -785,7 +788,7 @@ CREATE POLICY denied_attempt_writer
 
 No se crean policies para `operation_type`, `role`, `role_scope`, `permission`, `permission_scope` o `role_permission`: son catálogos globales, de sólo lectura para runtime, y no contienen datos de empresas. `admin_denied_attempt` no tiene policy de lectura para `tp_runtime`; un lector de seguridad separado consulta mediante una ruta auditada.
 
-`person`, `user_account` y `driver_profile` requieren especial cuidado: sus políticas de lectura consultan `company_membership`, cuya propia policy ya filtra por tenant. El servicio crea la persona y su membership en una transacción; la policy de INSERT no convierte una persona recién insertada en visible para otro tenant. No se debe agregar una policy global para esas tablas.
+`person`, `user_account` y `driver_profile` requieren especial cuidado: sus políticas de lectura consultan `company_membership`, cuya propia policy ya filtra por tenant. Desde `000004`, un contexto `TENANT` sólo puede leer estas identidades y no puede insertarlas o actualizarlas. La creación o modificación global requiere contexto `PLATFORM`, permiso `platform.identity.manage` y un servicio Go que derive los valores desde un actor verificado; el tenant nunca modifica atributos globales que puedan afectar a otra empresa.
 
 `FORCE ROW LEVEL SECURITY` evita que `tp_owner` lea o escriba saltándose policies por ser propietario. El propietario sólo se usa para DDL y funciones controladas. Las tablas de auditoría no reciben `UPDATE` ni `DELETE` de `tp_runtime`; los cambios administrativos no pueden reescribir su historia.
 
@@ -794,6 +797,7 @@ No se crean policies para `operation_type`, `role`, `role_scope`, `permission`, 
 El modo `PLATFORM` no es un comodín para datos empresariales. Sin `company_id` seleccionado se permiten únicamente:
 
 - crear una empresa nueva (`platform.company.create`);
+- crear o modificar identidades globales mediante `platform.identity.manage`, usando el servicio de identidad y no un payload HTTP directo;
 - leer catálogos globales (`platform.catalog.read`);
 - administrar asignaciones de scope `PLATFORM` con permiso explícito, duración y auditoría reforzada;
 - escribir/leer eventos globales de plataforma con `company_id NULL`;
@@ -803,7 +807,8 @@ Requieren tenant verificable y contexto `TENANT`, incluso para `GLOBAL_ADMIN`:
 
 - leer, editar, suspender o archivar una empresa existente;
 - habilitar/suspender `CompanyOperation`;
-- consultar o modificar `Person`, `UserAccount`, `DriverProfile` y memberships;
+- consultar o modificar memberships y datos de empresa;
+- desde `TENANT`, crear o modificar `Person`, `UserAccount` o `DriverProfile`; esas escrituras globales sólo se realizan en `PLATFORM` mediante `platform.identity.manage`;
 - asignar roles/permisos con scope `COMPANY` u `OPERATION`;
 - consultar auditoría asociada a una empresa;
 - cualquier dato operativo futuro.
@@ -834,7 +839,7 @@ DROP TABLE IF EXISTS platform.operation_type;
 DROP TABLE IF EXISTS platform.company;
 ```
 
-El `down` de `000003` debe eliminar primero las políticas y la función RLS. El `down` de `000002` no debe borrar catálogos que tengan referencias: primero exige un precheck sin asignaciones dependientes o utiliza una migración de deprecación. En una base con datos reales se prefiere una reversión lógica expand/contract, no ejecutar este `down` destructivo.
+El `down` de `000004` revierte las policies de identidad, el permiso `platform.identity.manage`, el `CHECK` de reason codes, la idempotencia y la función endurecida; por tanto, sólo se usa en un entorno controlado. El `down` de `000003` debe eliminar primero las políticas y la función RLS. El `down` de `000002` no debe borrar catálogos que tengan referencias: primero exige un precheck sin asignaciones dependientes o utiliza una migración de deprecación. En una base con datos reales se prefiere una reversión lógica expand/contract, no ejecutar estos `down` destructivos.
 
 ## 7. Decisiones pendientes del esquema
 

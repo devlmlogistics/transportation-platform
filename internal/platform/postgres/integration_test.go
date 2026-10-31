@@ -64,7 +64,9 @@ func TestPostgres16Foundation(t *testing.T) {
 
 	fixture := seedFoundation(t, ctx, runtimePool)
 	t.Run("tenant_isolation", func(t *testing.T) { testTenantIsolation(t, ctx, runtimePool, fixture) })
+	t.Run("global_identity_rls", func(t *testing.T) { testGlobalIdentityRLS(t, ctx, runtimePool, fixture) })
 	t.Run("authorization", func(t *testing.T) { testAuthorization(t, ctx, runtimePool, fixture) })
+	t.Run("authorized_transaction_boundary", func(t *testing.T) { testAuthorizedTransactionBoundary(t, ctx, runtimePool, fixture) })
 	t.Run("lifecycle", func(t *testing.T) { testLifecycle(t, ctx, runtimePool, fixture) })
 	t.Run("state_invariants", func(t *testing.T) { testStateInvariants(t, ctx, runtimePool, fixture) })
 	t.Run("audit_and_privileges", func(t *testing.T) { testAuditAndPrivileges(t, ctx, runtimePool, adminDSN, fixture) })
@@ -72,8 +74,8 @@ func TestPostgres16Foundation(t *testing.T) {
 	t.Run("pool_context_a_b_a", func(t *testing.T) { testPoolContextSequence(t, ctx, runtimePool, fixture) })
 
 	version, err := migrations.Version(ctx, migratorDB)
-	if err != nil || version != 3 {
-		t.Fatalf("expected migration version 3 after integration suite, version=%d err=%v", version, err)
+	if err != nil || version != 4 {
+		t.Fatalf("expected migration version 4 after integration suite, version=%d err=%v", version, err)
 	}
 }
 
@@ -90,8 +92,8 @@ func prepareSchema(t *testing.T, ctx context.Context, db *sql.DB, adminDSN strin
 		t.Fatalf("migrations up: %v", err)
 	}
 	version, err := migrations.Version(ctx, db)
-	if err != nil || version != 3 {
-		t.Fatalf("expected version 3 after up, version=%d err=%v", version, err)
+	if err != nil || version != 4 {
+		t.Fatalf("expected version 4 after up, version=%d err=%v", version, err)
 	}
 	if err := migrations.DownTo(ctx, db, directory, 0); err != nil {
 		t.Fatalf("migrations down: %v", err)
@@ -175,6 +177,7 @@ func seedFoundation(t *testing.T, ctx context.Context, pool *pgxpool.Pool) found
 	createPersonMembership(t, ctx, pool, f.CompanyB, f.PersonBAdmin, f.UserBAdmin, "Beta Admin")
 	createPersonMembershipOnly(t, ctx, pool, f.CompanyB, f.PersonShared, "Shared Person")
 	createPersonOnly(t, ctx, pool, f.CompanyA, f.PersonGlobal, f.UserGlobal, "Platform Admin")
+	createDriverProfile(t, ctx, pool, f.PersonShared)
 
 	createOperationMembership(t, ctx, pool, f.CompanyA, f.OperationA, f.PersonASupervisor)
 	createOperationMembership(t, ctx, pool, f.CompanyA, f.OperationA, f.PersonADriver)
@@ -204,10 +207,13 @@ func createOperation(t *testing.T, ctx context.Context, pool *pgxpool.Pool, comp
 
 func createPersonMembership(t *testing.T, ctx context.Context, pool *pgxpool.Pool, companyID, personID, userID uuid.UUID, name string) {
 	t.Helper()
-	withAccess(t, ctx, pool, tenancy.Tenant(companyID), func(tx pgx.Tx) error {
+	withAccess(t, ctx, pool, tenancy.Platform(), func(tx pgx.Tx) error {
 		if err := insertPersonAndUser(ctx, tx, personID, userID, name); err != nil {
 			return err
 		}
+		return nil
+	})
+	withAccess(t, ctx, pool, tenancy.Tenant(companyID), func(tx pgx.Tx) error {
 		return insertMembership(ctx, tx, companyID, personID)
 	})
 }
@@ -221,8 +227,19 @@ func createPersonMembershipOnly(t *testing.T, ctx context.Context, pool *pgxpool
 
 func createPersonOnly(t *testing.T, ctx context.Context, pool *pgxpool.Pool, companyID, personID, userID uuid.UUID, name string) {
 	t.Helper()
-	withAccess(t, ctx, pool, tenancy.Tenant(companyID), func(tx pgx.Tx) error {
+	withAccess(t, ctx, pool, tenancy.Platform(), func(tx pgx.Tx) error {
 		return insertPersonAndUser(ctx, tx, personID, userID, name)
+	})
+}
+
+func createDriverProfile(t *testing.T, ctx context.Context, pool *pgxpool.Pool, personID uuid.UUID) {
+	t.Helper()
+	withAccess(t, ctx, pool, tenancy.Platform(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO platform.driver_profile (id, person_id, status)
+			VALUES ($1, $2, 'ACTIVE')
+		`, uuid.New(), personID)
+		return err
 	})
 }
 
@@ -318,6 +335,88 @@ func testTenantIsolation(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 	})
 }
 
+func testGlobalIdentityRLS(t *testing.T, ctx context.Context, pool *pgxpool.Pool, f foundationFixture) {
+	withAccess(t, ctx, pool, tenancy.Tenant(f.CompanyA), func(tx pgx.Tx) error {
+		if err := expectRLSRejection(ctx, tx, `
+			INSERT INTO platform.person (id, legal_name)
+			VALUES ($1, 'Tenant-created global identity')
+		`, uuid.New()); err != nil {
+			return fmt.Errorf("tenant person insert was not rejected: %w", err)
+		}
+		if err := expectRLSRejection(ctx, tx, `
+			UPDATE platform.person SET legal_name = 'Cross-tenant mutation'
+			WHERE id = $1
+		`, f.PersonShared); err != nil {
+			return fmt.Errorf("tenant person update was not rejected: %w", err)
+		}
+		if err := expectRLSRejection(ctx, tx, `
+			INSERT INTO platform.user_account (id, person_id, status)
+			VALUES ($1, $2, 'ACTIVE')
+		`, uuid.New(), uuid.New()); err != nil {
+			return fmt.Errorf("tenant user account insert was not rejected: %w", err)
+		}
+		if err := expectRLSRejection(ctx, tx, `
+			UPDATE platform.user_account SET status = 'DISABLED'
+			WHERE id = $1
+		`, f.UserShared); err != nil {
+			return fmt.Errorf("tenant user account update was not rejected: %w", err)
+		}
+		if err := expectRLSRejection(ctx, tx, `
+			INSERT INTO platform.driver_profile (id, person_id, status)
+			VALUES ($1, $2, 'ACTIVE')
+		`, uuid.New(), f.PersonShared); err != nil {
+			return fmt.Errorf("tenant driver profile insert was not rejected: %w", err)
+		}
+		if err := expectRLSRejection(ctx, tx, `
+			UPDATE platform.driver_profile SET status = 'SUSPENDED'
+			WHERE person_id = $1
+		`, f.PersonShared); err != nil {
+			return fmt.Errorf("tenant driver profile update was not rejected: %w", err)
+		}
+		return nil
+	})
+
+	withAccess(t, ctx, pool, tenancy.Tenant(f.CompanyB), func(tx pgx.Tx) error {
+		var legalName, status, driverStatus string
+		if err := tx.QueryRow(ctx, `SELECT legal_name FROM platform.person WHERE id = $1`, f.PersonShared).Scan(&legalName); err != nil {
+			return err
+		}
+		if legalName != "Shared Person" {
+			return fmt.Errorf("shared global identity was changed through A: %q", legalName)
+		}
+		if err := tx.QueryRow(ctx, `SELECT status FROM platform.user_account WHERE id = $1`, f.UserShared).Scan(&status); err != nil {
+			return err
+		}
+		if status != "ACTIVE" {
+			return fmt.Errorf("shared account was changed through A: %q", status)
+		}
+		if err := tx.QueryRow(ctx, `SELECT status FROM platform.driver_profile WHERE person_id = $1`, f.PersonShared).Scan(&driverStatus); err != nil {
+			return err
+		}
+		if driverStatus != "ACTIVE" {
+			return fmt.Errorf("shared driver profile was changed through A: %q", driverStatus)
+		}
+		return nil
+	})
+}
+
+func expectRLSRejection(ctx context.Context, tx pgx.Tx, query string, args ...any) error {
+	if _, err := tx.Exec(ctx, `SAVEPOINT identity_rls_check`); err != nil {
+		return err
+	}
+	result, statementErr := tx.Exec(ctx, query, args...)
+	if statementErr == nil && result.RowsAffected() > 0 {
+		_, _ = tx.Exec(ctx, `ROLLBACK TO SAVEPOINT identity_rls_check`)
+		_, _ = tx.Exec(ctx, `RELEASE SAVEPOINT identity_rls_check`)
+		return errors.New("statement unexpectedly succeeded")
+	}
+	if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT identity_rls_check`); err != nil {
+		return err
+	}
+	_, _ = tx.Exec(ctx, `RELEASE SAVEPOINT identity_rls_check`)
+	return nil
+}
+
 func testAuthorization(t *testing.T, ctx context.Context, pool *pgxpool.Pool, f foundationFixture) {
 	auth := AuthorizationRepository{}
 	allow := func(access tenancy.Context, request AuthorizationRequest, expected bool) {
@@ -344,6 +443,76 @@ func testAuthorization(t *testing.T, ctx context.Context, pool *pgxpool.Pool, f 
 
 	global := AuthorizationRequest{Principal: Principal{UserAccountID: f.UserGlobal, PersonID: f.PersonGlobal, Active: true}, ScopeType: "PLATFORM", PermissionCode: "platform.company.create"}
 	allow(tenancy.Platform(), global, true)
+	identityManage := global
+	identityManage.PermissionCode = "platform.identity.manage"
+	allow(tenancy.Platform(), identityManage, true)
+
+	withAccess(t, ctx, pool, tenancy.Platform(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE platform.user_account SET status = 'DISABLED' WHERE id = $1`, f.UserGlobal)
+		return err
+	})
+	allow(tenancy.Platform(), global, false)
+	withAccess(t, ctx, pool, tenancy.Platform(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE platform.user_account SET status = 'ACTIVE' WHERE id = $1`, f.UserGlobal)
+		return err
+	})
+	nonexistentPerson := global
+	nonexistentPerson.Principal.PersonID = uuid.New()
+	allow(tenancy.Platform(), nonexistentPerson, false)
+	nonexistentAccount := global
+	nonexistentAccount.Principal.UserAccountID = uuid.New()
+	allow(tenancy.Platform(), nonexistentAccount, false)
+}
+
+func testAuthorizedTransactionBoundary(t *testing.T, ctx context.Context, pool *pgxpool.Pool, f foundationFixture) {
+	called := false
+	decision, err := WithAuthorizedTenantTx(
+		ctx,
+		pool,
+		tenancy.Tenant(f.CompanyA),
+		AuthorizationRequest{
+			Principal:      Principal{UserAccountID: f.UserADriver, PersonID: f.PersonADriver, Active: true},
+			ScopeType:      "COMPANY",
+			CompanyID:      ptrUUID(f.CompanyA),
+			PermissionCode: "company.status.manage",
+		},
+		func(context.Context, pgx.Tx) error {
+			called = true
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Allowed || called {
+		t.Fatalf("unauthorized administrative transaction invoked callback: decision=%+v called=%v", decision, called)
+	}
+
+	called = false
+	_, err = WithAuthorizedTenantTx(
+		ctx,
+		pool,
+		tenancy.Context{},
+		AuthorizationRequest{ScopeType: "COMPANY", CompanyID: ptrUUID(f.CompanyA), PermissionCode: "company.read"},
+		func(context.Context, pgx.Tx) error {
+			called = true
+			return nil
+		},
+	)
+	if err == nil || called {
+		t.Fatalf("invalid context allowed administrative invocation: err=%v called=%v", err, called)
+	}
+
+	_, err = WithAuthorizedTenantTx(
+		ctx,
+		pool,
+		tenancy.Tenant(f.CompanyA),
+		AuthorizationRequest{ScopeType: "COMPANY", CompanyID: ptrUUID(f.CompanyB), PermissionCode: "company.read"},
+		func(context.Context, pgx.Tx) error { return nil },
+	)
+	if err == nil {
+		t.Fatal("mismatched tenant and authorization company were accepted")
+	}
 }
 
 func testLifecycle(t *testing.T, ctx context.Context, pool *pgxpool.Pool, f foundationFixture) {
@@ -462,9 +631,15 @@ func testStateInvariants(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 	}
 	setStatus(`UPDATE platform.operation_membership SET status = 'ACTIVE' WHERE company_id = $1 AND company_operation_id = $2 AND person_id = $3`, companyID, operationID, f.PersonASupervisor)
 
-	setStatus(`UPDATE platform.user_account SET status = 'DISABLED' WHERE id = $1`, f.UserAAdmin)
+	withAccess(t, ctx, pool, tenancy.Platform(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE platform.user_account SET status = 'DISABLED' WHERE id = $1`, f.UserAAdmin)
+		return err
+	})
 	check(false)
-	setStatus(`UPDATE platform.user_account SET status = 'ACTIVE' WHERE id = $1`, f.UserAAdmin)
+	withAccess(t, ctx, pool, tenancy.Platform(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE platform.user_account SET status = 'ACTIVE' WHERE id = $1`, f.UserAAdmin)
+		return err
+	})
 	check(true)
 }
 
@@ -486,8 +661,44 @@ func testAuditAndPrivileges(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 	}
 
 	deniedRequest := "deny-1"
-	if err := RecordDeniedAttempt(ctx, pool, DeniedAttempt{ID: uuid.New(), RequestedCompanyID: ptrUUID(uuid.New()), Action: "membership.manage", ResourceType: "company_membership", ReasonCode: "permission_denied", RequestID: &deniedRequest, Details: []byte(`{"redacted":true}`)}); err != nil {
+	deniedEvent, err := NewDeniedAttempt(
+		uuid.New(),
+		Principal{UserAccountID: f.UserAAdmin, PersonID: f.PersonAAdmin, Active: true},
+		AuthorizationRequest{ScopeType: "COMPANY", CompanyID: ptrUUID(uuid.New()), PermissionCode: "membership.manage"},
+		"membership.manage",
+		"company_membership",
+		DeniedReasonPermissionDenied,
+		&deniedRequest,
+		nil,
+		[]byte(`{"redacted":true}`),
+	)
+	if err != nil {
+		t.Fatalf("build denied attempt: %v", err)
+	}
+	if err := RecordDeniedAttempt(ctx, pool, deniedEvent); err != nil {
 		t.Fatalf("record denied attempt: %v", err)
+	}
+	// A retry of the same server-issued request is idempotent and cannot spam
+	// duplicate rows, even when it uses a different event UUID.
+	deniedEventRetry, err := NewDeniedAttempt(
+		uuid.New(),
+		Principal{UserAccountID: f.UserAAdmin, PersonID: f.PersonAAdmin, Active: true},
+		AuthorizationRequest{ScopeType: "COMPANY", CompanyID: deniedEvent.requestedCompanyID, PermissionCode: "membership.manage"},
+		"membership.manage",
+		"company_membership",
+		DeniedReasonPermissionDenied,
+		&deniedRequest,
+		nil,
+		[]byte(`{"redacted":true}`),
+	)
+	if err != nil {
+		t.Fatalf("build denied retry: %v", err)
+	}
+	if err := RecordDeniedAttempt(ctx, pool, deniedEventRetry); err != nil {
+		t.Fatalf("record denied retry: %v", err)
+	}
+	if _, err := NewDeniedAttempt(uuid.New(), Principal{}, AuthorizationRequest{ScopeType: "PLATFORM"}, "x", "y", DeniedReasonCode("spoofed"), nil, nil, nil); err == nil {
+		t.Fatal("unregistered denied reason was accepted")
 	}
 
 	adminPool, err := pgxpool.New(ctx, adminDSN)

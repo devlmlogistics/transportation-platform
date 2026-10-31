@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -87,20 +88,26 @@ func (AuthorizationRepository) Authorize(ctx context.Context, tx pgx.Tx, request
 		evaluationTime = time.Now().UTC()
 	}
 
+	var accountActive bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM platform.user_account ua
+			JOIN platform.person p ON p.id = ua.person_id
+			WHERE ua.id = $1
+			  AND ua.person_id = $2
+			  AND ua.status = 'ACTIVE'
+			  AND p.status = 'ACTIVE'
+		)
+	`, request.Principal.UserAccountID, request.Principal.PersonID).Scan(&accountActive)
+	if err != nil {
+		return AuthorizationDecision{}, err
+	}
+	if !accountActive {
+		return AuthorizationDecision{ReasonCode: "account_inactive"}, nil
+	}
+
 	if request.ScopeType != "PLATFORM" {
-		var accountActive bool
-		err := tx.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1 FROM platform.user_account
-				WHERE id = $1 AND person_id = $2 AND status = 'ACTIVE'
-			)
-		`, request.Principal.UserAccountID, request.Principal.PersonID).Scan(&accountActive)
-		if err != nil {
-			return AuthorizationDecision{}, err
-		}
-		if !accountActive {
-			return AuthorizationDecision{ReasonCode: "account_inactive"}, nil
-		}
 		if request.CompanyID == nil {
 			return AuthorizationDecision{ReasonCode: "company_missing"}, nil
 		}
@@ -156,7 +163,7 @@ func (AuthorizationRepository) Authorize(ctx context.Context, tx pgx.Tx, request
 
 	companyArg, operationArg := uuidArgument(request.CompanyID), uuidArgument(request.CompanyOperationID)
 	var granted bool
-	err := tx.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1
 			FROM platform.role_assignment ra
@@ -256,33 +263,131 @@ func WriteAuditEvent(ctx context.Context, tx pgx.Tx, event AuditEvent) error {
 	return err
 }
 
+type DeniedReasonCode string
+
+const (
+	DeniedReasonPrincipalInactive          DeniedReasonCode = "principal_inactive"
+	DeniedReasonAccountMissing             DeniedReasonCode = "account_missing"
+	DeniedReasonAccountInactive            DeniedReasonCode = "account_inactive"
+	DeniedReasonCompanyMissing             DeniedReasonCode = "company_missing"
+	DeniedReasonCompanyMembershipMissing   DeniedReasonCode = "company_membership_missing"
+	DeniedReasonOperationMissing           DeniedReasonCode = "operation_missing"
+	DeniedReasonOperationMembershipMissing DeniedReasonCode = "operation_membership_missing"
+	DeniedReasonScopeInvalid               DeniedReasonCode = "scope_invalid"
+	DeniedReasonPermissionMissing          DeniedReasonCode = "permission_missing"
+	DeniedReasonPermissionDenied           DeniedReasonCode = "permission_denied"
+	DeniedReasonResourceDenied             DeniedReasonCode = "resource_denied"
+)
+
+// DeniedAttempt can only be built through NewDeniedAttempt. Its fields are
+// intentionally private so handlers cannot manufacture actor/scope data from
+// an arbitrary HTTP payload and pass it to the security writer.
 type DeniedAttempt struct {
-	ID                   uuid.UUID
-	ActorUserAccountID   *uuid.UUID
-	RequestedCompanyID   *uuid.UUID
-	RequestedOperationID *uuid.UUID
-	Action               string
-	ResourceType         string
-	ReasonCode           string
-	RequestID            *string
-	RemoteIP             *string
-	Details              []byte
+	id                   uuid.UUID
+	actorUserAccountID   *uuid.UUID
+	requestedCompanyID   *uuid.UUID
+	requestedOperationID *uuid.UUID
+	action               string
+	resourceType         string
+	reasonCode           DeniedReasonCode
+	requestID            *string
+	remoteIP             *string
+	details              []byte
+}
+
+// NewDeniedAttempt derives actor and requested scope from the server-side
+// principal and authorization request. Action/resource/reason must come from
+// a server route and authorization result, never directly from HTTP JSON.
+func NewDeniedAttempt(
+	id uuid.UUID,
+	principal Principal,
+	request AuthorizationRequest,
+	action string,
+	resourceType string,
+	reason DeniedReasonCode,
+	requestID *string,
+	remoteIP *string,
+	details []byte,
+) (DeniedAttempt, error) {
+	if id == uuid.Nil {
+		return DeniedAttempt{}, errors.New("denied attempt id is required")
+	}
+	if strings.TrimSpace(action) == "" || strings.TrimSpace(resourceType) == "" {
+		return DeniedAttempt{}, errors.New("denied attempt action and resource are required")
+	}
+	if !validDeniedReason(reason) {
+		return DeniedAttempt{}, fmt.Errorf("unsupported denied reason %q", reason)
+	}
+	if reason != DeniedReasonScopeInvalid {
+		if err := validateScope(request.ScopeType, request.CompanyID, request.CompanyOperationID); err != nil {
+			return DeniedAttempt{}, err
+		}
+	}
+	if details == nil {
+		details = []byte(`{}`)
+	}
+	var object map[string]any
+	if err := json.Unmarshal(details, &object); err != nil || object == nil {
+		return DeniedAttempt{}, errors.New("denied attempt details must be a JSON object")
+	}
+
+	var actorID *uuid.UUID
+	if principal.UserAccountID != uuid.Nil {
+		actor := principal.UserAccountID
+		actorID = &actor
+	}
+	requestedCompanyID := request.CompanyID
+	requestedOperationID := request.CompanyOperationID
+	if requestedCompanyID == nil {
+		requestedOperationID = nil
+	}
+	return DeniedAttempt{
+		id:                   id,
+		actorUserAccountID:   actorID,
+		requestedCompanyID:   requestedCompanyID,
+		requestedOperationID: requestedOperationID,
+		action:               strings.TrimSpace(action),
+		resourceType:         strings.TrimSpace(resourceType),
+		reasonCode:           reason,
+		requestID:            requestID,
+		remoteIP:             remoteIP,
+		details:              details,
+	}, nil
+}
+
+func validDeniedReason(reason DeniedReasonCode) bool {
+	switch reason {
+	case DeniedReasonPrincipalInactive,
+		DeniedReasonAccountMissing,
+		DeniedReasonAccountInactive,
+		DeniedReasonCompanyMissing,
+		DeniedReasonCompanyMembershipMissing,
+		DeniedReasonOperationMissing,
+		DeniedReasonOperationMembershipMissing,
+		DeniedReasonScopeInvalid,
+		DeniedReasonPermissionMissing,
+		DeniedReasonPermissionDenied,
+		DeniedReasonResourceDenied:
+		return true
+	default:
+		return false
+	}
 }
 
 func RecordDeniedAttempt(ctx context.Context, pool *pgxpool.Pool, event DeniedAttempt) error {
 	if pool == nil {
 		return errors.New("postgres pool is required")
 	}
-	if event.Details == nil {
-		event.Details = []byte(`{}`)
+	if event.id == uuid.Nil {
+		return errors.New("denied attempt is not initialized by NewDeniedAttempt")
 	}
 	_, err := pool.Exec(ctx, `
 		SELECT platform.record_denied_attempt(
 			$1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, '')::inet, $10::jsonb
 		)
-	`, event.ID, event.ActorUserAccountID, event.RequestedCompanyID, event.RequestedOperationID,
-		event.Action, event.ResourceType, event.ReasonCode, event.RequestID,
-		stringValue(event.RemoteIP), event.Details)
+	`, event.id, event.actorUserAccountID, event.requestedCompanyID, event.requestedOperationID,
+		event.action, event.resourceType, event.reasonCode, event.requestID,
+		stringValue(event.remoteIP), event.details)
 	return err
 }
 
