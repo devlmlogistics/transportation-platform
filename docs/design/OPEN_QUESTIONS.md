@@ -1,0 +1,128 @@
+# Transportation Platform — Preguntas abiertas de Fase 0.5
+
+Estado: registro de decisiones pendientes y precisiones operativas posteriores a la aprobación conceptual.  
+Estas preguntas no bloquean la documentación propuesta, pero deben resolverse antes de comprometer el diseño de Fase 1 o modificar datos.
+
+## Convención
+
+- **[V] Verificado:** hecho observado que origina la pregunta.
+- **[D] Propuesta:** respuesta recomendada para avanzar.
+- **[P] Pendiente:** decisión requerida.
+
+## 1. Dominio y habilitación
+
+| ID | Pregunta | Propuesta para decidir | Responsable/evidencia |
+|---|---|---|---|
+| D-01 | ¿Puede una empresa tener varias instancias activas del mismo OperationType? | No en la primera versión; si se necesita, modelar una unidad operativa explícita. | Negocio y arquitectura |
+| D-02 | ¿Las capabilities requieren administración visible, precio o versionado independiente? | No inicialmente; mantenerlas como códigos/configuración de CompanyOperation. | Producto/arquitectura |
+| D-03 | ¿Work será una abstracción lógica o un registro común persistido? | Empezar como contrato delgado; persistir sólo si resuelve una necesidad de correlación o auditoría. | Arquitectura |
+| D-04 | ¿Cuál es el catálogo oficial de capacidades de Drayage y Transportation? | Definirlo antes de construir permisos de UI/API. | Dueños de operación |
+| D-05 | ¿Qué criterio define una nueva operación versus una nueva capability? | Nueva operación si cambia el agregado, estados, validaciones o ownership; capability si cambia sólo una función dentro del mismo contexto. | Arquitectura y negocio |
+
+## 2. Identidad y acceso
+
+| ID | Pregunta | Propuesta para decidir | Responsable/evidencia |
+|---|---|---|---|
+| I-01 | ¿Cómo se vincula la membresía con la identidad única? | [V] Resuelto en principio: Person es el sujeto de pertenencia y UserAccount la identidad autenticada, con vínculo auditable. | Seguridad/negocio |
+| I-02 | ¿Cuál es el proveedor de identidad y se exige MFA? | No crear credenciales propias en Fase 1; definir proveedor y política antes de producción. | Seguridad |
+| I-03 | ¿Un DriverProfile puede existir sin UserAccount? | [D] Confirmado: sí; el acceso móvil es opcional y, cuando existe, usa la identidad única. | Operaciones |
+| I-04 | ¿Cómo se verifica que el mismo conductor aparece en varias empresas? | No fusionar por nombre; usar evidencia legal/operativa y reglas de privacidad. | RRHH/seguridad |
+| I-05 | ¿Quién puede crear, aprobar y revocar WorkAssignment? | Operador/Supervisor según operación, con autorización explícita y auditoría. | Dueños de operación |
+| I-06 | ¿Puede Jefatura exportar información consolidada? | Sólo con permiso separado y alcance definido; el rol no lo implica. | Negocio/seguridad |
+| I-07 | ¿El administrador global puede leer datos de negocio? | Sólo break-glass temporal, justificado y auditado. | Seguridad/compliance |
+
+## 3. Tenant y datos heredados
+
+| ID | Pregunta | Propuesta para decidir | Responsable/evidencia |
+|---|---|---|---|
+| T-01 | ¿Cuál es el identificador técnico de la empresa actual? | Obtenerlo de una fuente autorizada; no inferirlo de nombres. | Dueño de datos |
+| T-02 | ¿Qué evidencia permite marcar una fila como VERIFIED? | FK o referencia externa reproducible, o revisión humana documentada cuando no exista FK. | Data owner/auditoría |
+| T-03 | ¿Qué hacer con UNKNOWN y CONFLICT? | Excluir de vistas tenantizadas y mantenerlos en conciliación de sólo lectura. | Data governance |
+| T-04 | ¿Se necesita staging aislado para el mapping? | Probablemente sí antes de cualquier migración; decidir ubicación y retención. | Arquitectura/DBA |
+| T-05 | ¿Se permite mostrar históricos de empresa actual cuando la evidencia es parcial? | No hasta aprobar una regla explícita de riesgo y una etiqueta visible de incertidumbre. | Negocio/compliance |
+
+## 4. Ownership e integraciones
+
+| ID | Pregunta | Propuesta para decidir | Responsable/evidencia |
+|---|---|---|---|
+| O-01 | ¿Cuál será la fuente de verdad de TransportationTrip? | Elegir un bounded context Transportation; Jotform queda como origen/adaptador si aplica. | Operaciones/arquitectura |
+| O-02 | ¿Quién es dueño del registro de vehículos y dispositivos? | Registro de activos del núcleo; telemetría sólo actualiza hechos técnicos autorizados. | Flota/monitoreo |
+| O-03 | ¿Cuál es el pipeline real de GPS/Traccar? | Documentar device→vehicle→company→operation antes de exponer posiciones. | Integraciones |
+| O-04 | ¿Los eventos se editan o son append-only? | Preferir eventos compensatorios; permitir corrección auditada sólo por excepción. | Operaciones/auditoría |
+| O-05 | ¿Quién es dueño de formularios y plantillas? | Cada bounded context posee sus formularios; el núcleo sólo ofrece archivos/auditoría. | Dueños de operación |
+| O-06 | ¿Qué retención y legal hold se aplica a documentos, evidencias y conversaciones? | Definir por tipo de dato y jurisdicción antes de migrar archivos. | Legal/compliance |
+
+## 5. Fase 1
+
+| ID | Pregunta | Propuesta para decidir | Responsable/evidencia |
+|---|---|---|---|
+| F-01 | ¿Cuál es el primer vertical? | Consulta tenant-aware del dashboard de Transportation, sólo lectura. | Producto/arquitectura |
+| F-02 | ¿Qué significa “listo” para aislamiento? | Casos positivos y negativos automatizables para empresa, operación, capability, recurso y rol. | QA/seguridad |
+| F-03 | ¿Se permite tocar proyectos existentes durante Fase 1? | Mantenerlos sin cambios; construir contratos/adaptador aislado hasta aprobación explícita. | Comité técnico |
+| F-04 | ¿Cuándo se puede alterar PostgreSQL? | Sólo después de aprobar el mapping, ownership, estrategia de migración y plan de reversa. | DBA/arquitectura |
+
+## Recomendación de cierre
+
+**[D]** Las preguntas D-01, D-02, I-02, I-07, T-01, T-02, O-01, O-03, A-01, A-03, A-04, A-07 y F-01 son las decisiones mínimas que deben resolverse antes de iniciar una implementación que escriba datos. El resto puede quedar como backlog de diseño con un responsable y fecha objetivo.
+
+## Fuentes
+
+- docs/discovery/DISCOVERY_SUMMARY.md
+- docs/discovery/DOMAIN_MODEL.md
+- docs/discovery/USER_ROLES_CURRENT.md
+- docs/discovery/MULTITENANCY_ANALYSIS.md
+- docs/discovery/DATABASE_INVENTORY.md
+- docs/discovery/FILE_STORAGE.md
+- docs/discovery/INTEGRATIONS.md
+
+## Addendum — decisiones resueltas por producto
+
+Las siguientes preguntas dejan de ser abiertas en su principio de negocio, aunque conservan detalles técnicos pendientes:
+
+| ID | Decisión | Estado |
+|---|---|---|
+| I-01 | Una persona utiliza una única UserAccount dentro de la plataforma, desde PC y móviles. | [V] Aprobada |
+| I-03 | DriverProfile puede existir sin UserAccount; el acceso móvil es opcional. Cuando existe acceso, usa la misma identidad única. | [D] Confirmada |
+| I-08 | Supervisores, administrativos y jefaturas reutilizan la infraestructura de identidad; el método puede variar según riesgo. | [V] Aprobada |
+| I-09 | driver_code no basta para habilitar un dispositivo. | [V] Aprobada |
+| I-10 | AuthenticatorCredential y DeviceAuthorization son conceptos separados. | [V] Aprobada como principio |
+| I-11 | No se permite una nueva autenticación contra servidor ni renovación de lease completamente offline. | [V] Aprobada |
+
+## Addendum — preguntas nuevas de autenticación y PWA
+
+| ID | Pregunta | Propuesta para decidir | Responsable/evidencia |
+|---|---|---|---|
+| A-01 | ¿Qué segundo dato o verificación acompaña la primera identificación del driver? | [V] La aprobación exige verificación independiente; queda definir el dato/canal concreto. | Negocio/seguridad |
+| A-02 | ¿El OTP seguirá visible para el supervisor? | Puede mantenerse como correlación, pero no como prueba única; evaluar confirmación en canal seguro. | Seguridad/operaciones |
+| A-03 | ¿Se aceptan passkeys sincronizadas para online? | [V] Sí para autenticación online; no transfieren DeviceAuthorization ni offline al equipo nuevo. | Seguridad |
+| A-04 | ¿Cuál es la vigencia offline por operación? | Propuesta inicial: 8–12 horas para Drayage y 24 horas general, con límite absoluto. | Dueños de operación |
+| A-05 | ¿La PWA ofrece protección suficiente para datos offline? | IndexedDB cifrada y clave de instalación como mínimo; operaciones de alto riesgo pueden prohibir offline. | Seguridad/arquitectura |
+| A-06 | ¿Quién puede revocar, recuperar o reemplazar una instalación? | Supervisor autorizado de la operación, con permisos explícitos y auditoría. | Seguridad/negocio |
+| A-07 | ¿Qué proveedor/librería WebAuthn usará Go? | Seleccionar una implementación mantenida y probar RP ID, origin, counters y passkeys multidispositivo. | Backend/seguridad |
+| A-08 | ¿Qué datos pueden descargarse para trabajo offline? | Sólo trabajos asignados y formularios/campos necesarios; excluir dashboards consolidados y datos no operativos. | Dueños de operación |
+
+## Addendum — decisiones confirmadas y nuevas preguntas de sincronización
+
+| ID | Decisión o pregunta | Estado/propuesta | Bloquea |
+|---|---|---|---|
+| A-09 | Passkeys sincronizadas permitidas para autenticación online. | [V] Confirmado; no transfieren DeviceAuthorization ni offline. | No bloquea online; sí define política de instalación. |
+| A-10 | La aprobación de supervisor requiere verificación independiente de identidad. | [V] Confirmado; el canal y evidencia exactos quedan pendientes. | Autenticación online |
+| A-11 | Vigencia de autorización offline separada de retención de pendientes. | [V] Confirmado; falta definir duración por operación. | Offline |
+| A-12 | ¿Qué estado permite continuar un formulario abierto cuando vence la lease? | [D] Bloquear nuevas operaciones, conservar cierre/borrador como PENDING_SYNC y someterlo a reconciliación. | Offline |
+| A-13 | ¿Qué evidencia permite aceptar una captura sincronizada después de expirar la lease? | [D] Lease firmada, instalación, secuencia, firma, scope, idempotencia y revisión si falta confianza. | Escritura operacional |
+| A-14 | ¿Cómo se conserva una outbox tras cierre, reinicio o actualización? | [D] IndexedDB cifrada, esquema versionado, migración segura y retención hasta decisión del servidor. | Offline |
+| A-15 | ¿Qué hacer cuando se agota la cuota local? | [D] Advertir, solicitar almacenamiento persistente cuando exista, bloquear nuevas capturas/descargas y preservar lo ya escrito. | Offline |
+| A-16 | ¿Cómo se trata un reloj de dispositivo incorrecto? | [D] No usarlo como única prueba; marcar REVIEW_REQUIRED si lease/secuencia no bastan. | Escritura operacional |
+| A-17 | ¿Qué acepta el backend ante sincronización tardía? | [P] Aprobar estados ACCEPTED_LATE_SYNC, REVIEW_REQUIRED, REJECTED_REPLAY y REJECTED_SCOPE. | Escritura operacional |
+
+## Bloqueos explícitos por capacidad
+
+| Capacidad | Bloqueos actuales |
+|---|---|
+| Autenticación online | Proveedor de identidad, RP ID/origin, verificación independiente del driver, claims por UserAccount y permisos para aprobar/revocar. |
+| Operación offline | Vigencia por operación, protección local, cuota/migración PWA, alcance de trabajos, revocación diferida y estados de reconciliación. |
+| Escritura operacional | Tenant mapping verificable, fuente de verdad, escritores autorizados, idempotencia, conflictos, auditoría y plan de integración con PostgreSQL. |
+
+La expiración de una autorización offline no autoriza borrar formularios, fotografías o documentos pendientes. La política completa está en docs/design/DEVICE_AUTHENTICATION.md.
+
+La especificación detallada está en docs/design/DEVICE_AUTHENTICATION.md.
