@@ -6,8 +6,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// PoolFactory is the future connection boundary. Phase 1A defines the port
-// without opening PostgreSQL or requiring credentials.
+// PoolFactory is the connection boundary for the isolated platform database.
+// Runtime callers must provide the tp_runtime role and never a migrator role.
 type PoolFactory func(context.Context, *pgxpool.Config) (*pgxpool.Pool, error)
 
 type ReadOnlyAdapter struct {

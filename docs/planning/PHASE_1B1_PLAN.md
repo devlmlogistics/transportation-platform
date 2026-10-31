@@ -1,7 +1,7 @@
 # Transportation Platform — Plan técnico de Fase 1B.1
 
-Estado: propuesta para revisión y aprobación.  
-Tipo de entrega: exclusivamente documental. No se ejecuta SQL, no se crean migraciones físicas y no se modifica código en esta fase.
+Estado: especificación aprobada para Fase 1B.1; el subalcance 1B.1-A fue implementado y validado sólo en el entorno efímero descrito en `docs/implementation/PHASE_1B1A_IMPLEMENTATION.md`.
+Tipo de entrega del plan: diseño y criterios de aceptación; la implementación no incluye autenticación, endpoints administrativos ni módulos operativos.
 
 ## Convención de evidencia
 
@@ -119,13 +119,13 @@ El SQL completo propuesto se encuentra en [INITIAL_DATABASE_SCHEMA.md](../design
 
 ## 4. Estrategia de migraciones
 
-**[D]** Usar migraciones SQL explícitas, versionadas y con pares `up/down`. La recomendación inicial es `goose` como herramienta de desarrollo/CI, sin ejecutar migraciones automáticamente al arrancar el servidor. La elección de herramienta queda **[P]** hasta aprobar el procedimiento operativo.
+**[D]** Usar migraciones SQL explícitas, versionadas y con pares `up/down`. Goose queda seleccionado para desarrollo/CI, sin ejecutar migraciones automáticamente al arrancar el servidor. El bootstrap de roles y del schema `platform` es un procedimiento separado; Goose mantiene su tabla de versión en `platform.goose_db_version`.
 
 Secuencia sugerida:
 
 | Versión | Contenido | Reversibilidad |
 |---|---|---|
-| `000001` | Esquema `platform`, tablas base, FK, checks e índices, incluidos estados históricos y auditoría separada. | `down` elimina las tablas en orden inverso; sólo permitido en entornos no productivos o con aprobación explícita. |
+| `000001` | Tablas base del esquema `platform`, FK, checks e índices, incluidos estados históricos y auditoría separada. El schema lo prepara el bootstrap. | `down` elimina las tablas en orden inverso; sólo permitido en entornos no productivos o con aprobación explícita. |
 | `000002` | Catálogos iniciales de operaciones, roles y permisos. | `down` sólo elimina filas seed que no tengan dependencias. |
 | `000003` | Contexto de tenant y políticas RLS después de pasar el harness de aislamiento. | `down` elimina políticas y funciones, sin borrar datos. |
 | `000004+` | Cambios aditivos, cada uno con precheck, checksum, prueba y nota de rollback. | Preferir expand/contract; no reusar identificadores. |
@@ -141,7 +141,7 @@ Reglas:
 - los seed de roles y permisos tienen claves estables y no dependen del orden de inserción;
 - no se usa la base `lmlogistics` como destino o fuente de migraciones.
 
-No se ejecutó ninguna de estas migraciones para producir este documento.
+Las migraciones de 1B.1-A se ejecutaron sólo contra un PostgreSQL 16 efímero del proyecto; no se ejecutaron contra `lmlogistics` ni contra otra base externa.
 
 ## 5. Aislamiento de tenants y evaluación de RLS
 
@@ -256,9 +256,9 @@ Ambos caminos excluyen secretos, tokens, passkeys, OTP, payloads completos y PII
 8. Revisar amenazas, logs, auditoría y observabilidad.
 9. Sólo después conectar el proveedor de identidad; WebAuthn queda fuera de 1B.1.
 
-## 10. Reglas de AGENTS.md que deberán cambiar al autorizar implementación
+## 10. Reglas de AGENTS.md y gates posteriores
 
-No se modifica `AGENTS.md` ahora porque continúa protegiendo correctamente la Fase 1A. Antes de programar 1B.1 deberá aprobarse un cambio explícito que:
+`AGENTS.md` fue actualizado para permitir únicamente la implementación aislada de 1B.1-A. Para fases posteriores debe conservarse la protección y aprobarse explícitamente cualquier cambio que:
 
 - sustituya la prohibición absoluta de conectar PostgreSQL por “permitido sólo contra la nueva base de Transportation Platform, con secretos de entorno y sin `lmlogistics`”;
 - permita migraciones únicamente en bases efímeras/locales y en un entorno explícitamente aprobado, nunca implícitamente al arrancar;

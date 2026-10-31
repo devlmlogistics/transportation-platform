@@ -1,7 +1,7 @@
 # Transportation Platform — Esquema inicial de PostgreSQL
 
-Estado: propuesta para Fase 1B.1.  
-Clasificación: el modelo y el SQL son **[D] propuestos**; no se han ejecutado y no autorizan crear tablas ni conectar una base externa.
+Estado: baseline de diseño aprobado para Fase 1B.1.
+Clasificación: el modelo y el SQL son **[D]**; las migraciones equivalentes se ejecutaron sólo en el PostgreSQL 16 efímero de 1B.1-A y no autorizan conectar ni modificar una base externa.
 
 ## 1. Convenciones
 
@@ -40,12 +40,13 @@ Clasificación: el modelo y el SQL son **[D] propuestos**; no se han ejecutado y
 
 `driver_profile` no hace global un `driver_code` heredado. Si el producto necesita identificadores distintos por empresa, se agregará una tabla company-scoped posterior (`driver_identifier`) con procedencia y unicidad por empresa; ese dato seguirá siendo un localizador, nunca una credencial.
 
-## 3. SQL propuesto — migración base `000001`
+## 3. SQL propuesto — bootstrap y migración base `000001`
 
 El siguiente bloque es material de diseño. No se ejecutó.
 
 ```sql
-CREATE SCHEMA IF NOT EXISTS platform;
+-- El bootstrap de roles crea `platform` y la deja bajo ownership de `tp_owner`.
+-- La migración opera dentro de ese esquema; no lo elimina en su `Down`.
 
 CREATE TABLE platform.company (
     id              uuid PRIMARY KEY,
@@ -55,7 +56,10 @@ CREATE TABLE platform.company (
     status          text NOT NULL DEFAULT 'ACTIVE'
                     CHECK (status IN ('ACTIVE', 'SUSPENDED', 'ARCHIVED')),
     created_at      timestamptz NOT NULL DEFAULT now(),
-    updated_at      timestamptz NOT NULL DEFAULT now()
+    updated_at      timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT company_slug_shape_ck
+        CHECK (slug = lower(trim(slug)) AND slug ~ '^[a-z0-9][a-z0-9-]{1,62}$'),
+    CONSTRAINT company_legal_name_ck CHECK (length(trim(legal_name)) > 0)
 );
 
 CREATE UNIQUE INDEX company_slug_lower_uidx
@@ -103,7 +107,8 @@ CREATE TABLE platform.person (
     status          text NOT NULL DEFAULT 'ACTIVE'
                     CHECK (status IN ('ACTIVE', 'SUSPENDED', 'ARCHIVED')),
     created_at      timestamptz NOT NULL DEFAULT now(),
-    updated_at      timestamptz NOT NULL DEFAULT now()
+    updated_at      timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT person_legal_name_ck CHECK (length(trim(legal_name)) > 0)
 );
 
 CREATE INDEX person_status_idx
@@ -478,7 +483,7 @@ security.denied_attempt.read
 
 Los permisos con prefijo `platform.` sólo aplican a scope `PLATFORM`; `company.*` y `membership.*` requieren el scope empresarial definido por el contrato. La compatibilidad de cada permiso con el scope se valida en el servicio de autorización y en el catálogo seed; no se deduce por el nombre del rol.
 
-`permission_scope` registra esa compatibilidad explícitamente. Por ejemplo, `platform.company.create` y `platform.catalog.read` sólo admiten `PLATFORM`; `company.read` sólo admite `COMPANY`; `operation.membership.manage`, `role.assignment.manage`, `permission.grant.manage` y `audit.read` pueden admitir `COMPANY` u `OPERATION` según la política aprobada del endpoint. El scope del permiso es el scope requerido para autorizar la acción; no es una herencia automática del scope de la fila objetivo.
+`permission_scope` registra esa compatibilidad explícitamente. Por ejemplo, `platform.company.create` y `platform.catalog.read` sólo admiten `PLATFORM`; `company.read` sólo admite `COMPANY`; `company.operation.read` admite `OPERATION`; `operation.membership.manage`, `role.assignment.manage`, `permission.grant.manage` y `audit.read` pueden admitir `COMPANY` u `OPERATION` según la política aprobada del endpoint. El scope del permiso es el scope requerido para autorizar la acción; no es una herencia automática del scope de la fila objetivo.
 
 Los permisos de negocio (`trip.*`, `form.*`, `gps.*`, etc.) quedan fuera de 1B.1.
 
@@ -499,7 +504,7 @@ CREATE ROLE tp_runtime LOGIN NOSUPERUSER NOBYPASSRLS
 CREATE ROLE tp_security_audit_writer NOLOGIN NOSUPERUSER NOBYPASSRLS;
 ```
 
-Los grants de runtime deben ser explícitos. Como mínimo, `tp_runtime` recibe `SELECT, INSERT, UPDATE` sólo en tablas necesarias y no recibe `DELETE`, `TRUNCATE`, `ALTER`, `DROP` ni `REFERENCES`. Para auditoría se aplica además:
+Los grants de runtime deben ser explícitos. Como mínimo, `tp_runtime` recibe `SELECT, INSERT, UPDATE` sólo en tablas necesarias y no recibe `DELETE`, `TRUNCATE`, `ALTER`, `DROP` ni `REFERENCES`. Las migraciones deben transferir el ownership persistente a `tp_owner`; `tp_migrator` sólo ejecuta DDL mediante su membresía controlada. Para auditoría se aplica además:
 
 ```sql
 REVOKE ALL ON platform.admin_audit_event FROM tp_runtime;
@@ -508,11 +513,11 @@ REVOKE UPDATE, DELETE, TRUNCATE ON platform.admin_audit_event FROM tp_runtime;
 
 REVOKE ALL ON platform.admin_denied_attempt FROM tp_runtime;
 GRANT EXECUTE ON FUNCTION platform.record_denied_attempt(
-    uuid, uuid, uuid, text, text, text, text, inet, jsonb
+    uuid, uuid, uuid, uuid, text, text, text, text, inet, jsonb
 ) TO tp_runtime;
 ```
 
-La función `record_denied_attempt` será `SECURITY DEFINER`, tendrá `search_path` fijo (`platform, pg_catalog`), validará longitudes/códigos y será propiedad de `tp_security_audit_writer`. El runtime no obtiene `INSERT` directo ni `SELECT` sobre `admin_denied_attempt`.
+La función `record_denied_attempt` será `SECURITY DEFINER`, tendrá `search_path` fijo (`platform, pg_catalog`), validará longitudes/códigos y será propiedad de `tp_security_audit_writer`. PostgreSQL exige un privilegio `CREATE` temporal del nuevo propietario sobre el schema para transferir ownership; `000003` lo concede y revoca dentro de la misma transacción. El runtime no obtiene `INSERT` directo ni `SELECT` sobre `admin_denied_attempt`.
 
 Reglas:
 

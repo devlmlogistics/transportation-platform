@@ -1,7 +1,7 @@
 # Transportation Platform — Plan de pruebas de aislamiento multiempresa
 
-Estado: propuesta para Fase 1B.1.  
-Clasificación: casos y resultados esperados **[D]**; no se han ejecutado migraciones ni pruebas contra PostgreSQL real.
+Estado: plan aprobado y ejecutado para el subalcance 1B.1-A.
+Clasificación: casos y resultados **[V]/[D]**; los resultados reproducibles y las limitaciones están en `docs/implementation/PHASE_1B1A_IMPLEMENTATION.md`.
 
 ## 1. Objetivo
 

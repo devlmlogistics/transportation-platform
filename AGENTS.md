@@ -11,12 +11,17 @@ Este repositorio contiene sólo la fundación de Transportation Platform. Los pr
 ## Reglas obligatorias
 
 - No modificar los proyectos originales.
-- No alterar PostgreSQL, ejecutar migraciones ni crear tablas.
-- No conectar servicios de producción.
-- No implementar autenticación real, WebAuthn, sesiones, formularios operativos u offline en Fase 1A.
+- Fase 1B.1-A sólo puede usar un PostgreSQL 16 nuevo, efímero o un contenedor dedicado al proyecto, con datos sintéticos.
+- Las migraciones se ejecutan sólo de forma explícita con Goose en el entorno aislado; Go no las ejecuta al iniciar.
+- No conectar servicios de producción ni reutilizar contenedores o volúmenes PostgreSQL ajenos al proyecto.
+- `lmlogistics` permanece estrictamente en modo de lectura y no se modifica.
+- No implementar autenticación real, WebAuthn, passkeys, sesiones, endpoints administrativos, formularios operativos u offline en Fase 1B.1-A.
+- No implementar Drayage ni Transportation en esta fase.
 - No introducir Gin, Echo, Fiber, GORM, Ent, Next.js, Angular, Nginx ni un servidor Node de producción.
 - Mantener Go net/http, React 19, TypeScript estricto, Vite y Tailwind CSS 4.
-- Mantener PostgreSQL como dependencia externa; pgxpool sólo se prepara como adapter futuro.
+- Mantener PostgreSQL como dependencia externa; usar `pgx/v5` y `pgxpool`, sin ORM.
+- El rol Goose/migrador es distinto del rol runtime. El runtime no es superusuario, no tiene `BYPASSRLS` y no recibe credenciales reales.
+- Mantener RLS y `FORCE ROW LEVEL SECURITY` según la documentación; las funciones `SECURITY DEFINER` deben ser mínimas y fijar `search_path`.
 - No crear una tabla universal de trabajos.
 - No implementar motores de plugins ni workflows genéricos.
 - No copiar .env, tokens, contraseñas, dumps ni credenciales heredadas.
@@ -34,6 +39,7 @@ Este repositorio contiene sólo la fundación de Transportation Platform. Los pr
 ## Comandos de validación
 
     go test ./...
+    go vet ./...
     pnpm --dir web install --frozen-lockfile
     pnpm --dir web typecheck
     pnpm --dir web test
@@ -41,5 +47,7 @@ Este repositorio contiene sólo la fundación de Transportation Platform. Los pr
     go build -o ./tmp/transportation-platform.exe ./cmd/platform
     docker compose config --quiet
     docker build -t transportation-platform:0.1.0 .
+
+Las pruebas de integración PostgreSQL deben recibir explícitamente `TEST_DATABASE_URL`, `TEST_DATABASE_MIGRATOR_URL` y `TEST_DATABASE_ADMIN_URL` apuntando al contenedor efímero dedicado. La limpieza no debe tocar otros contenedores ni volúmenes.
 
 No ejecutar comandos destructivos ni operaciones sobre bases externas como parte de una tarea normal.

@@ -1,7 +1,7 @@
 # Transportation Platform — Contrato inicial de autorización
 
-Estado: propuesta para Fase 1B.1.  
-Clasificación: reglas recomendadas **[D]**; decisiones pendientes **[P]**. Este documento no implementa autenticación, WebAuthn ni sesiones.
+Estado: contrato aprobado como especificación de Fase 1B.1.
+Clasificación: reglas implementadas en la fundación 1B.1-A **[V]/[D]**; decisiones pendientes **[P]**. Este documento no implementa autenticación, WebAuthn ni sesiones.
 
 ## 1. Propósito
 
