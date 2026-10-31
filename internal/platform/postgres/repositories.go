@@ -14,11 +14,11 @@ import (
 )
 
 type CompanyRecord struct {
-	ID          uuid.UUID
-	Slug        string
-	LegalName   string
-	DisplayName *string
-	Status      string
+	ID          uuid.UUID `json:"id"`
+	Slug        string    `json:"slug"`
+	LegalName   string    `json:"legal_name"`
+	DisplayName *string   `json:"display_name,omitempty"`
+	Status      string    `json:"status"`
 }
 
 type CompanyRepository struct{}

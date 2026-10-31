@@ -15,7 +15,9 @@ Este repositorio contiene sólo la fundación de Transportation Platform. Los pr
 - Las migraciones se ejecutan sólo de forma explícita con Goose en el entorno aislado; Go no las ejecuta al iniciar.
 - No conectar servicios de producción ni reutilizar contenedores o volúmenes PostgreSQL ajenos al proyecto.
 - `lmlogistics` permanece estrictamente en modo de lectura y no se modifica.
-- No implementar autenticación real, WebAuthn, passkeys, sesiones, endpoints administrativos, formularios operativos u offline en Fase 1B.1-A.
+- No implementar autenticación real, WebAuthn, passkeys, sesiones productivas, formularios operativos u offline en Fase 1B.1-B.
+- En Fase 1B.1-B se permiten contratos y handlers administrativos cerrados por defecto, además de servicios de aplicación y tests con Principal inyectado exclusivamente dentro de tests.
+- Las rutas administrativas de producción deben rechazar por defecto mientras no exista una frontera de autenticación real; no aceptar identidad desde headers ni habilitar bypass por ambiente.
 - No implementar Drayage ni Transportation en esta fase.
 - No introducir Gin, Echo, Fiber, GORM, Ent, Next.js, Angular, Nginx ni un servidor Node de producción.
 - Mantener Go net/http, React 19, TypeScript estricto, Vite y Tailwind CSS 4.
