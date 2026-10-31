@@ -132,4 +132,8 @@ La rama queda lista para revisión cuando:
 
 ## 9. Commit y Pull Request
 
-Se completará después de las validaciones finales y se consignará aquí el hash del commit y el enlace del Pull Request creado para revisión.
+- Commit de implementación: `0448a4b` (`feat: implement phase 1b1b admin application layer`).
+- Rama publicada: `feature/phase-1b1b-admin-api`.
+- Enlace directo para abrir el Pull Request hacia `main`: <https://github.com/devlmlogistics/transportation-platform/compare/main...feature/phase-1b1b-admin-api?expand=1>.
+
+El Pull Request no fue creado automáticamente en este entorno porque GitHub CLI no está instalado y la automatización de navegador se detuvo antes de enviar el formulario al no poder verificar de forma segura la URL de la ventana. No se hizo merge ni force push.
