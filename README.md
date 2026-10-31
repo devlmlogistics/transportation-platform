@@ -122,6 +122,10 @@ La separación entre handlers, aplicación, dominio y adapters es intencional. D
 ## Documentación
 
 - docs/planning/PHASE_1A_PLAN.md
+- docs/planning/PHASE_1B1_PLAN.md
+- docs/design/INITIAL_DATABASE_SCHEMA.md
+- docs/design/AUTHORIZATION_CONTRACT.md
+- docs/testing/TENANT_ISOLATION_TEST_PLAN.md
 - docs/implementation/PHASE_1A_IMPLEMENTATION_DECISIONS.md
 - docs/design/DOMAIN_MODEL.md
 - docs/design/IDENTITY_AND_ACCESS.md

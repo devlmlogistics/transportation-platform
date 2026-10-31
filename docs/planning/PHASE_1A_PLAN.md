@@ -596,3 +596,45 @@ Fase 1A se considera lista para iniciar implementación cuando:
 - C:\Users\hecto\OneDrive\Documentos\ChatGPT\Consulta drayage\
 - C:\Users\hecto\OneDrive\Documentos\ChatGPT\Api Consulta lm\
 - C:\Users\hecto\OneDrive\Documentos\ChatGPT\Dashboard-Go\
+
+## 19. Siguiente etapa — Fase 1B.1
+
+**[D]** Con Fase 1A completada, la siguiente etapa documental propuesta es `1B.1 — Fundación de identidad, empresas y autorización multiempresa`. No se considera autorización para implementar hasta que se aprueben sus entregables y gates.
+
+### Objetivo de 1B.1
+
+- crear una base PostgreSQL nueva e independiente de `lmlogistics`;
+- persistir Company, OperationType, CompanyOperation, Person, UserAccount, DriverProfile y membresías;
+- definir roles, permisos, scopes y auditoría administrativa;
+- establecer un API administrativo mínimo;
+- probar aislamiento entre al menos dos empresas ficticias;
+- mantener `lmlogistics` en lectura estricta y sin mapping automático por nombres.
+
+### Entregables
+
+- `docs/planning/PHASE_1B1_PLAN.md`;
+- `docs/design/INITIAL_DATABASE_SCHEMA.md`;
+- `docs/design/AUTHORIZATION_CONTRACT.md`;
+- `docs/testing/TENANT_ISOLATION_TEST_PLAN.md`.
+
+### Gates antes de implementación
+
+1. aprobar el esquema y sus constraints;
+2. aprobar la herramienta y el procedimiento de migraciones `up/down`;
+3. decidir versión, roles y ambientes PostgreSQL;
+4. aprobar la estrategia de RLS y el contexto transaccional del pool;
+5. aprobar matriz de roles/permisos y reglas de delegación;
+6. aprobar contrato HTTP, idempotencia, errores y auditoría;
+7. aprobar fixtures y casos negativos de Empresa A/Empresa B;
+8. modificar `AGENTS.md` explícitamente para permitir sólo la nueva base, sin habilitar aún WebAuthn, offline ni escritura legacy.
+
+### Dependencias que permanecen fuera de 1B.1
+
+- proveedor de identidad y autenticación productiva;
+- WebAuthn/passkeys y DeviceAuthorization;
+- operación offline y sincronización;
+- módulos operativos y escritura en legacy;
+- migración de personas o empresas reales;
+- despliegue o creación de credenciales reales.
+
+El plan técnico detallado y el estado de cada decisión están en [PHASE_1B1_PLAN.md](PHASE_1B1_PLAN.md).
