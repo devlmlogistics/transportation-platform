@@ -22,6 +22,8 @@ La autorización debe ser evaluable en backend Go antes de cada lectura o escrit
 | Acción | Operación sobre el recurso, por ejemplo `read`, `manage` o `create`. |
 | Permiso | Par estable `resource.action`, como `membership.manage`. |
 | Rol | Conjunto de permisos, sin scope implícito. |
+| `RoleScope` | Catálogo que declara en qué scopes puede asignarse un rol. |
+| `PermissionScope` | Catálogo que declara en qué scopes puede concederse un permiso. |
 | Scope | Alcance `PLATFORM`, `COMPANY` u `OPERATION` de una asignación. |
 | Membresía | Pertenencia vigente de una persona a empresa u operación. |
 | Recurso de instancia | Registro concreto; requiere además comprobar que su `company_id`/operación coincida. |
@@ -83,24 +85,30 @@ El servicio de autorización debe evaluar en este orden:
 
 1. **Actor:** existe `UserAccount`, está activa y está vinculada uno a uno a `Person`.
 2. **Autenticación:** una capa anterior entregó un actor verificado; esta fase no decide cómo.
-3. **Empresa:** `company_id` fue seleccionado por el servidor y la `Company` está activa.
-4. **Membresía:** existe `CompanyMembership` activa, vigente y no revocada.
-5. **Operación:** si la acción es operacional, existe `CompanyOperation` activa y `OperationMembership` activa/vigente.
-6. **Permisos:** se expanden los roles activos mediante `RolePermission` y los `PermissionGrant` directos permitidos.
-7. **Scope:** el scope de la asignación cubre el contexto solicitado; un scope de otra empresa no se hereda.
-8. **Recurso:** el registro concreto pertenece a la empresa/operación solicitada y respeta restricciones de asignación.
-9. **Vigencia:** `valid_from <= now`, `valid_until` es nulo o futuro y no hay `revoked_at`.
-10. **Feature:** la operación requerida está habilitada en `CompanyOperation`.
-11. **Decisión:** si no existe una autorización positiva completa, se deniega.
+3. **Tipo de acción:** se clasifica como `PLATFORM`, `COMPANY` u `OPERATION`; no se permite que el caller lo elija para ampliar alcance.
+4. **Contexto:** las acciones `PLATFORM` allowlisted pueden omitir `company_id`; las demás requieren una empresa seleccionada y verificada por el servidor.
+5. **Empresa:** cuando aplica, `Company` está activa y el `company_id` fue resuelto por el servidor, no aceptado como prueba de identidad desde un header.
+6. **Membresía:** para acciones `COMPANY` u `OPERATION`, existe `CompanyMembership` activa, vigente y no revocada.
+7. **Operación:** si la acción requiere scope `OPERATION`, existe `CompanyOperation` activa y `OperationMembership` activa/vigente.
+8. **Permisos:** se expanden roles y grants cuya fila tenga `lifecycle_status = ACTIVE`, `valid_from <= evaluation_time`, `valid_until` nulo o futuro y no esté revocada.
+9. **Scope exacto:** el scope de la asignación coincide con el scope requerido; `PLATFORM` no se hereda a `COMPANY`, `COMPANY` no se hereda a `OPERATION` y una operación no se hereda a otra.
+10. **Recurso:** el registro concreto pertenece a la empresa/operación solicitada y respeta restricciones de asignación.
+11. **Feature:** la operación requerida está habilitada en `CompanyOperation`.
+12. **Decisión:** si no existe una autorización positiva completa, se deniega y se registra el intento por el canal de seguridad cuando la política lo exija.
 
 No se implementan reglas de `ALLOW` y `DENY` compitiendo en esta fase. El modelo usa deny-by-default y grants positivos; revocar o expirar una asignación la deja inefectiva.
+
+Dos fuentes positivas que producen el mismo permiso efectivo (por ejemplo, un rol y un `PermissionGrant`) se deduplican y no son una incompatibilidad. La unicidad de las tablas impide duplicar la misma concesión abierta; una matriz de roles mutuamente excluyentes no se inventa en 1B.1. Si el producto requiere conflictos entre roles, se agregará una política explícita y auditable antes de permitirlos.
 
 ## 6. Permisos iniciales
 
 | Código | Recurso | Acción | Uso inicial |
 |---|---|---|---|
-| `company.read` | `company` | `read` | Consultar empresas visibles. |
-| `company.create` | `company` | `create` | Crear una empresa en el plano de plataforma. |
+| `platform.company.create` | `company` | `create` | Crear una empresa sin tenant seleccionado; sólo plano plataforma. |
+| `platform.catalog.read` | Catálogos | `read` | Leer `OperationType`, roles y permisos globales. |
+| `platform.role_assignment.manage` | `role_assignment` | `manage` | Gestionar únicamente asignaciones `PLATFORM`, con auditoría reforzada. |
+| `security.denied_attempt.read` | `admin_denied_attempt` | `read` | Leer intentos denegados mediante el canal de seguridad autorizado. |
+| `company.read` | `company` | `read` | Consultar la empresa seleccionada y verificada. |
 | `company.update` | `company` | `update` | Editar datos no sensibles de empresa. |
 | `company.status.manage` | `company` | `status.manage` | Suspender/reactivar según política. |
 | `company.operation.read` | `company_operation` | `read` | Consultar operaciones habilitadas. |
@@ -115,7 +123,7 @@ No se implementan reglas de `ALLOW` y `DENY` compitiendo en esta fase. El modelo
 | `role.assignment.manage` | `role_assignment` | `manage` | Conceder/revocar roles permitidos. |
 | `permission.grant.read` | `permission_grant` | `read` | Consultar excepciones directas. |
 | `permission.grant.manage` | `permission_grant` | `manage` | Conceder/revocar excepciones auditadas. |
-| `audit.read` | `admin_audit_event` | `read` | Consultar auditoría en alcance. |
+| `audit.read` | `admin_audit_event` | `read` | Consultar auditoría del tenant/operación seleccionados. |
 
 No se incluyen permisos de viajes, formularios, GPS, documentos, conversaciones o dashboards operativos. Se definirán en los módulos correspondientes.
 
@@ -125,11 +133,11 @@ La tabla muestra la intención de los roles; la autorización real requiere perm
 
 | Rol | Scope habitual | Permisos administrativos iniciales | Límites explícitos |
 |---|---|---|---|
-| `GLOBAL_ADMIN` | `PLATFORM` | Crear/consultar empresas, catálogo y soporte de asignaciones bajo break-glass. | No lectura silenciosa de negocio; toda elevación es auditada. |
+| `GLOBAL_ADMIN` | `PLATFORM` | `platform.company.create`, `platform.catalog.read` y gestión explícita de asignaciones `PLATFORM`. | No obtiene `company.*`, memberships ni datos operativos; para una empresa requiere grant temporal `COMPANY`/`OPERATION` y tenant verificado. |
 | `COMPANY_ADMIN` | `COMPANY` | `company.read/update`, operaciones, personas y membresías, roles delegables. | No puede administrar otra empresa ni cambiar catálogos globales. |
 | `SUPERVISOR` | `OPERATION` | Lectura de contexto y membresías necesarias para supervisión; ningún permiso administrativo salvo grant explícito. | No administra empresa, roles, permisos ni otras operaciones. |
 | `DRIVER` | `OPERATION` | Lectura mínima de su propio perfil/contexto futuro. | No administra membresías, roles o empresas. |
-| `ADMIN_OPERATOR` | `COMPANY` u `OPERATION` | Operaciones administrativas expresamente delegadas. | No recibe `company.operation.manage` o `role.assignment.manage` por el nombre del rol. |
+| `ADMIN_OPERATOR` | `COMPANY` u `OPERATION` | Operaciones administrativas expresamente delegadas. | No recibe permisos por el nombre del rol; el scope solicitado debe coincidir exactamente. |
 | `MANAGEMENT` | `COMPANY` u `OPERATION` | Lectura de resultados y auditoría sólo si se concede. | No administra usuarios ni permisos. |
 | `AUDITOR` | `PLATFORM`, `COMPANY` u `OPERATION` | `audit.read`, `company.read` según scope. | No escribe ni corrige datos; no recibe administración implícita. |
 
@@ -140,16 +148,17 @@ Roles pueden combinarse. La combinación no amplía el tenant ni la operación d
 ### `PLATFORM`
 
 - No tiene `company_id` ni `company_operation_id`.
-- Sólo aplica a capacidades del plano de plataforma.
+- Sólo aplica a capacidades del plano de plataforma que estén explícitamente allowlisted.
 - `GLOBAL_ADMIN` y soporte break-glass requieren auditoría reforzada.
-- No se interpreta como acceso automático a todos los datos operativos.
+- Sin `company_id` seleccionado sólo permite crear empresas, leer catálogos globales, administrar asignaciones `PLATFORM` y consultar el canal de seguridad autorizado.
+- No permite listar memberships, personas, operaciones, auditoría tenant ni datos operativos.
 
 ### `COMPANY`
 
 - Tiene `company_id` y no tiene `company_operation_id`.
 - Requiere `CompanyMembership` activa para la persona.
-- Permite consultar o administrar recursos de esa empresa sólo si el permiso lo permite.
-- No se hereda automáticamente a operaciones para acciones de operación; se aplica una política explícita de herencia sólo si se aprueba.
+- Permite consultar o administrar recursos de esa empresa sólo si el permiso y el endpoint declaran scope `COMPANY`.
+- No se hereda automáticamente a operaciones. Una acción administrativa sobre una relación operacional debe declarar expresamente si su scope de autorización es `COMPANY` o `OPERATION`; el handler no lo infiere desde el padre.
 
 ### `OPERATION`
 
@@ -158,21 +167,69 @@ Roles pueden combinarse. La combinación no amplía el tenant ni la operación d
 - No concede acceso a otra operación del mismo tenant.
 - Un supervisor de Drayage no adquiere Transportation por pertenecer a la misma empresa.
 
-Para recursos de instancia, el handler debe verificar además el `company_id` del recurso. Un identificador conocido no salta el filtro de tenant.
+Para recursos de instancia, el handler debe verificar además el `company_id` del recurso. Un identificador conocido no salta el filtro de tenant. Las FK compuestas garantizan la coincidencia empresa-operación en base; las reglas Go garantizan membresía, vigencia y permiso.
+
+### 8.1 Matriz de selección de empresa
+
+| Acción administrativa | `company_id` seleccionado | Scope requerido | Motivo |
+|---|---:|---|---|
+| Crear `Company` | No | `PLATFORM` | Es una operación del plano plataforma. |
+| Leer catálogos `OperationType`, `Role`, `Permission` | No | `PLATFORM` | Son catálogos globales, no datos empresariales. |
+| Gestionar una asignación de scope `PLATFORM` | No | `PLATFORM` | Sólo afecta el plano plataforma y requiere auditoría reforzada. |
+| Leer/editar/suspender una `Company` existente | Sí, verificado | `COMPANY` | El objeto pertenece a un tenant concreto. |
+| Habilitar o suspender `CompanyOperation` | Sí, verificado | `COMPANY` | La operación se administra dentro de la empresa. |
+| Leer/modificar `Person`, `UserAccount`, `DriverProfile` o memberships | Sí, verificado | `COMPANY` o `OPERATION` según endpoint | La identidad se ve sólo por una relación tenant verificable. |
+| Asignar/revocar role o permission con scope `COMPANY` | Sí, verificado | `COMPANY` | No se satisface desde un permiso `PLATFORM` sin grant explícito. |
+| Asignar/revocar role o permission con scope `OPERATION` | Sí, verificado | `OPERATION` | Requiere operación activa y membership operacional según la regla. |
+| Consultar `AdminAuditEvent` empresarial | Sí, verificado | `COMPANY`/`OPERATION` | No hay lectura global indiscriminada. |
+| Consultar `AdminDeniedAttempt` | No necesariamente | Canal `PLATFORM` de seguridad | No se expone al tenant ni al runtime común. |
+
+Un `GLOBAL_ADMIN` no convierte una ruta `PLATFORM` en una ruta `COMPANY`. Para soporte sobre una empresa se concede temporalmente un permiso con scope de esa empresa/operación, con vencimiento, motivo y auditoría.
+
+Aunque `Person` sea global y pueda tener varias empresas, `CompanyMembership` no se crea por aceptar un UUID de otra empresa. El endpoint debe usar una persona recién creada en el contexto, o un flujo de invitación/attach explícito con permiso y auditoría; la FK de identidad sólo garantiza existencia, no autorización para vincular.
+
+### 8.2 Responsabilidades por capa
+
+| Capa | Garantía | No pretende garantizar |
+|---|---|---|
+| FK/check/índice PostgreSQL | Forma del scope, coincidencia empresa-operación, scopes permitidos, una concesión `ACTIVE` abierta y fechas estructurales. | Que el actor humano tenga permiso o que una membership esté vigente en el instante de la request. |
+| RLS | Que el runtime sólo lea/escriba filas del contexto tenant/PLATFORM permitido por la policy, incluso para el propietario por `FORCE RLS`. | Autenticar al usuario; `app.tenant_id` no es identidad. |
+| Servicio Go | Actor, membresías vigentes, estados de Company/Operation/Account, tiempo, delegación, attach de Person y autorización exacta del endpoint. | Sustituir las FK/RLS con filtros de frontend. |
+| Auditoría | Evidencia de mutaciones confirmadas y denegaciones persistidas por canal separado. | Autorizar una acción por existir un registro histórico. |
+
+Una request sólo se permite cuando las tres primeras capas son compatibles. Un `ALLOW` de Go no puede escribir fuera de RLS y una fila visible por RLS no produce un `ALLOW` de Go por sí sola.
 
 ## 9. Administración y auditoría
 
-Toda operación administrativa debe:
+### 9.1 Mutación permitida
 
-1. validar el actor y scope;
+Toda operación administrativa permitida debe:
+
+1. validar actor, permiso y scope exacto;
 2. leer la versión actual, usando `If-Match`/versión cuando aplique;
 3. aplicar el cambio en una transacción;
-4. insertar `AdminAuditEvent` con actor, empresa/operación, acción, recurso, resultado, request ID y metadata mínima;
+4. insertar `AdminAuditEvent`, que representa sólo una mutación confirmada;
 5. confirmar cambio y auditoría juntas.
 
-Un error de auditoría hace fallar el cambio administrativo. Los handlers no escriben auditoría “después” de confirmar la mutación.
+Un error al insertar `AdminAuditEvent` hace fallar el cambio administrativo. Los handlers no escriben auditoría “después” de confirmar la mutación. `AdminAuditEvent` no tiene un evento `DENIED`: el resultado persistido allí es implícitamente `COMMITTED`.
 
-No se auditan secretos porque no se almacenan en este alcance. El `details` de auditoría debe contener diffs redacted, no payloads completos ni datos de otra empresa.
+### 9.2 Intento denegado
+
+Un intento denegado que deba persistir se registra en `AdminDeniedAttempt`, tabla separada y append-only:
+
+1. el evaluador deniega antes de iniciar una mutación, o marca el rollback;
+2. se abre una transacción separada, idealmente mediante un writer de auditoría dedicado;
+3. se persisten actor si está disponible, empresa/operación solicitadas como identificadores no confiables, acción, recurso, reason code, request ID y metadata redacted;
+4. se confirma esa transacción aunque la operación original haya sido revertida;
+5. si falla la persistencia de seguridad, nunca se convierte el `DENY` en `ALLOW`; se genera alerta técnica y se mantiene la respuesta denegada.
+
+`tp_runtime` no lee directamente esta tabla. Una función `SECURITY DEFINER` con argumentos acotados y propiedad de `tp_security_audit_writer` es la vía propuesta para insertar eventos sanitizados. Los lectores de seguridad tienen un permiso separado.
+
+No se registran secretos, tokens, passkeys, OTP, payloads completos, nombres, correos ni datos personales innecesarios. IP y metadata sólo se conservan si la política de seguridad/retención lo justifica.
+
+### 9.3 Revocación y concurrencia
+
+La revocación de role/permission se ejecuta con `SELECT ... FOR UPDATE`, cambia `lifecycle_status` a `REVOKED`, fija `revoked_at` y registra auditoría. Una nueva concesión usa un UUID distinto y sólo se inserta después de que la fila previa deje de estar `ACTIVE`. La expiración se normaliza a `EXPIRED`, fija `expired_at >= valid_until` y registra el cambio; el evaluador además compara `valid_until` con un `evaluation_time` del servidor.
 
 ## 10. Errores y contrato HTTP
 
@@ -213,3 +270,5 @@ No se crean endpoints `/webauthn/*`, tokens, cookies de sesión ni dispositivos 
 - **[P]** Tratamiento y retención de auditoría, incluyendo break-glass.
 - **[P]** Políticas de rate limit y aprobación dual para grants de alto riesgo.
 - **[P]** Recursos de instancia que requerirán `WorkAssignment` en fases posteriores.
+- **[P]** Versión mínima de PostgreSQL para los índices parciales `NULLS NOT DISTINCT`.
+- **[P]** Rol/función `SECURITY DEFINER` para persistir `AdminDeniedAttempt` sin otorgar lectura al runtime.

@@ -28,12 +28,15 @@ Clasificación: el modelo y el SQL son **[D] propuestos**; no se han ejecutado y
 | `driver_profile` | Identidad global | Perfil de participación como conductor. |
 | `company_membership` | Tenant | Pertenencia estable o vigente de una persona a una empresa. |
 | `operation_membership` | Tenant/operación | Pertenencia de una persona a una operación habilitada. |
-| `role` | Catálogo global | Rol compuesto, sin alcance por sí solo. |
+| `role` | Catálogo global | Rol compuesto. |
+| `role_scope` | Catálogo global | Scopes en los que un rol puede ser asignado. |
 | `permission` | Catálogo global | Acción sobre recurso. |
+| `permission_scope` | Catálogo global | Scopes en los que un permiso puede ser concedido. |
 | `role_permission` | Catálogo global | Composición de roles. |
 | `role_assignment` | Tenant o plataforma | Asignación de un rol a una persona con alcance y vigencia. |
 | `permission_grant` | Tenant o plataforma | Excepción `ALLOW` directa y auditada. |
-| `admin_audit_event` | Tenant o plataforma | Registro append-only de cambios administrativos. |
+| `admin_audit_event` | Tenant o plataforma | Registro append-only de mutaciones administrativas confirmadas. |
+| `admin_denied_attempt` | Seguridad/plataforma | Registro separado de intentos denegados que debe sobrevivir al rollback de la operación solicitada. |
 
 `driver_profile` no hace global un `driver_code` heredado. Si el producto necesita identificadores distintos por empresa, se agregará una tabla company-scoped posterior (`driver_identifier`) con procedencia y unicidad por empresa; ese dato seguirá siendo un localizador, nunca una credencial.
 
@@ -190,6 +193,13 @@ CREATE TABLE platform.role (
     CONSTRAINT role_code_shape_ck CHECK (code ~ '^[A-Z][A-Z0-9_]{1,63}$')
 );
 
+CREATE TABLE platform.role_scope (
+    role_code       text NOT NULL REFERENCES platform.role(code),
+    scope_type      text NOT NULL
+                    CHECK (scope_type IN ('PLATFORM', 'COMPANY', 'OPERATION')),
+    PRIMARY KEY (role_code, scope_type)
+);
+
 CREATE TABLE platform.permission (
     code            text PRIMARY KEY,
     resource        text NOT NULL,
@@ -202,6 +212,13 @@ CREATE TABLE platform.permission (
     UNIQUE (resource, action),
     CONSTRAINT permission_code_shape_ck
         CHECK (code ~ '^[a-z][a-z0-9_.-]{2,127}$')
+);
+
+CREATE TABLE platform.permission_scope (
+    permission_code text NOT NULL REFERENCES platform.permission(code),
+    scope_type      text NOT NULL
+                    CHECK (scope_type IN ('PLATFORM', 'COMPANY', 'OPERATION')),
+    PRIMARY KEY (permission_code, scope_type)
 );
 
 CREATE TABLE platform.role_permission (
@@ -221,13 +238,16 @@ CREATE TABLE platform.role_assignment (
     company_operation_id       uuid,
     valid_from                 timestamptz NOT NULL DEFAULT now(),
     valid_until                timestamptz,
+    lifecycle_status           text NOT NULL DEFAULT 'ACTIVE'
+                               CHECK (lifecycle_status IN ('ACTIVE', 'REVOKED', 'EXPIRED')),
     granted_by_user_account_id uuid REFERENCES platform.user_account(id),
     created_at                 timestamptz NOT NULL DEFAULT now(),
     revoked_at                 timestamptz,
-    UNIQUE NULLS NOT DISTINCT
-        (person_id, role_code, scope_type, company_id, company_operation_id),
+    expired_at                 timestamptz,
     FOREIGN KEY (company_id, company_operation_id)
         REFERENCES platform.company_operation(company_id, id),
+    FOREIGN KEY (role_code, scope_type)
+        REFERENCES platform.role_scope(role_code, scope_type),
     CONSTRAINT role_assignment_scope_ck CHECK (
         (scope_type = 'PLATFORM' AND company_id IS NULL AND company_operation_id IS NULL)
         OR
@@ -237,15 +257,30 @@ CREATE TABLE platform.role_assignment (
     ),
     CONSTRAINT role_assignment_dates_ck
         CHECK (valid_until IS NULL OR valid_until > valid_from),
-    CONSTRAINT role_assignment_revoked_ck
-        CHECK (revoked_at IS NULL OR revoked_at >= valid_from)
+    CONSTRAINT role_assignment_lifecycle_ck CHECK (
+        (lifecycle_status = 'ACTIVE' AND revoked_at IS NULL AND expired_at IS NULL)
+        OR
+        (lifecycle_status = 'REVOKED' AND revoked_at IS NOT NULL
+            AND revoked_at >= valid_from AND expired_at IS NULL)
+        OR
+        (lifecycle_status = 'EXPIRED' AND valid_until IS NOT NULL
+            AND revoked_at IS NULL AND expired_at IS NOT NULL
+            AND expired_at >= valid_until)
+    )
 );
+
+CREATE UNIQUE INDEX role_assignment_one_open_idx
+    ON platform.role_assignment
+        (person_id, role_code, scope_type, company_id, company_operation_id)
+        NULLS NOT DISTINCT
+    WHERE lifecycle_status = 'ACTIVE';
 
 CREATE INDEX role_assignment_company_scope_idx
     ON platform.role_assignment (company_id, scope_type, role_code);
 
 CREATE INDEX role_assignment_person_active_idx
-    ON platform.role_assignment (person_id, valid_until, revoked_at);
+    ON platform.role_assignment
+        (person_id, lifecycle_status, valid_until, revoked_at, expired_at);
 
 CREATE TABLE platform.permission_grant (
     id                         uuid PRIMARY KEY,
@@ -257,13 +292,16 @@ CREATE TABLE platform.permission_grant (
     company_operation_id       uuid,
     valid_from                 timestamptz NOT NULL DEFAULT now(),
     valid_until                timestamptz,
+    lifecycle_status           text NOT NULL DEFAULT 'ACTIVE'
+                               CHECK (lifecycle_status IN ('ACTIVE', 'REVOKED', 'EXPIRED')),
     granted_by_user_account_id uuid REFERENCES platform.user_account(id),
     created_at                 timestamptz NOT NULL DEFAULT now(),
     revoked_at                 timestamptz,
-    UNIQUE NULLS NOT DISTINCT
-        (person_id, permission_code, scope_type, company_id, company_operation_id),
+    expired_at                 timestamptz,
     FOREIGN KEY (company_id, company_operation_id)
         REFERENCES platform.company_operation(company_id, id),
+    FOREIGN KEY (permission_code, scope_type)
+        REFERENCES platform.permission_scope(permission_code, scope_type),
     CONSTRAINT permission_grant_scope_ck CHECK (
         (scope_type = 'PLATFORM' AND company_id IS NULL AND company_operation_id IS NULL)
         OR
@@ -273,15 +311,30 @@ CREATE TABLE platform.permission_grant (
     ),
     CONSTRAINT permission_grant_dates_ck
         CHECK (valid_until IS NULL OR valid_until > valid_from),
-    CONSTRAINT permission_grant_revoked_ck
-        CHECK (revoked_at IS NULL OR revoked_at >= valid_from)
+    CONSTRAINT permission_grant_lifecycle_ck CHECK (
+        (lifecycle_status = 'ACTIVE' AND revoked_at IS NULL AND expired_at IS NULL)
+        OR
+        (lifecycle_status = 'REVOKED' AND revoked_at IS NOT NULL
+            AND revoked_at >= valid_from AND expired_at IS NULL)
+        OR
+        (lifecycle_status = 'EXPIRED' AND valid_until IS NOT NULL
+            AND revoked_at IS NULL AND expired_at IS NOT NULL
+            AND expired_at >= valid_until)
+    )
 );
+
+CREATE UNIQUE INDEX permission_grant_one_open_idx
+    ON platform.permission_grant
+        (person_id, permission_code, scope_type, company_id, company_operation_id)
+        NULLS NOT DISTINCT
+    WHERE lifecycle_status = 'ACTIVE';
 
 CREATE INDEX permission_grant_company_scope_idx
     ON platform.permission_grant (company_id, scope_type, permission_code);
 
 CREATE INDEX permission_grant_person_active_idx
-    ON platform.permission_grant (person_id, valid_until, revoked_at);
+    ON platform.permission_grant
+        (person_id, lifecycle_status, valid_until, revoked_at, expired_at);
 
 CREATE TABLE platform.admin_audit_event (
     id                   uuid PRIMARY KEY,
@@ -292,10 +345,8 @@ CREATE TABLE platform.admin_audit_event (
     action               text NOT NULL,
     resource_type        text NOT NULL,
     resource_id          text,
-    outcome              text NOT NULL CHECK (outcome IN ('ALLOWED', 'DENIED')),
     request_id           text,
     remote_ip            inet,
-    user_agent           text,
     details              jsonb NOT NULL DEFAULT '{}'::jsonb
                          CHECK (jsonb_typeof(details) = 'object'),
     FOREIGN KEY (company_id, company_operation_id)
@@ -312,7 +363,34 @@ CREATE INDEX admin_audit_event_actor_time_idx
 
 CREATE INDEX admin_audit_event_action_time_idx
     ON platform.admin_audit_event (action, occurred_at DESC);
+
+CREATE TABLE platform.admin_denied_attempt (
+    id                   uuid PRIMARY KEY,
+    occurred_at          timestamptz NOT NULL DEFAULT now(),
+    actor_user_account_id uuid REFERENCES platform.user_account(id),
+    requested_company_id uuid,
+    requested_operation_id uuid,
+    action               text NOT NULL,
+    resource_type        text NOT NULL,
+    reason_code          text NOT NULL,
+    request_id           text,
+    remote_ip            inet,
+    details              jsonb NOT NULL DEFAULT '{}'::jsonb
+                         CHECK (jsonb_typeof(details) = 'object'),
+    -- Los identificadores solicitados no son FK: un intento contra un UUID
+    -- inexistente también debe poder registrarse sin crear una referencia.
+    CONSTRAINT denied_attempt_scope_ck
+        CHECK (requested_operation_id IS NULL OR requested_company_id IS NOT NULL)
+);
+
+CREATE INDEX admin_denied_attempt_time_idx
+    ON platform.admin_denied_attempt (occurred_at DESC);
+
+CREATE INDEX admin_denied_attempt_company_time_idx
+    ON platform.admin_denied_attempt (requested_company_id, occurred_at DESC);
 ```
+
+`remote_ip` es nullable y sólo se llena si la política de seguridad/retención lo aprueba; no se almacena `user_agent`. `details` debe contener únicamente códigos, diffs redacted y referencias necesarias para investigar.
 
 ### 3.1 Invariantes que requieren servicio transaccional
 
@@ -322,11 +400,29 @@ Algunas reglas cruzan estados temporales y no se expresan completamente con FK/c
 - una asignación `COMPANY` requiere membresía empresarial vigente;
 - una asignación `OPERATION` requiere membresía empresarial y operacional vigentes;
 - una persona `SUSPENDED` no debe recibir nuevas asignaciones;
-- un rol o permiso revocado no puede autorizar una operación posterior aunque la fila histórica permanezca;
+- una fila `role_assignment`/`permission_grant` `ACTIVE` sólo puede existir una vez para la misma persona, permiso/rol y scope;
+- una fila `REVOKED` o `EXPIRED` conserva historial y queda fuera del índice único de asignaciones abiertas;
+- una fila que pasó `valid_until` se normaliza a `EXPIRED` dentro de la transacción que intente reasignar; mientras no se normalice, se prefiere denegar una nueva concesión antes que crear dos estados abiertos;
+- un rol o permiso revocado/expirado no puede autorizar una operación posterior aunque la fila histórica permanezca;
 - el actor que concede un permiso debe tener autorización para conceder ese mismo alcance;
-- cada mutación administrativa y su auditoría se confirman en la misma transacción.
+- cada mutación administrativa y su `AdminAuditEvent` se confirman en la misma transacción;
+- un `AdminDeniedAttempt` se persiste por una ruta separada, después de la decisión de denegación, y no comparte la transacción que se revierte.
 
 Estas invariantes se prueban en repositorios y servicios; no se reemplazan por validación de frontend.
+
+### 3.2 Política de historial y expiración
+
+`role_assignment` y `permission_grant` son registros de concesiones, no un estado sobrescribible:
+
+1. una concesión nueva se inserta como `ACTIVE`;
+2. la expiración se determina por `valid_until` en el evaluador usando el reloj de la transacción/servidor, nunca por el índice;
+3. al detectar `valid_until <= transaction_timestamp()`, la transacción bloquea la fila con `FOR UPDATE` y la cambia a `EXPIRED`;
+4. una revocación bloquea la fila y la cambia a `REVOKED`, estableciendo `revoked_at`;
+5. sólo las filas `ACTIVE` participan en los índices únicos parciales;
+6. una reasignación posterior inserta una nueva fila con nuevo UUID y conserva la fila anterior;
+7. un proceso de reconciliación puede normalizar expiraciones, pero no es necesario para impedir una autorización porque el evaluador comprueba fechas.
+
+El índice no contiene `now()`: sólo evalúa el estado materializado `lifecycle_status = 'ACTIVE'`. `ACTIVE` significa “concesión abierta”; el evaluador todavía debe comprobar `valid_from` y `valid_until`, por lo que una concesión futura no es efectiva todavía. Si existe una fila ACTIVE cuya fecha ya expiró, no se crea una segunda fila; se normaliza primero dentro de una transacción. Esta elección prioriza no duplicar autorizaciones sobre la disponibilidad de una reasignación automática.
 
 ## 4. Catálogos iniciales — migración `000002`
 
@@ -353,11 +449,15 @@ La migración de seed propuesta debe insertar códigos estables, con `ON CONFLIC
 
 El rol no concede por sí mismo un scope distinto del asignado. La política de qué roles se pueden asignar en cada scope vive en el contrato de autorización, no en una comparación de nombres en el frontend.
 
+`role_scope` debe contener, como mínimo: `GLOBAL_ADMIN/PLATFORM`, `COMPANY_ADMIN/COMPANY`, `SUPERVISOR/OPERATION`, `DRIVER/OPERATION`, `ADMIN_OPERATOR/COMPANY` y `/OPERATION`, `MANAGEMENT/COMPANY` y `/OPERATION`, y `AUDITOR/PLATFORM`, `/COMPANY` y `/OPERATION`.
+
 ### Permisos mínimos
 
 ```text
+platform.company.create
+platform.catalog.read
+platform.role_assignment.manage
 company.read
-company.create
 company.update
 company.status.manage
 company.operation.read
@@ -373,16 +473,79 @@ role.assignment.manage
 permission.grant.read
 permission.grant.manage
 audit.read
+security.denied_attempt.read
 ```
+
+Los permisos con prefijo `platform.` sólo aplican a scope `PLATFORM`; `company.*` y `membership.*` requieren el scope empresarial definido por el contrato. La compatibilidad de cada permiso con el scope se valida en el servicio de autorización y en el catálogo seed; no se deduce por el nombre del rol.
+
+`permission_scope` registra esa compatibilidad explícitamente. Por ejemplo, `platform.company.create` y `platform.catalog.read` sólo admiten `PLATFORM`; `company.read` sólo admite `COMPANY`; `operation.membership.manage`, `role.assignment.manage`, `permission.grant.manage` y `audit.read` pueden admitir `COMPANY` u `OPERATION` según la política aprobada del endpoint. El scope del permiso es el scope requerido para autorizar la acción; no es una herencia automática del scope de la fila objetivo.
 
 Los permisos de negocio (`trip.*`, `form.*`, `gps.*`, etc.) quedan fuera de 1B.1.
 
 ## 5. RLS propuesta — migración `000003`
 
-RLS se habilitará sólo después de que el harness de aislamiento pase. El siguiente SQL es ilustrativo y debe revisarse contra la estrategia de roles DB antes de implementarse:
+### 5.1 Roles PostgreSQL separados
+
+**[D]** El bootstrap de la base, separado de las migraciones de aplicación, debe crear roles equivalentes a:
 
 ```sql
-CREATE FUNCTION platform.current_tenant_id()
+CREATE ROLE tp_owner NOLOGIN NOSUPERUSER NOBYPASSRLS;
+CREATE ROLE tp_migrator LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT;
+GRANT tp_owner TO tp_migrator;
+
+CREATE ROLE tp_runtime LOGIN NOSUPERUSER NOBYPASSRLS
+    NOCREATEDB NOCREATEROLE NOINHERIT;
+
+CREATE ROLE tp_security_audit_writer NOLOGIN NOSUPERUSER NOBYPASSRLS;
+```
+
+Los grants de runtime deben ser explícitos. Como mínimo, `tp_runtime` recibe `SELECT, INSERT, UPDATE` sólo en tablas necesarias y no recibe `DELETE`, `TRUNCATE`, `ALTER`, `DROP` ni `REFERENCES`. Para auditoría se aplica además:
+
+```sql
+REVOKE ALL ON platform.admin_audit_event FROM tp_runtime;
+GRANT SELECT, INSERT ON platform.admin_audit_event TO tp_runtime;
+REVOKE UPDATE, DELETE, TRUNCATE ON platform.admin_audit_event FROM tp_runtime;
+
+REVOKE ALL ON platform.admin_denied_attempt FROM tp_runtime;
+GRANT EXECUTE ON FUNCTION platform.record_denied_attempt(
+    uuid, uuid, uuid, text, text, text, text, inet, jsonb
+) TO tp_runtime;
+```
+
+La función `record_denied_attempt` será `SECURITY DEFINER`, tendrá `search_path` fijo (`platform, pg_catalog`), validará longitudes/códigos y será propiedad de `tp_security_audit_writer`. El runtime no obtiene `INSERT` directo ni `SELECT` sobre `admin_denied_attempt`.
+
+Reglas:
+
+- `tp_owner` es propietario de tablas, funciones y políticas, pero no es superusuario ni tiene `BYPASSRLS`;
+- `tp_migrator` es la única identidad operativa que puede hacer `SET ROLE tp_owner` para DDL aprobado; no se usa como runtime;
+- `tp_runtime` sólo recibe `USAGE` de schema y grants DML mínimos; no puede crear roles, bases, tablas, funciones ni alterar políticas;
+- `tp_runtime` no tiene `BYPASSRLS`, no es superusuario y nunca es miembro de `tp_owner`;
+- `tp_security_audit_writer` se usa únicamente detrás de una función `SECURITY DEFINER` para persistir intentos denegados sanitizados; no tiene login;
+- los tres roles no reutilizan credenciales entre la base nueva y `lmlogistics`;
+- el rol de lectura de `lmlogistics` es otra identidad, sólo lectura, y no pertenece a esta base.
+
+`FORCE ROW LEVEL SECURITY` se aplica a todas las tablas tenant-owned, incluso cuando el propietario ejecute DML. El migrador puede ejecutar DDL, pero no obtiene una vía silenciosa para leer o modificar todos los tenants.
+
+### 5.2 Contexto de transacción y límite de confianza
+
+**[D]** `app.tenant_id` y `app.access_mode` son sólo contexto de enrutamiento para RLS. No son prueba de identidad ni sustituyen la autorización Go.
+
+Antes de abrir una transacción, Go debe resolver el actor autenticado, validar el permiso y elegir uno de estos contextos:
+
+- `TENANT`: requiere `company_id` verificado y opcionalmente `operation_id` verificado;
+- `PLATFORM`: sólo para acciones del plano plataforma que no consultan datos tenant-owned;
+- contexto vacío: deny/no rows.
+
+El cliente no puede enviar estos valores como autoridad. El handler no copia un header a `set_config`; calcula el contexto después de `Authorize`. Toda query usa parámetros, no SQL construido con el valor del GUC. El pool debe ejecutar `SET LOCAL` dentro de una transacción y comprobar que rollback/commit no deja contexto en la conexión reutilizada.
+
+Esto no pretende que PostgreSQL autentique al usuario final: el rol `tp_runtime` es común a las requests. RLS reduce el impacto de un query sin filtro y prueba que una request no cruza el tenant seleccionado; la identidad y el permiso siguen siendo responsabilidad de Go. Si el threat model exige que PostgreSQL verifique identidad humana por sí mismo, se necesitaría otro diseño (roles por actor o claims firmados validados por DB), que queda fuera de 1B.1.
+
+### 5.3 Políticas propuestas
+
+El siguiente SQL es diseño, no una migración ejecutada. Las funciones se leen con `current_setting`, pero no autorizan por sí mismas.
+
+```sql
+CREATE FUNCTION platform.rls_tenant_id()
 RETURNS uuid
 LANGUAGE sql
 STABLE
@@ -390,64 +553,271 @@ AS $$
     SELECT NULLIF(current_setting('app.tenant_id', true), '')::uuid
 $$;
 
+CREATE FUNCTION platform.rls_access_mode()
+RETURNS text
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT NULLIF(current_setting('app.access_mode', true), '')
+$$;
+
 ALTER TABLE platform.company ENABLE ROW LEVEL SECURITY;
+ALTER TABLE platform.company FORCE ROW LEVEL SECURITY;
 ALTER TABLE platform.company_operation ENABLE ROW LEVEL SECURITY;
+ALTER TABLE platform.company_operation FORCE ROW LEVEL SECURITY;
+ALTER TABLE platform.person ENABLE ROW LEVEL SECURITY;
+ALTER TABLE platform.person FORCE ROW LEVEL SECURITY;
+ALTER TABLE platform.user_account ENABLE ROW LEVEL SECURITY;
+ALTER TABLE platform.user_account FORCE ROW LEVEL SECURITY;
+ALTER TABLE platform.driver_profile ENABLE ROW LEVEL SECURITY;
+ALTER TABLE platform.driver_profile FORCE ROW LEVEL SECURITY;
 ALTER TABLE platform.company_membership ENABLE ROW LEVEL SECURITY;
+ALTER TABLE platform.company_membership FORCE ROW LEVEL SECURITY;
 ALTER TABLE platform.operation_membership ENABLE ROW LEVEL SECURITY;
+ALTER TABLE platform.operation_membership FORCE ROW LEVEL SECURITY;
 ALTER TABLE platform.role_assignment ENABLE ROW LEVEL SECURITY;
+ALTER TABLE platform.role_assignment FORCE ROW LEVEL SECURITY;
 ALTER TABLE platform.permission_grant ENABLE ROW LEVEL SECURITY;
+ALTER TABLE platform.permission_grant FORCE ROW LEVEL SECURITY;
 ALTER TABLE platform.admin_audit_event ENABLE ROW LEVEL SECURITY;
+ALTER TABLE platform.admin_audit_event FORCE ROW LEVEL SECURITY;
+ALTER TABLE platform.admin_denied_attempt ENABLE ROW LEVEL SECURITY;
+ALTER TABLE platform.admin_denied_attempt FORCE ROW LEVEL SECURITY;
 
-CREATE POLICY company_tenant_policy
-    ON platform.company
-    USING (id = platform.current_tenant_id())
-    WITH CHECK (id = platform.current_tenant_id());
+-- Company: lectura/edición sólo con tenant verificado; creación es una
+-- operación PLATFORM explícita y no habilita lectura global de la tabla.
+CREATE POLICY company_tenant_select_update
+    ON platform.company FOR ALL TO tp_runtime
+    USING (platform.rls_access_mode() = 'TENANT'
+           AND id = platform.rls_tenant_id())
+    WITH CHECK (platform.rls_access_mode() = 'TENANT'
+                AND id = platform.rls_tenant_id());
 
-CREATE POLICY company_operation_tenant_policy
-    ON platform.company_operation
-    USING (company_id = platform.current_tenant_id())
-    WITH CHECK (company_id = platform.current_tenant_id());
+CREATE POLICY company_platform_create
+    ON platform.company FOR INSERT TO tp_runtime
+    WITH CHECK (platform.rls_access_mode() = 'PLATFORM'
+                AND platform.rls_tenant_id() IS NULL);
 
-CREATE POLICY company_membership_tenant_policy
-    ON platform.company_membership
-    USING (company_id = platform.current_tenant_id())
-    WITH CHECK (company_id = platform.current_tenant_id());
+-- Todas las relaciones empresariales requieren contexto TENANT.
+CREATE POLICY company_operation_tenant
+    ON platform.company_operation FOR ALL TO tp_runtime
+    USING (platform.rls_access_mode() = 'TENANT'
+           AND company_id = platform.rls_tenant_id())
+    WITH CHECK (platform.rls_access_mode() = 'TENANT'
+                AND company_id = platform.rls_tenant_id());
 
-CREATE POLICY operation_membership_tenant_policy
-    ON platform.operation_membership
-    USING (company_id = platform.current_tenant_id())
-    WITH CHECK (company_id = platform.current_tenant_id());
+CREATE POLICY company_membership_tenant
+    ON platform.company_membership FOR ALL TO tp_runtime
+    USING (platform.rls_access_mode() = 'TENANT'
+           AND company_id = platform.rls_tenant_id())
+    WITH CHECK (platform.rls_access_mode() = 'TENANT'
+                AND company_id = platform.rls_tenant_id());
 
-CREATE POLICY role_assignment_tenant_policy
-    ON platform.role_assignment
-    USING (company_id = platform.current_tenant_id())
-    WITH CHECK (company_id = platform.current_tenant_id());
+CREATE POLICY operation_membership_tenant
+    ON platform.operation_membership FOR ALL TO tp_runtime
+    USING (platform.rls_access_mode() = 'TENANT'
+           AND company_id = platform.rls_tenant_id())
+    WITH CHECK (platform.rls_access_mode() = 'TENANT'
+                AND company_id = platform.rls_tenant_id());
 
-CREATE POLICY permission_grant_tenant_policy
-    ON platform.permission_grant
-    USING (company_id = platform.current_tenant_id())
-    WITH CHECK (company_id = platform.current_tenant_id());
+-- Person, UserAccount y DriverProfile son globales en identidad, pero sólo
+-- son visibles cuando la persona tiene membership en el tenant actual.
+CREATE POLICY person_visible_in_tenant
+    ON platform.person FOR SELECT TO tp_runtime
+    USING (
+        platform.rls_access_mode() = 'TENANT'
+        AND EXISTS (
+            SELECT 1
+            FROM platform.company_membership cm
+            WHERE cm.person_id = person.id
+              AND cm.company_id = platform.rls_tenant_id()
+        )
+    );
 
-CREATE POLICY audit_event_tenant_policy
-    ON platform.admin_audit_event
-    USING (company_id = platform.current_tenant_id())
-    WITH CHECK (company_id = platform.current_tenant_id());
+CREATE POLICY person_write_in_tenant
+    ON platform.person FOR INSERT TO tp_runtime
+    WITH CHECK (platform.rls_access_mode() = 'TENANT');
+
+CREATE POLICY person_update_in_tenant
+    ON platform.person FOR UPDATE TO tp_runtime
+    USING (
+        platform.rls_access_mode() = 'TENANT'
+        AND EXISTS (
+            SELECT 1 FROM platform.company_membership cm
+            WHERE cm.person_id = person.id
+              AND cm.company_id = platform.rls_tenant_id()
+        )
+    )
+    WITH CHECK (platform.rls_access_mode() = 'TENANT');
+
+CREATE POLICY user_account_visible_in_tenant
+    ON platform.user_account FOR SELECT TO tp_runtime
+    USING (
+        platform.rls_access_mode() = 'TENANT'
+        AND EXISTS (
+            SELECT 1
+            FROM platform.company_membership cm
+            WHERE cm.person_id = user_account.person_id
+              AND cm.company_id = platform.rls_tenant_id()
+        )
+    );
+
+CREATE POLICY user_account_write_in_tenant
+    ON platform.user_account FOR INSERT TO tp_runtime
+    WITH CHECK (platform.rls_access_mode() = 'TENANT');
+
+CREATE POLICY user_account_update_in_tenant
+    ON platform.user_account FOR UPDATE TO tp_runtime
+    USING (
+        platform.rls_access_mode() = 'TENANT'
+        AND EXISTS (
+            SELECT 1 FROM platform.company_membership cm
+            WHERE cm.person_id = user_account.person_id
+              AND cm.company_id = platform.rls_tenant_id()
+        )
+    )
+    WITH CHECK (platform.rls_access_mode() = 'TENANT');
+
+CREATE POLICY driver_profile_visible_in_tenant
+    ON platform.driver_profile FOR SELECT TO tp_runtime
+    USING (
+        platform.rls_access_mode() = 'TENANT'
+        AND EXISTS (
+            SELECT 1
+            FROM platform.company_membership cm
+            WHERE cm.person_id = driver_profile.person_id
+              AND cm.company_id = platform.rls_tenant_id()
+        )
+    );
+
+CREATE POLICY driver_profile_write_in_tenant
+    ON platform.driver_profile FOR INSERT TO tp_runtime
+    WITH CHECK (platform.rls_access_mode() = 'TENANT');
+
+CREATE POLICY driver_profile_update_in_tenant
+    ON platform.driver_profile FOR UPDATE TO tp_runtime
+    USING (
+        platform.rls_access_mode() = 'TENANT'
+        AND EXISTS (
+            SELECT 1 FROM platform.company_membership cm
+            WHERE cm.person_id = driver_profile.person_id
+              AND cm.company_id = platform.rls_tenant_id()
+        )
+    )
+    WITH CHECK (platform.rls_access_mode() = 'TENANT');
+
+-- Las filas PLATFORM se gestionan sólo en modo PLATFORM. Las filas de
+-- empresa/operación siguen requiriendo TENANT; no existe herencia implícita.
+CREATE POLICY role_assignment_scoped
+    ON platform.role_assignment FOR ALL TO tp_runtime
+    USING (
+        (scope_type = 'PLATFORM'
+         AND platform.rls_access_mode() = 'PLATFORM'
+         AND company_id IS NULL)
+        OR
+        (scope_type <> 'PLATFORM'
+         AND platform.rls_access_mode() = 'TENANT'
+         AND company_id = platform.rls_tenant_id())
+    )
+    WITH CHECK (
+        (scope_type = 'PLATFORM'
+         AND platform.rls_access_mode() = 'PLATFORM'
+         AND company_id IS NULL)
+        OR
+        (scope_type <> 'PLATFORM'
+         AND platform.rls_access_mode() = 'TENANT'
+         AND company_id = platform.rls_tenant_id())
+    );
+
+CREATE POLICY permission_grant_scoped
+    ON platform.permission_grant FOR ALL TO tp_runtime
+    USING (
+        (scope_type = 'PLATFORM'
+         AND platform.rls_access_mode() = 'PLATFORM'
+         AND company_id IS NULL)
+        OR
+        (scope_type <> 'PLATFORM'
+         AND platform.rls_access_mode() = 'TENANT'
+         AND company_id = platform.rls_tenant_id())
+    )
+    WITH CHECK (
+        (scope_type = 'PLATFORM'
+         AND platform.rls_access_mode() = 'PLATFORM'
+         AND company_id IS NULL)
+        OR
+        (scope_type <> 'PLATFORM'
+         AND platform.rls_access_mode() = 'TENANT'
+         AND company_id = platform.rls_tenant_id())
+    );
+
+-- Los eventos de cambios globales llevan company_id NULL. Un administrador
+-- global debe seleccionar tenant para auditar o mutar datos de esa empresa.
+CREATE POLICY audit_event_scoped
+    ON platform.admin_audit_event FOR SELECT TO tp_runtime
+    USING (
+        (platform.rls_access_mode() = 'PLATFORM' AND company_id IS NULL)
+        OR
+        (platform.rls_access_mode() = 'TENANT'
+         AND company_id = platform.rls_tenant_id())
+    );
+
+CREATE POLICY audit_event_insert_scoped
+    ON platform.admin_audit_event FOR INSERT TO tp_runtime
+    WITH CHECK (
+        (platform.rls_access_mode() = 'PLATFORM' AND company_id IS NULL)
+        OR
+        (platform.rls_access_mode() = 'TENANT'
+         AND company_id = platform.rls_tenant_id())
+    );
+
+-- El runtime no lee directamente los intentos denegados. Una función
+-- SECURITY DEFINER, propiedad de tp_security_audit_writer, inserta sólo
+-- campos sanitizados en una transacción independiente.
+CREATE POLICY denied_attempt_writer
+    ON platform.admin_denied_attempt FOR INSERT TO tp_security_audit_writer
+    WITH CHECK (true);
 ```
 
-En la implementación deberán agregarse políticas para `person`, `user_account` y `driver_profile` basadas en una relación visible con el tenant, evitando recursión de políticas. Las filas `PLATFORM` no deben aparecer en un contexto tenant normal; el acceso global requiere una ruta de plataforma explícita, privilegios separados y auditoría.
+No se crean policies para `operation_type`, `role`, `role_scope`, `permission`, `permission_scope` o `role_permission`: son catálogos globales, de sólo lectura para runtime, y no contienen datos de empresas. `admin_denied_attempt` no tiene policy de lectura para `tp_runtime`; un lector de seguridad separado consulta mediante una ruta auditada.
 
-RLS con `current_setting` es una barrera adicional, no prueba de identidad. La aplicación debe verificar actor, empresa y operación antes de establecer el contexto. El pool debe probar que el contexto no sobrevive a una transacción.
+`person`, `user_account` y `driver_profile` requieren especial cuidado: sus políticas de lectura consultan `company_membership`, cuya propia policy ya filtra por tenant. El servicio crea la persona y su membership en una transacción; la policy de INSERT no convierte una persona recién insertada en visible para otro tenant. No se debe agregar una policy global para esas tablas.
+
+`FORCE ROW LEVEL SECURITY` evita que `tp_owner` lea o escriba saltándose policies por ser propietario. El propietario sólo se usa para DDL y funciones controladas. Las tablas de auditoría no reciben `UPDATE` ni `DELETE` de `tp_runtime`; los cambios administrativos no pueden reescribir su historia.
+
+### 5.4 Acceso PLATFORM explícito
+
+El modo `PLATFORM` no es un comodín para datos empresariales. Sin `company_id` seleccionado se permiten únicamente:
+
+- crear una empresa nueva (`platform.company.create`);
+- leer catálogos globales (`platform.catalog.read`);
+- administrar asignaciones de scope `PLATFORM` con permiso explícito, duración y auditoría reforzada;
+- escribir/leer eventos globales de plataforma con `company_id NULL`;
+- registrar o consultar intentos denegados mediante el canal de seguridad autorizado.
+
+Requieren tenant verificable y contexto `TENANT`, incluso para `GLOBAL_ADMIN`:
+
+- leer, editar, suspender o archivar una empresa existente;
+- habilitar/suspender `CompanyOperation`;
+- consultar o modificar `Person`, `UserAccount`, `DriverProfile` y memberships;
+- asignar roles/permisos con scope `COMPANY` u `OPERATION`;
+- consultar auditoría asociada a una empresa;
+- cualquier dato operativo futuro.
+
+Un administrador global puede recibir un grant temporal de scope `COMPANY` u `OPERATION` para soporte, pero debe seleccionar el tenant, cumplir el mismo algoritmo de autorización y quedar auditado. `PLATFORM` no se hereda a `COMPANY` ni a `OPERATION`.
 
 ## 6. Down migration propuesta
 
 El `down` de `000001` debe ejecutarse en orden inverso y sólo en entornos autorizados:
 
 ```sql
+DROP TABLE IF EXISTS platform.admin_denied_attempt;
 DROP TABLE IF EXISTS platform.admin_audit_event;
 DROP TABLE IF EXISTS platform.permission_grant;
 DROP TABLE IF EXISTS platform.role_assignment;
 DROP TABLE IF EXISTS platform.role_permission;
+DROP TABLE IF EXISTS platform.permission_scope;
 DROP TABLE IF EXISTS platform.permission;
+DROP TABLE IF EXISTS platform.role_scope;
 DROP TABLE IF EXISTS platform.role;
 DROP TABLE IF EXISTS platform.operation_membership;
 DROP TABLE IF EXISTS platform.company_membership;
