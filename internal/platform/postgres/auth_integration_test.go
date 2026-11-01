@@ -353,6 +353,188 @@ func testAuthFoundation(t *testing.T, ctx context.Context, runtimePool, authPool
 		}
 	})
 
+	t.Run("global_revoke_rejects_expired_token", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			hashByte byte
+			absolute bool
+		}{
+			{name: "idle_expired", hashByte: 0xb1},
+			{name: "absolute_expired", hashByte: 0xb2, absolute: true},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				hash := bytes.Repeat([]byte{tc.hashByte}, 32)
+				session, err := createSyntheticSession(ctx, adminPool, auth.CreateSessionRequest{
+					ID:            uuid.New(),
+					UserAccountID: fixture.UserAAdmin,
+					TokenHash:     hash,
+					Policy:        policy,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var beforeEpoch int64
+				if err := adminPool.QueryRow(ctx, `SELECT session_epoch FROM platform.user_account WHERE id = $1`, fixture.UserAAdmin).Scan(&beforeEpoch); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := adminPool.Exec(ctx, `
+					UPDATE platform.auth_session
+					SET created_at = clock_timestamp() - interval '2 hours',
+					    last_seen_at = clock_timestamp() - interval '2 hours',
+					    idle_expires_at = clock_timestamp() - interval '2 seconds',
+					    absolute_expires_at = CASE WHEN $2 THEN clock_timestamp() - interval '1 second' ELSE clock_timestamp() + interval '2 hours' END
+					WHERE id = $1
+				`, session.ID, tc.absolute); err != nil {
+					t.Fatal(err)
+				}
+				var createdAt, idleExpiresAt, absoluteExpiresAt time.Time
+				if err := adminPool.QueryRow(ctx, `
+					SELECT created_at, idle_expires_at, absolute_expires_at
+					FROM platform.auth_session WHERE id = $1
+				`, session.ID).Scan(&createdAt, &idleExpiresAt, &absoluteExpiresAt); err != nil {
+					t.Fatal(err)
+				}
+				if !createdAt.Before(time.Now()) || !idleExpiresAt.Before(time.Now()) || (tc.absolute && !absoluteExpiresAt.Before(time.Now())) {
+					t.Fatalf("expired fixture was not in the past: created_at=%s idle_expires_at=%s absolute_expires_at=%s", createdAt, idleExpiresAt, absoluteExpiresAt)
+				}
+				if err := repository.RevokeAllSessions(ctx, hash, "expired-global-revoke"); !errors.Is(err, pgx.ErrNoRows) {
+					t.Fatalf("expected expired token to be rejected, got %v", err)
+				}
+				var afterEpoch int64
+				var status string
+				if err := adminPool.QueryRow(ctx, `SELECT session_epoch FROM platform.user_account WHERE id = $1`, fixture.UserAAdmin).Scan(&afterEpoch); err != nil {
+					t.Fatal(err)
+				}
+				if err := adminPool.QueryRow(ctx, `SELECT status FROM platform.auth_session WHERE id = $1`, session.ID).Scan(&status); err != nil {
+					t.Fatal(err)
+				}
+				if afterEpoch != beforeEpoch || status != "ACTIVE" {
+					t.Fatalf("expired token changed state: epoch %d -> %d, status=%s", beforeEpoch, afterEpoch, status)
+				}
+			})
+		}
+	})
+
+	t.Run("global_revoke_rejects_stale_epoch", func(t *testing.T) {
+		hash := bytes.Repeat([]byte{0xb3}, 32)
+		session, err := createSyntheticSession(ctx, adminPool, auth.CreateSessionRequest{
+			ID:            uuid.New(),
+			UserAccountID: fixture.UserAAdmin,
+			TokenHash:     hash,
+			Policy:        policy,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := adminPool.Exec(ctx, `
+			UPDATE platform.user_account
+			SET session_epoch = session_epoch + 1
+			WHERE id = $1
+		`, fixture.UserAAdmin); err != nil {
+			t.Fatal(err)
+		}
+		var beforeEpoch int64
+		if err := adminPool.QueryRow(ctx, `SELECT session_epoch FROM platform.user_account WHERE id = $1`, fixture.UserAAdmin).Scan(&beforeEpoch); err != nil {
+			t.Fatal(err)
+		}
+		if err := repository.RevokeAllSessions(ctx, hash, "stale-epoch-global-revoke"); !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("expected stale epoch token to be rejected, got %v", err)
+		}
+		var afterEpoch int64
+		var status string
+		if err := adminPool.QueryRow(ctx, `SELECT session_epoch FROM platform.user_account WHERE id = $1`, fixture.UserAAdmin).Scan(&afterEpoch); err != nil {
+			t.Fatal(err)
+		}
+		if err := adminPool.QueryRow(ctx, `SELECT status FROM platform.auth_session WHERE id = $1`, session.ID).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if afterEpoch != beforeEpoch || status != "ACTIVE" {
+			t.Fatalf("stale token changed state: epoch %d -> %d, status=%s", beforeEpoch, afterEpoch, status)
+		}
+	})
+
+	t.Run("global_revoke_rejects_revoked_token", func(t *testing.T) {
+		hash := bytes.Repeat([]byte{0xb4}, 32)
+		session, err := createSyntheticSession(ctx, adminPool, auth.CreateSessionRequest{
+			ID:            uuid.New(),
+			UserAccountID: fixture.UserAAdmin,
+			TokenHash:     hash,
+			Policy:        policy,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := repository.RevokeSession(ctx, session.ID, hash, "before-global-revoke"); err != nil {
+			t.Fatal(err)
+		}
+		var beforeEpoch int64
+		if err := adminPool.QueryRow(ctx, `SELECT session_epoch FROM platform.user_account WHERE id = $1`, fixture.UserAAdmin).Scan(&beforeEpoch); err != nil {
+			t.Fatal(err)
+		}
+		if err := repository.RevokeAllSessions(ctx, hash, "revoked-global-revoke"); !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("expected revoked token to be rejected, got %v", err)
+		}
+		var afterEpoch int64
+		if err := adminPool.QueryRow(ctx, `SELECT session_epoch FROM platform.user_account WHERE id = $1`, fixture.UserAAdmin).Scan(&afterEpoch); err != nil {
+			t.Fatal(err)
+		}
+		if afterEpoch != beforeEpoch {
+			t.Fatalf("revoked token changed epoch: %d -> %d", beforeEpoch, afterEpoch)
+		}
+	})
+
+	t.Run("concurrent_global_revocation_has_one_winner", func(t *testing.T) {
+		hash := bytes.Repeat([]byte{0xb5}, 32)
+		if _, err := createSyntheticSession(ctx, adminPool, auth.CreateSessionRequest{
+			ID:            uuid.New(),
+			UserAccountID: fixture.UserAAdmin,
+			TokenHash:     hash,
+			Policy:        policy,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		var beforeEpoch int64
+		if err := adminPool.QueryRow(ctx, `SELECT session_epoch FROM platform.user_account WHERE id = $1`, fixture.UserAAdmin).Scan(&beforeEpoch); err != nil {
+			t.Fatal(err)
+		}
+		start := make(chan struct{})
+		results := make(chan error, 2)
+		var wg sync.WaitGroup
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				results <- repository.RevokeAllSessions(ctx, hash, "concurrent-global-revoke")
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+		var successes, noRows int
+		for err := range results {
+			switch {
+			case err == nil:
+				successes++
+			case errors.Is(err, pgx.ErrNoRows):
+				noRows++
+			default:
+				t.Fatalf("unexpected concurrent global revoke error: %v", err)
+			}
+		}
+		if successes != 1 || noRows != 1 {
+			t.Fatalf("expected one global revoke winner and one invalidated-token rejection, successes=%d noRows=%d", successes, noRows)
+		}
+		var afterEpoch int64
+		if err := adminPool.QueryRow(ctx, `SELECT session_epoch FROM platform.user_account WHERE id = $1`, fixture.UserAAdmin).Scan(&afterEpoch); err != nil {
+			t.Fatal(err)
+		}
+		if afterEpoch != beforeEpoch+1 {
+			t.Fatalf("concurrent global revoke incremented epoch more than once: %d -> %d", beforeEpoch, afterEpoch)
+		}
+	})
+
 	t.Run("audit_rollback", func(t *testing.T) {
 		sessionID := uuid.New()
 		callbackErr := withAccessReturningError(ctx, adminPool, tenancy.Platform(), func(tx pgx.Tx) error {

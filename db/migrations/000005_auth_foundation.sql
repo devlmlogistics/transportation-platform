@@ -667,14 +667,19 @@ SET search_path = pg_catalog, platform
 AS $$
 DECLARE
     subject_user_account_id uuid;
+    source_session_id uuid;
     previous_epoch bigint;
     v_revoked_at timestamptz;
+    v_now timestamptz;
     revoked_count integer;
 BEGIN
     IF p_audit_id IS NULL OR octet_length(p_token_hash) <> 32 THEN
         RETURN 0;
     END IF;
 
+    -- First discover the account without locking it. The account lock and the
+    -- second session lookup below establish the serialization point and
+    -- revalidate all session facts before the epoch changes.
     SELECT s.user_account_id INTO subject_user_account_id
     FROM platform.auth_session AS s
     WHERE s.token_hash = p_token_hash
@@ -688,6 +693,22 @@ BEGIN
     SELECT ua.session_epoch INTO previous_epoch
     FROM platform.user_account AS ua
     WHERE ua.id = subject_user_account_id
+      AND ua.status = 'ACTIVE'
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN 0;
+    END IF;
+
+    v_now := clock_timestamp();
+    SELECT s.id INTO source_session_id
+    FROM platform.auth_session AS s
+    WHERE s.token_hash = p_token_hash
+      AND s.user_account_id = subject_user_account_id
+      AND s.status = 'ACTIVE'
+      AND s.session_epoch = previous_epoch
+      AND s.idle_expires_at > v_now
+      AND s.absolute_expires_at > v_now
     FOR UPDATE;
 
     IF NOT FOUND THEN

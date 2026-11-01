@@ -142,3 +142,11 @@ Se considera cerrado el alcance técnico cuando la rama contiene esta migración
 - **[V]** Los eventos de creación, consumo y revocación se escriben dentro de sus funciones internas con tipo y outcome fijos. `record_auth_security_audit` queda como placeholder propiedad de `tp_owner`, sin `EXECUTE` para roles runtime.
 - **[V]** `AuthRepository.WriteSecurityAudit` falla cerrado con `ErrSecurityAuditBoundaryClosed`; no acepta entradas de un futuro handler HTTP ni permite suplantar actor, subject u outcome en esta fase.
 - **[D]** Fase 1B.2-B deberá verificar explícitamente credenciales, derivar la cuenta desde esa evidencia y autorizar la emisión antes de conceder acceso a `create_auth_session` mediante una frontera revisada.
+
+## 12. Revocación global final
+
+- **[V]** `platform.revoke_all_auth_sessions` obtiene la cuenta a partir de un token activo, bloquea la fila de `user_account` y exige que la cuenta permanezca activa.
+- **[V]** Antes de incrementar `session_epoch`, revalida bajo bloqueo la misma sesión con `status = ACTIVE`, `session_epoch` vigente y `idle_expires_at`/`absolute_expires_at` posteriores al reloj del servidor.
+- **[V]** Un token expirado, revocado o con epoch obsoleto devuelve cero cambios; no incrementa el epoch ni revoca otras sesiones. Dos solicitudes concurrentes con el mismo token producen un único ganador y una segunda solicitud rechazada por token invalidado.
+- **[V]** La revocación individual y el evento exitoso `SESSION_REVOKED_ALL` permanecen sin cambios; las mutaciones y su auditoría siguen siendo atómicas.
+- **[V]** La suite PostgreSQL efímera cubre expiración idle y absoluta, epoch obsoleto, token ya revocado y carrera concurrente con incremento único del epoch.
