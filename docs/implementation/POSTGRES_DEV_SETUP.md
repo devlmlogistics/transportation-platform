@@ -27,17 +27,18 @@ DATABASE_SSLMODE
 
 Los valores sensibles se mantienen sólo en `.env.local`, que está excluido de Git. Nunca se imprimen contraseñas ni DSN completos.
 
-Para este entorno se utilizan tres DSN transitorios, construidos en memoria a partir de la misma base y puerto:
+Para este entorno se utilizan cuatro DSN transitorios, construidos en memoria a partir de la misma base y puerto:
 
 | Uso | Usuario PostgreSQL | Regla |
 |---|---|---|
 | Goose y comprobación de migraciones | `tp_migrator` | Único usuario autorizado para aplicar Goose UP. No es runtime. |
 | Aplicación | `tp_runtime` | Pool de la aplicación. Sin `BYPASSRLS`, superusuario ni acceso directo a autenticación. |
 | Contratos internos de autenticación | `tp_auth_runtime` | Pool separado. Sin DML directo sobre tablas de autenticación o dispositivos. |
+| Bootstrap explícito | `tp_bootstrap_runtime` | Pool exclusivo de `cmd/bootstrap`; sólo recibe EXECUTE sobre las dos funciones de bootstrap. No se abre desde `cmd/platform`. |
 
-**[D]** No se agregan DSN persistentes al repositorio. Las contraseñas por rol deben inyectarse desde la configuración privada local o un gestor de secretos. El `Config.Load` actual sólo consume la tupla `DATABASE_*`; por ello, al iniciar la aplicación debe sobrescribirse esa tupla con `tp_runtime`, nunca con `tp_migrator`.
+**[V]** No se agregan DSN persistentes al repositorio. La configuración de Fase 1B.2-B admite `DATABASE_RUNTIME_USER`, `DATABASE_RUNTIME_PASSWORD`, `DATABASE_AUTH_USER` y `DATABASE_AUTH_PASSWORD` además de la tupla de Goose; el servidor exige `tp_runtime` y `tp_auth_runtime` cuando se habilita autenticación online.
 
-**[P]** Antes de conectar pools productivos de autenticación, se debe formalizar en la configuración de runtime el nombre de las credenciales separadas para `tp_auth_runtime`. En Fase 1B.2-A no se habilita login ni emisión de sesiones.
+**[D]** `AUTH_ONLINE_ENABLED` y `ADMIN_HTTP_ENABLED` permanecen desactivados por defecto. La aplicación no usa `tp_migrator` como runtime ni ejecuta migraciones al arrancar.
 
 ## 3. Precondiciones verificadas
 
@@ -48,6 +49,7 @@ Para este entorno se utilizan tres DSN transitorios, construidos en memoria a pa
 - **[V]** El esquema `platform` existe y su propietario es `tp_owner`.
 - **[V]** `tp_migrator` pertenece a `tp_owner` y `tp_security_audit_writer`.
 - **[V]** `tp_owner`, `tp_migrator`, `tp_runtime`, `tp_auth_runtime` y `tp_security_audit_writer` no son superusuarios ni tienen `BYPASSRLS`.
+- **[V]** El preflight y postflight del 2026-11-01 confirmaron `current_user=tp_migrator`, `current_database=transportation_platform_dev` y `rolcreaterole=false`; `tp_bootstrap_runtime` existe, puede conectarse, no tiene superusuario/BYPASSRLS/CREATEDB/CREATEROLE y posee CONNECT/USAGE.
 - **[V]** Antes de migrar no había relaciones, funciones ni `platform.goose_db_version` en el esquema `platform`.
 
 ## 4. Migraciones aplicadas
@@ -60,9 +62,11 @@ Se ejecutó únicamente Goose UP desde `db/migrations`, usando `tp_migrator` y l
 000003_platform_rls.sql
 000004_identity_rls_audit_hardening.sql
 000005_auth_foundation.sql
+000006_online_auth.sql
 ```
 
-- **[V]** Goose terminó en la versión 5.
+- **[V]** Goose terminó en la versión 7 después de aplicar únicamente `000007_auth_boundary_hardening.sql` pendiente por TCP local como `tp_migrator`; no se ejecutó bootstrap ni se creó ningún administrador real.
+- **[V]** La migración fue aplicada sólo después de que el administrador provisionó `tp_bootstrap_runtime`; no se usó `postgres` ni otro superusuario.
 - **[V]** La fuente canónica continúa siendo `db/migrations`.
 - **[V]** No se modificaron las migraciones aprobadas.
 - **[D]** En cambios futuros sólo se ejecutará `goose up` explícito. Una migración ya aplicada no se edita; las correcciones requieren una nueva versión.
@@ -85,8 +89,10 @@ go run github.com/pressly/goose/v3/cmd/goose@v3.24.3 `
 - **[V]** `tp_auth_runtime` no tiene DML directo sobre tablas empresariales, de identidad, autenticación, dispositivos ni auditoría.
 - **[V]** Las funciones de autenticación son propiedad de `tp_owner` y están marcadas `SECURITY DEFINER` con `search_path` seguro.
 - **[V]** `tp_runtime` no tiene `EXECUTE` sobre las funciones de autenticación.
-- **[V]** `tp_auth_runtime` puede ejecutar sólo los contratos estrechos previstos: resolver sesiones, crear/consumir challenges y revocar sesiones. No puede ejecutar `create_auth_session` ni `record_auth_security_audit`.
-- **[V]** La emisión arbitraria de sesiones permanece cerrada.
+- **[V]** `bootstrap_control`, `auth_password_verification` y `auth_session` tienen RLS y FORCE RLS; las funciones nuevas son `SECURITY DEFINER`, propiedad de `tp_owner` y fijan `search_path=pg_catalog, platform`.
+- **[V]** `tp_bootstrap_runtime` sólo tiene EXECUTE sobre las dos funciones de bootstrap, no tiene DML directo sobre tablas sensibles, y `tp_runtime`/`tp_auth_runtime` no tienen EXECUTE sobre ellas. Las pruebas negativas directas y concurrentes se ejecutaron sólo en PostgreSQL efímero.
+- **[V]** `tp_auth_runtime` puede ejecutar sólo los contratos estrechos previstos: resolver credenciales y sesiones, rate limit, consumir grants, revocar, cambiar contexto, aceptar invitaciones y registrar fallos cerrados. No puede ejecutar bootstrap, `create_auth_session` ni `record_auth_security_audit`.
+- **[V]** `tp_runtime` sólo registra grants de password verificados mediante la función de handoff; no puede emitir sesiones. La emisión arbitraria de sesiones permanece cerrada.
 
 La validación se realizó mediante `has_table_privilege`, `has_function_privilege`, `pg_class.relrowsecurity`, `pg_class.relforcerowsecurity`, `pg_proc.prosecdef` y comprobación del propietario. No se leyeron filas sensibles ni se alteró información de negocio.
 
@@ -97,7 +103,7 @@ La validación se realizó mediante `has_table_privilege`, `has_function_privile
 3. Ejecutar pruebas completas con el harness efímero PostgreSQL 16.
 4. Confirmar que la base destino es exactamente `transportation_platform_dev` y que el usuario efectivo es `tp_migrator`.
 5. Ejecutar sólo Goose UP explícito con `db/migrations`.
-6. Consultar la versión Goose, ownership, RLS, FORCE RLS y privilegios de los tres roles.
+6. Consultar la versión Goose, ownership, RLS, FORCE RLS y privilegios de los cuatro roles, incluyendo `tp_bootstrap_runtime`.
 7. Ejecutar `go test ./...`, `go vet ./...` y los builds correspondientes.
 8. Documentar el cambio y publicar la rama para revisión; no hacer merge automático.
 
@@ -107,5 +113,6 @@ Nunca ejecutar sobre esta base DEV: Goose DOWN, DROP DATABASE, TRUNCATE, elimina
 
 - **[P]** El contenedor actualmente publica `0.0.0.0:5432` además de IPv6, aunque el contrato previsto usa `127.0.0.1`. Debe restringirse el binding antes de compartir el entorno o ejecutar servicios fuera de la máquina local.
 - **[P]** `.env.local` conserva una configuración base histórica de migrador; iniciar la aplicación sin sobrescribir `DATABASE_USER` y `DATABASE_PASSWORD` podría usar privilegios de migración. La configuración de aplicación debe quedar explícitamente en `tp_runtime`.
-- **[P]** Falta formalizar el almacenamiento local de la credencial de `tp_auth_runtime` y su inyección separada, sin habilitar todavía login ni WebAuthn.
+- **[D]** La credencial de `tp_auth_runtime` se mantiene fuera de Git y se inyecta sólo mediante `DATABASE_AUTH_PASSWORD`; no se creó una cuenta administrativa real en DEV.
+- **[P]** `DATABASE_BOOTSTRAP_USER=tp_bootstrap_runtime` y `DATABASE_BOOTSTRAP_PASSWORD` deben configurarse sólo después de provisionar el rol; no se debe reutilizar la contraseña de `tp_runtime` o `tp_auth_runtime`.
 - **[D]** La base persistente DEV no es un entorno de pruebas destructivas ni un sustituto de staging.

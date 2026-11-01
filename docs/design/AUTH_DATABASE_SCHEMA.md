@@ -1,6 +1,6 @@
 # Transportation Platform — Esquema de autenticación online
 
-Estado: diseño propuesto para Fase 1B.2. No crea tablas, no ejecuta migraciones y no autoriza cambios en PostgreSQL.
+Estado: diseño actualizado con la implementación de Fase 1B.2-B y el hardening de `000007`. La migración `000006` ya está aplicada en DEV; `000007` requiere verificar primero el rol dedicado de bootstrap y luego un Goose UP explícito.
 
 ## Convención de evidencia
 
@@ -14,15 +14,15 @@ Estado: diseño propuesto para Fase 1B.2. No crea tablas, no ejecuta migraciones
 
 **[D]** Fase 1B.2 agregará autenticación online como un bounded context del mismo monolito modular y de la misma base nueva. No se modifican destructivamente las tablas de identidad, membresías, roles, permisos ni auditoría de 1B.1. La autenticación resolverá una cuenta existente; no creará pertenencias ni permisos como efecto implícito de iniciar sesión.
 
-**[P]** Los números exactos de migración, la política de retención y la eventual separación física de un esquema de seguridad deben aprobarse antes de escribir SQL en `db/migrations`. Fase 1B.2-A no debe agregar todavía la dependencia WebAuthn ni modificar `000001`–`000004`.
+**[V]** `000001`–`000005` permanecen inmutables. La política de retención y la eventual separación física de un esquema de seguridad siguen pendientes.
 
 ## 2. Secuencia de migraciones propuesta
 
 | Versión propuesta | Contenido | Dependencias | Reversa propuesta |
 |---|---|---|---|
 | `000005` | Credenciales locales de bootstrap, credenciales WebAuthn y challenges. | Fase 1B.1, `user_account`. | Eliminar tablas sólo en base efímera y con precondiciones; nunca borrar historial de producción automáticamente. |
-| `000006` | Sesiones online, autorizaciones de instalación y solicitudes de enrollment. | `000005`, `person`, `company`, `company_operation`. | Revocar/archivar primero; `down` destructivo sólo en entorno de pruebas propio. |
-| `000007` | Recovery, claves de idempotencia y eventos de seguridad, si se confirma que no se reutiliza el canal de auditoría existente. | `000005`/`000006`. | Retirar políticas y tablas sólo con datos sintéticos; documentar retención antes de producción. |
+| `000006` | Identificadores de login, contraseña LOGIN Argon2id, invitaciones, bootstrap, rate limits, grants de login y contratos HTTP de sesión. | `000005`, `person`, `company`, `company_operation`, roles y auditoría. | `down` sólo en PostgreSQL efímero; DEV persistente recibe únicamente `up`. |
+| `000007` | Hardening de frontera: `bootstrap_control`, `auth_password_verification`, nivel de autenticación de sesión, invitaciones ligadas a sesión y rol dedicado de bootstrap. | `000005`/`000006` y `tp_bootstrap_runtime` provisionado. | `down` sólo en PostgreSQL 16 efímero; DEV persistente recibe únicamente `up`. |
 | `000008+` | Índices, políticas o cambios expand/contract aditivos. | Versión anterior. | Cada versión tiene su propio `down`; no se reutilizan números. |
 
 Los nombres son una propuesta de planificación, no deben confundirse con la migración `007_driver_device_auth.sql` del proyecto Drayage. Esa migración pertenece a otra base y no se copia.
@@ -34,7 +34,26 @@ Reglas para la futura implementación:
 - Goose se ejecuta como rol migrador, nunca como runtime;
 - las tablas append-only no reciben `DELETE` desde el runtime;
 - no se guarda ningún secreto claro, token de sesión, OTP, respuesta WebAuthn completa o clave privada;
+- el hash Argon2 almacenado no se acepta como prueba reutilizable para crear un grant; el handoff usa una verificación efímera identificada por nonce hash y consumida una sola vez;
 - los timestamps de seguridad los genera PostgreSQL/servidor; un timestamp del cliente es sólo telemetría no confiable.
+
+### 3.4 Estado de bootstrap y verificación de password
+
+**[V]** `platform.bootstrap_control` contiene una única fila protegida por RLS
+y `FORCE ROW LEVEL SECURITY`. `prepare_bootstrap_request` y
+`complete_bootstrap_request` bloquean esa fila con `FOR UPDATE`; la finalización
+registra `completed_at`, request y cuenta en la misma transacción de creación.
+El estado no se calcula desde `GLOBAL_ADMIN`, por lo que deshabilitar o revocar
+administradores no reabre el bootstrap. Ambas funciones exigen el
+`session_user` dedicado `tp_bootstrap_runtime`; `tp_runtime` y
+`tp_auth_runtime` no tienen EXECUTE.
+
+**[V]** `resolve_login_credential` crea `auth_password_verification` con
+identidad derivada, credential ID, nonce hash y TTL corto. La función de
+handoff de `tp_runtime` consume ese registro y deriva de él la cuenta/persona;
+no recibe `user_account_id`, `person_id` ni `password_hash`. El riesgo residual
+de compromiso del mismo proceso Go durante el TTL se documenta y se reduce con
+pools separados, sin DML directo y firmas antiguas revocadas.
 
 ## 3. Entidades y ownership
 
@@ -342,3 +361,12 @@ Las pruebas usan sólo cuentas ficticias, claves generadas durante el test y un 
 ## 9. Bloqueos para implementación
 
 No iniciar migraciones hasta resolver: proveedor/canal de bootstrap, política de contraseña, compatibilidad de la biblioteca WebAuthn con Go 1.25, RP ID/origins, TTLs, política de passkeys sincronizadas, autoridad de recovery, retención, función `SECURITY DEFINER` mínima y primer gate de activación. Ver `docs/design/OPEN_QUESTIONS.md`.
+
+## 15. Implementación 1B.2-B
+
+- **[V]** `login_identifier` evita resolver una cuenta por nombre; `password_credential.purpose=LOGIN` se acepta sólo con estado y expiración vigentes.
+- **[V]** `auth_verified_login_grant` vincula cuenta, persona y hash de credencial verificada. Es de un solo uso y expira rápidamente.
+- **[V]** `tp_runtime` puede registrar el grant sólo con el hash Argon2id que Go obtuvo por la frontera de autenticación; `tp_auth_runtime` puede consumirlo, pero no insertarlo ni leer tablas sensibles directamente.
+- **[V]** Las funciones HTTP de sesión devuelven sólo el estado necesario para resolver un principal. Los tokens, secretos CSRF y credenciales no se almacenan en claro.
+- **[D]** `auth_invitation` y `auth_bootstrap_request` no asignan roles salvo el `GLOBAL_ADMIN` inicial del bootstrap; la aceptación de invitación no crea privilegios.
+- **[P]** Recovery, WebAuthn, device authorization y retención definitiva de auditoría requieren migraciones y decisiones propias.

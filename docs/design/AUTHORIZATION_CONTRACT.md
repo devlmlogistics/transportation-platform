@@ -1,7 +1,7 @@
 # Transportation Platform — Contrato inicial de autorización
 
-Estado: contrato aprobado como especificación de Fase 1B.1.
-Clasificación: reglas implementadas en la fundación 1B.1-A **[V]/[D]**; decisiones pendientes **[P]**. Este documento no implementa autenticación, WebAuthn ni sesiones.
+Estado: contrato aprobado como base de Fase 1B.1 y consumido por el `PrincipalResolver` de Fase 1B.2-B.
+Clasificación: reglas implementadas **[V]/[D]**; WebAuthn, recovery y step-up siguen pendientes **[P]**.
 
 ## 1. Propósito
 
@@ -277,3 +277,10 @@ No se crean endpoints `/webauthn/*`, tokens, cookies de sesión ni dispositivos 
 - **[P]** Versión mínima de PostgreSQL para los índices parciales `NULLS NOT DISTINCT`.
 - **[V]** Rol/función `SECURITY DEFINER` para persistir `AdminDeniedAttempt` sin otorgar lectura al runtime.
 - **[P]** Rate limit, retención y alerta ante spam de denegaciones.
+
+## 13. Integración 1B.2-B
+
+- **[V]** La sesión sólo proporciona identidad autenticada y contexto candidato; no hereda permisos PLATFORM, COMPANY u OPERATION de forma implícita.
+- **[V]** `SessionPrincipalResolver` no acepta `X-User-ID`, `X-Person-ID`, `X-Tenant-ID` ni un `company_id` como identidad. El servicio administrativo sigue obligado a invocar `WithAuthorizedTenantTx`.
+- **[V]** `set_auth_session_context` revalida memberships, estados de empresa/operación y epoch antes de cambiar `context_version`; cambiar contexto no concede permisos.
+- **[P]** Las acciones que requieran step-up/MFA continúan cerradas hasta Fase 1B.2-C.

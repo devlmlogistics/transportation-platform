@@ -10,9 +10,12 @@ import (
 	"os/signal"
 	"syscall"
 
+	"transportation-platform/internal/application/admin"
+	applicationauth "transportation-platform/internal/application/auth"
 	"transportation-platform/internal/config"
 	"transportation-platform/internal/httpapi"
 	"transportation-platform/internal/httpserver"
+	"transportation-platform/internal/platform/postgres"
 )
 
 func main() {
@@ -43,7 +46,29 @@ func newLogger(appEnv string) *slog.Logger {
 }
 
 func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
-	handler, err := httpapi.NewRouter(cfg, logger)
+	dependencies := httpapi.RouterDependencies{}
+	var pools *postgres.OnlinePools
+	if cfg.AuthOnlineEnabled || cfg.AdminHTTPEnabled {
+		var err error
+		pools, err = postgres.OpenOnlinePools(ctx, cfg.Database)
+		if err != nil {
+			return err
+		}
+		defer pools.Close()
+		repository, err := postgres.NewOnlineAuthRepository(pools.Runtime, pools.Auth)
+		if err != nil {
+			return err
+		}
+		authService, err := applicationauth.NewOnlineAuthService(repository)
+		if err != nil {
+			return err
+		}
+		dependencies.Auth = authService
+		if cfg.AdminHTTPEnabled {
+			dependencies.Admin = admin.NewService(pools.Runtime)
+		}
+	}
+	handler, err := httpapi.NewRouterWithDependencies(cfg, logger, dependencies)
 	if err != nil {
 		return err
 	}

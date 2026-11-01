@@ -2,6 +2,12 @@
 
 `platform_roles.sql` es un procedimiento separado de Goose. Crea roles sin contraseñas, no contiene credenciales y es parametrizable mediante variables de `psql`.
 
+La configuración de Fase 1B.2-B agrega `tp_bootstrap_runtime`, un rol LOGIN
+dedicado exclusivamente al comando explícito de bootstrap. No se entrega a
+`cmd/platform`, no tiene DML directo sobre tablas y sólo recibe EXECUTE sobre
+las dos funciones de bootstrap. Su contraseña se inyecta fuera del
+repositorio mediante `DATABASE_BOOTSTRAP_PASSWORD`.
+
 Orden en un PostgreSQL 16 efímero:
 
 ```powershell
@@ -9,6 +15,8 @@ psql "$env:PLATFORM_ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 `
   -v owner_role=tp_owner `
   -v migrator_role=tp_migrator `
   -v runtime_role=tp_runtime `
+  -v auth_runtime_role=tp_auth_runtime `
+  -v bootstrap_runtime_role=tp_bootstrap_runtime `
   -v security_writer_role=tp_security_audit_writer `
   -f db/bootstrap/platform_roles.sql
 ```

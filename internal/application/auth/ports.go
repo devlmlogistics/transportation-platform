@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -16,8 +17,14 @@ var (
 )
 
 type Principal struct {
-	UserAccountID string
-	PersonID      string
+	UserAccountID     string
+	PersonID          string
+	SessionID         string
+	SessionEpoch      int64
+	ContextVersion    int64
+	ActiveCompanyID   string
+	ActiveOperationID string
+	CSRFSecretHash    []byte
 }
 
 type AuthenticateRequest struct {
@@ -171,4 +178,76 @@ type SecurityAuditEvent struct {
 
 type SecurityAuditWriter interface {
 	WriteSecurityAudit(context.Context, SecurityAuditEvent) error
+}
+
+// LoginCredential is the minimum server-side material required to verify a
+// password. It is never constructed from an HTTP payload.
+type LoginCredential struct {
+	VerificationID       uuid.UUID
+	VerificationNonce    []byte
+	UserAccountID        uuid.UUID
+	PersonID             uuid.UUID
+	PasswordCredentialID uuid.UUID
+	PasswordHash         string
+	KDFName              string
+	KDFParameters        json.RawMessage
+}
+
+type AuthenticatedSession struct {
+	ID                uuid.UUID
+	UserAccountID     uuid.UUID
+	PersonID          uuid.UUID
+	SessionEpoch      int64
+	ContextVersion    int64
+	ActiveCompanyID   *uuid.UUID
+	ActiveOperationID *uuid.UUID
+	SessionPolicy     SessionKind
+	Status            string
+	CreatedAt         time.Time
+	LastSeenAt        time.Time
+	IdleExpiresAt     time.Time
+	AbsoluteExpiresAt time.Time
+	CSRFSecretHash    []byte
+}
+
+type SessionSummary struct {
+	ID                uuid.UUID
+	Status            string
+	CreatedAt         time.Time
+	LastSeenAt        time.Time
+	IdleExpiresAt     time.Time
+	AbsoluteExpiresAt time.Time
+	ActiveCompanyID   *uuid.UUID
+	ActiveOperationID *uuid.UUID
+	SessionPolicy     SessionKind
+	Current           bool
+}
+
+type LoginGrant struct {
+	ID                    uuid.UUID
+	GrantHash             []byte
+	VerificationID        uuid.UUID
+	VerificationNonceHash []byte
+}
+
+type Invitation struct {
+	ID        uuid.UUID
+	ExpiresAt time.Time
+}
+
+type OnlineAuthStore interface {
+	ResolveLoginCredential(context.Context, string) (LoginCredential, error)
+	ConsumeRateLimit(context.Context, []byte, string, int, int) (bool, error)
+	RecordVerifiedPasswordLogin(context.Context, LoginGrant, int) error
+	IssueAuthSession(context.Context, LoginGrant, CreateSessionRequest, uuid.UUID) (SessionRecord, error)
+	ResolveHTTPSession(context.Context, []byte) (AuthenticatedSession, error)
+	ListAuthSessions(context.Context, []byte) ([]SessionSummary, error)
+	RevokeSession(context.Context, uuid.UUID, []byte, string) error
+	RevokeAllSessions(context.Context, []byte, string) error
+	SetAuthSessionContext(context.Context, []byte, uuid.UUID, *uuid.UUID, *uuid.UUID) (int64, error)
+	CreateAdminInvitation(context.Context, []byte, uuid.UUID, []byte, string, string, int) (Invitation, error)
+	ConsumeAdminInvitation(context.Context, []byte, string, json.RawMessage, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID) (uuid.UUID, uuid.UUID, string, error)
+	PrepareBootstrapRequest(context.Context, uuid.UUID, []byte, []byte, string, string, string, json.RawMessage, int) error
+	CompleteBootstrapRequest(context.Context, []byte, []byte, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID) (uuid.UUID, uuid.UUID, error)
+	RecordLoginFailure(context.Context, uuid.UUID, string) error
 }

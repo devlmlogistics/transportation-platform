@@ -18,16 +18,26 @@ type Config struct {
 	WriteTimeout      time.Duration
 	IdleTimeout       time.Duration
 	ShutdownTimeout   time.Duration
+	AuthOnlineEnabled bool
+	AdminHTTPEnabled  bool
+	AllowedOrigins    []string
+	AuthCookieSecure  bool
 	Database          DatabaseConfig
 }
 
 type DatabaseConfig struct {
-	Host     string
-	Port     string
-	Name     string
-	User     string
-	Password string
-	SSLMode  string
+	Host              string
+	Port              string
+	Name              string
+	User              string
+	Password          string
+	SSLMode           string
+	RuntimeUser       string
+	RuntimePassword   string
+	AuthUser          string
+	AuthPassword      string
+	BootstrapUser     string
+	BootstrapPassword string
 }
 
 func (c Config) ListenAddr() string {
@@ -52,10 +62,19 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	config := Config{
-		AppEnv:   appEnv,
-		Port:     strconv.Itoa(port),
-		WebDir:   valueOrDefault(getenv("WEB_DIR"), "web/dist"),
-		Database: databaseConfig(getenv),
+		AppEnv:            appEnv,
+		Port:              strconv.Itoa(port),
+		WebDir:            valueOrDefault(getenv("WEB_DIR"), "web/dist"),
+		AuthOnlineEnabled: parseBool(getenv("AUTH_ONLINE_ENABLED")),
+		AdminHTTPEnabled:  parseBool(getenv("ADMIN_HTTP_ENABLED")),
+		AllowedOrigins:    splitOrigins(getenv("AUTH_ALLOWED_ORIGINS")),
+		AuthCookieSecure:  parseBool(getenv("AUTH_COOKIE_SECURE")) || appEnv == "production",
+		Database:          databaseConfig(getenv),
+	}
+	for _, origin := range config.AllowedOrigins {
+		if !isLocalOrigin(origin) {
+			config.AuthCookieSecure = true
+		}
 	}
 	for name, target := range map[string]*time.Duration{
 		"READ_HEADER_TIMEOUT": &config.ReadHeaderTimeout,
@@ -74,18 +93,76 @@ func Load(getenv func(string) string) (Config, error) {
 	if strings.TrimSpace(config.WebDir) == "" {
 		return Config{}, fmt.Errorf("WEB_DIR must not be empty")
 	}
+	if config.AdminHTTPEnabled && !config.AuthOnlineEnabled {
+		return Config{}, fmt.Errorf("ADMIN_HTTP_ENABLED requires AUTH_ONLINE_ENABLED")
+	}
+	if config.AuthOnlineEnabled {
+		if config.Database.Host == "" || config.Database.Port == "" || config.Database.Name == "" {
+			return Config{}, fmt.Errorf("database host, port and name are required when online authentication is enabled")
+		}
+		if config.Database.RuntimeUser != "tp_runtime" || config.Database.AuthUser != "tp_auth_runtime" {
+			return Config{}, fmt.Errorf("online authentication requires DATABASE_RUNTIME_USER=tp_runtime and DATABASE_AUTH_USER=tp_auth_runtime")
+		}
+		if config.Database.RuntimePassword == "" || config.Database.AuthPassword == "" {
+			return Config{}, fmt.Errorf("runtime and authentication database passwords are required when online authentication is enabled")
+		}
+		if len(config.AllowedOrigins) == 0 {
+			return Config{}, fmt.Errorf("AUTH_ALLOWED_ORIGINS must contain at least one origin when online authentication is enabled")
+		}
+	}
 	return config, nil
 }
 
 func databaseConfig(getenv func(string) string) DatabaseConfig {
-	return DatabaseConfig{
-		Host:     strings.TrimSpace(getenv("DATABASE_HOST")),
-		Port:     strings.TrimSpace(getenv("DATABASE_PORT")),
-		Name:     strings.TrimSpace(getenv("DATABASE_NAME")),
-		User:     strings.TrimSpace(getenv("DATABASE_USER")),
-		Password: getenv("DATABASE_PASSWORD"),
-		SSLMode:  valueOrDefault(getenv("DATABASE_SSLMODE"), "disable"),
+	baseUser := strings.TrimSpace(getenv("DATABASE_USER"))
+	runtimeUser := strings.TrimSpace(getenv("DATABASE_RUNTIME_USER"))
+	if runtimeUser == "" && baseUser == "tp_runtime" {
+		runtimeUser = baseUser
 	}
+	runtimePassword := getenv("DATABASE_RUNTIME_PASSWORD")
+	if runtimePassword == "" && runtimeUser == baseUser && baseUser == "tp_runtime" {
+		runtimePassword = getenv("DATABASE_PASSWORD")
+	}
+	return DatabaseConfig{
+		Host:              strings.TrimSpace(getenv("DATABASE_HOST")),
+		Port:              strings.TrimSpace(getenv("DATABASE_PORT")),
+		Name:              strings.TrimSpace(getenv("DATABASE_NAME")),
+		User:              baseUser,
+		Password:          getenv("DATABASE_PASSWORD"),
+		SSLMode:           valueOrDefault(getenv("DATABASE_SSLMODE"), "disable"),
+		RuntimeUser:       runtimeUser,
+		RuntimePassword:   runtimePassword,
+		AuthUser:          valueOrDefault(getenv("DATABASE_AUTH_USER"), "tp_auth_runtime"),
+		AuthPassword:      getenv("DATABASE_AUTH_PASSWORD"),
+		BootstrapUser:     valueOrDefault(getenv("DATABASE_BOOTSTRAP_USER"), "tp_bootstrap_runtime"),
+		BootstrapPassword: getenv("DATABASE_BOOTSTRAP_PASSWORD"),
+	}
+}
+
+func parseBool(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func splitOrigins(raw string) []string {
+	var origins []string
+	for _, item := range strings.Split(raw, ",") {
+		if origin := strings.TrimSpace(item); origin != "" {
+			origins = append(origins, origin)
+		}
+	}
+	return origins
+}
+
+func isLocalOrigin(origin string) bool {
+	origin = strings.ToLower(strings.TrimSpace(origin))
+	return strings.HasPrefix(origin, "http://localhost") ||
+		strings.HasPrefix(origin, "http://127.0.0.1") ||
+		strings.HasPrefix(origin, "http://[::1]")
 }
 
 func positivePort(raw string) (int, error) {

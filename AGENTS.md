@@ -12,14 +12,14 @@ Este repositorio contiene sólo la fundación de Transportation Platform. Los pr
 
 - No modificar los proyectos originales.
 - Fase 1B.1-A sólo puede usar un PostgreSQL 16 nuevo, efímero o un contenedor dedicado al proyecto, con datos sintéticos.
-- Fase 1B.2-A puede implementar únicamente persistencia y contratos internos de autenticación online en el mismo tipo de PostgreSQL 16 efímero; no habilita login, WebAuthn, recovery, invitaciones, sesiones HTTP productivas, offline ni endpoints administrativos.
-- Las migraciones `000001`–`000004` son inmutables. La migración de autenticación de esta fase es `000005` y permanece en `db/migrations` como fuente canónica.
-- `tp_runtime` no recibe acceso directo ni `EXECUTE` sobre tablas/funciones de autenticación. La frontera SQL de autenticación usa `tp_auth_runtime`, sin DML directo sobre tablas y sin permisos de dispositivos; el repositorio Go de autenticación sólo se construye dentro de su paquete.
-- En 1B.2-A `create_auth_session` y el escritor genérico de auditoría permanecen cerrados para `tp_runtime` y `tp_auth_runtime`; la emisión requiere una frontera de credenciales de una fase posterior.
+- Fase 1B.2-A sólo implementa persistencia y contratos internos; Fase 1B.2-B agrega login administrativo, sesiones opacas, CSRF, bootstrap e invitaciones bajo configuración explícita y fail-closed. WebAuthn, recovery, passkeys, sesiones de conductor, offline y operaciones siguen bloqueados.
+- Las migraciones `000001`–`000006` son inmutables. El hardening online de esta fase es `000007` y permanece en `db/migrations` como fuente canónica.
+- `tp_runtime` no recibe acceso directo a tablas de autenticación ni puede emitir sesiones; sólo registra un grant derivado de una verificación efímera mediante una función estrecha. La emisión y resolución usan `tp_auth_runtime`, sin DML directo sobre tablas y sin permisos de dispositivos; bootstrap usa además `tp_bootstrap_runtime`, separado del servidor HTTP.
+- En 1B.2-B `create_auth_session` y el escritor genérico de auditoría permanecen cerrados para `tp_runtime` y `tp_auth_runtime`; la emisión requiere el grant de un solo uso producido por la frontera de verificación.
 - Las migraciones se ejecutan sólo de forma explícita con Goose en el entorno aislado; Go no las ejecuta al iniciar.
 - No conectar servicios de producción ni reutilizar contenedores o volúmenes PostgreSQL ajenos al proyecto.
 - `lmlogistics` permanece estrictamente en modo de lectura y no se modifica.
-- No implementar autenticación real, WebAuthn, passkeys, sesiones productivas, formularios operativos u offline en Fase 1B.1-B.
+- No implementar WebAuthn, passkeys, recovery, sesiones de conductor, formularios operativos u offline en Fase 1B.2-B.
 - En Fase 1B.2-A no agregar la dependencia WebAuthn ni implementar ceremonias; los repositorios de sesión/challenge son contratos internos y no crean un login.
 - En Fase 1B.1-B se permiten contratos y handlers administrativos cerrados por defecto, además de servicios de aplicación y tests con Principal inyectado exclusivamente dentro de tests.
 - Las rutas administrativas de producción deben rechazar por defecto mientras no exista una frontera de autenticación real; no aceptar identidad desde headers ni habilitar bypass por ambiente.

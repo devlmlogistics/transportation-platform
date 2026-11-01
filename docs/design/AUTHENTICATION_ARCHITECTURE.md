@@ -1,6 +1,6 @@
 # Transportation Platform — Arquitectura de autenticación online
 
-Estado: diseño propuesto para Fase 1B.2. No es autorización para implementar ni habilitar endpoints.
+Estado: diseño base actualizado con implementación de Fase 1B.2-B. La activación HTTP sigue siendo explícita y fail-closed.
 
 ## Evidencia y decisiones
 
@@ -58,11 +58,13 @@ Todos usan `context.Context`, `pgxpool`, queries parametrizadas y errores intern
 | `platform.resolve_auth_session(p_token_hash bytea)` | Hash del token calculado por el servidor. | Cero o una fila mínima con sesión, cuenta/persona activas, epoch y contexto seleccionado. | No acepta IDs de identidad, tenant, roles o permisos; no devuelve memberships ni datos empresariales; no actualiza la sesión. |
 | `platform.consume_auth_challenge(p_challenge_id uuid, p_purpose text, p_challenge_hash bytea, p_binding_hash bytea)` | ID opaco, propósito, hash del challenge y binding opaco de la ceremonia. | Cero o una fila con `SessionData` íntegro y contexto mínimo. | Lock `FOR UPDATE`, verifica estado/vigencia/binding y marca `CONSUMED` antes de verificar la respuesta; no permite replay ni carreras. |
 
+**[V]** 1B.2-B agrega contratos estrechos para lookup de credencial, rate limiting, grants de login, emisión condicionada, resolución HTTP de sesión, listado, contexto, invitación, bootstrap y fallos de login. La emisión sólo funciona después de consumir un grant de un solo uso creado por la otra frontera.
+
 Contrato común:
 
 - propiedad de `tp_owner`; `record_denied_attempt` mantiene su propietario existente `tp_security_audit_writer`;
 - `SET search_path = pg_catalog, platform`, nombres calificados, sin SQL dinámico y sin esquemas escribibles;
-- `REVOKE ALL FROM PUBLIC`; sólo `tp_runtime` recibe `EXECUTE` sobre firmas exactas;
+- `REVOKE ALL FROM PUBLIC`; cada firma recibe `EXECUTE` únicamente del rol de su frontera y la emisión no se concede al runtime general;
 - `tp_runtime` no recibe acceso global directo a sesiones/challenges ni se crea `tp_security_writer`;
 - la función nunca selecciona datos empresariales indiscriminadamente y no transforma `app.tenant_id` en identidad;
 - los resultados anómalos se auditan por el servicio seguro, con rate limit y sin guardar tokens o hashes.
@@ -196,7 +198,34 @@ Alternativas consideradas:
 - Implementación propia: rechazada por riesgo criptográfico, conformance y mantenimiento.
 - Servicio externo: no necesario para el primer corte; sólo se evaluará si la organización requiere IdP/SSO administrado.
 
-## 12. Referencias
+## 12. Implementación 1B.2-B
+
+- **[V]** La implementación concreta está en `docs/implementation/PHASE_1B2B_IMPLEMENTATION.md` y usa `000006_online_auth.sql` más `000007_auth_boundary_hardening.sql` sin modificar `000001`–`000006`.
+- **[D]** La frontera de emisión no concede `EXECUTE` general sobre `create_auth_session`: Go verifica Argon2id, `tp_auth_runtime` crea una verificación efímera, `tp_runtime` registra un grant de un solo uso derivado de ella y `tp_auth_runtime` lo consume.
+- **[D]** `SessionPrincipalResolver` sólo acepta la cookie de sesión y vuelve a resolver estado, TTL y `session_epoch` en PostgreSQL. No acepta headers de identidad.
+- **[D]** Las mutaciones HTTP exigen Origin permitido y CSRF asociado a la sesión. La configuración sin servicio real registra rutas cerradas.
+- **[P]** WebAuthn, recovery, step-up y entrega de invitaciones permanecen fuera de esta fase.
+
+### Hardening correctivo de la frontera
+
+- **[V]** `tp_bootstrap_runtime` es una frontera SQL separada, usada sólo por
+  `cmd/bootstrap`; `prepare_bootstrap_request` y `complete_bootstrap_request`
+  rechazan otros `session_user`, bloquean `bootstrap_control` y no dependen de
+  un `GLOBAL_ADMIN` activo para decidir si el bootstrap ya fue consumido.
+- **[V]** `create_admin_invitation` recibe únicamente el hash de una sesión y
+  deriva el actor dentro de PostgreSQL. Exige sesión administrativa vigente,
+  epoch coincidente, `authentication_level='PASSWORD'` en esta fase y rol
+  `GLOBAL_ADMIN`; las firmas con actor UUID permanecen sin EXECUTE.
+- **[V]** El handoff de contraseña ya no recibe el hash Argon2 almacenado ni
+  IDs de cuenta/persona desde `tp_runtime`. Consume un registro de
+  `auth_password_verification` creado por el rol de autenticación y ligado a
+  un nonce hash de un solo uso.
+- **[D]** El riesgo residual del mismo proceso Go se acepta sólo para esta
+  fase: un código que comprometa simultáneamente el proceso y el pool podría
+  usar un nonce efímero dentro de su TTL. Una frontera de credenciales aislada
+  o HSM se reserva para una fase posterior.
+
+## 13. Referencias
 
 - [Repositorio oficial go-webauthn/webauthn](https://github.com/go-webauthn/webauthn)
 - [Módulo y versión publicada](https://pkg.go.dev/github.com/go-webauthn/webauthn)
