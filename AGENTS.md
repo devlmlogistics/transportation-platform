@@ -58,3 +58,14 @@ Este repositorio contiene sólo la fundación de Transportation Platform. Los pr
 Las pruebas de integración PostgreSQL de Fase 1B.2-A crean y verifican automáticamente su propio contenedor PostgreSQL 16, con etiqueta y marcador de propiedad, sin volúmenes persistentes ni DSN arbitrarios. La limpieza sólo elimina ese contenedor previamente verificado. Las variables `TEST_DATABASE_URL`, `TEST_DATABASE_MIGRATOR_URL` y `TEST_DATABASE_ADMIN_URL` ya no son la ruta canónica de esta suite.
 
 No ejecutar comandos destructivos ni operaciones sobre bases externas como parte de una tarea normal.
+
+## PostgreSQL DEV persistente
+
+- La base local persistente de desarrollo es `transportation_platform_dev` en el contenedor dedicado `pgdb16.8`; no se debe conectar `lmlogistics` ni reutilizar contenedores o volúmenes ajenos.
+- `.env.local` es configuración privada ignorada por Git. No copiar sus secretos a documentación, commits, logs, historial de shell ni mensajes.
+- `tp_migrator` sólo se utiliza para Goose explícito y no puede ser el usuario de la aplicación. `tp_runtime` es el usuario del pool de aplicación y `tp_auth_runtime` es un pool separado para contratos internos de autenticación.
+- Antes de cada migración DEV hay que verificar base, usuario efectivo, esquema, ownership, membresías y versión Goose. Si falla una precondición, no modificar PostgreSQL.
+- En la base DEV persistente sólo se ejecutan migraciones Goose UP y consultas de validación no destructivas. No ejecutar DOWN, DROP DATABASE, TRUNCATE ni rollback destructivo.
+- Las pruebas destructivas, fixtures y pruebas de concurrencia/rollback continúan exclusivamente en PostgreSQL 16 efímero propio y verificable.
+- Las migraciones aplicadas son inmutables; cualquier corrección requiere una migración versionada nueva en `db/migrations`.
+- No iniciar la aplicación con `DATABASE_USER=tp_migrator`; la configuración efectiva del runtime debe usar `tp_runtime` y mantener cerrado el acceso de autenticación según las políticas vigentes.
