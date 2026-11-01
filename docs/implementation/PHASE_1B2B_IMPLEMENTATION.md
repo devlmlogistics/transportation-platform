@@ -95,4 +95,4 @@ Las mutaciones SQL escriben auditoría en la misma transacción: `LOGIN_SUCCESS`
 
 - **[V]** `go test ./internal/platform/postgres` ejecuta Goose `up/down/up` hasta versión 7, RLS, roles, emisión negativa, login, revocación, invitación ligada a sesión, bootstrap concurrente, bloqueo irreversible y aislamiento en PostgreSQL 16 efímero.
 - **[V]** La validación correctiva ejecutó con éxito `go test ./...`, `go vet ./...`, `pnpm --dir web typecheck`, `pnpm --dir web test`, `pnpm --dir web build`, `go build`, `docker compose config --quiet` y `docker build -t transportation-platform:0.1.0 .`.
-- **[P]** La migración `000007` debe aplicarse con Goose UP sobre `transportation_platform_dev` usando `tp_migrator` sólo después de verificar que el rol dedicado `tp_bootstrap_runtime` fue provisionado por el procedimiento de roles. No se ejecuta automáticamente al iniciar Go.
+- **[V]** La migración `000007` se aplicó con Goose UP sobre `transportation_platform_dev` usando `tp_migrator`, después de verificar el rol dedicado `tp_bootstrap_runtime`. DEV quedó en versión 7; no se ejecuta migración automáticamente al iniciar Go y no se ejecutó bootstrap real.
