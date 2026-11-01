@@ -1,6 +1,6 @@
 # Transportation Platform — Esquema de autenticación online
 
-Estado: diseño actualizado con la implementación de Fase 1B.2-B. La migración 000006 se prueba primero en PostgreSQL efímero; su aplicación persistente requiere un paso explícito posterior.
+Estado: diseño actualizado con la implementación de Fase 1B.2-B y el hardening de `000007`. La migración `000006` ya está aplicada en DEV; `000007` requiere verificar primero el rol dedicado de bootstrap y luego un Goose UP explícito.
 
 ## Convención de evidencia
 
@@ -22,7 +22,7 @@ Estado: diseño actualizado con la implementación de Fase 1B.2-B. La migración
 |---|---|---|---|
 | `000005` | Credenciales locales de bootstrap, credenciales WebAuthn y challenges. | Fase 1B.1, `user_account`. | Eliminar tablas sólo en base efímera y con precondiciones; nunca borrar historial de producción automáticamente. |
 | `000006` | Identificadores de login, contraseña LOGIN Argon2id, invitaciones, bootstrap, rate limits, grants de login y contratos HTTP de sesión. | `000005`, `person`, `company`, `company_operation`, roles y auditoría. | `down` sólo en PostgreSQL efímero; DEV persistente recibe únicamente `up`. |
-| `000007` | Recovery, claves de idempotencia y eventos de seguridad, si se confirma que no se reutiliza el canal de auditoría existente. | `000005`/`000006`. | Retirar políticas y tablas sólo con datos sintéticos; documentar retención antes de producción. |
+| `000007` | Hardening de frontera: `bootstrap_control`, `auth_password_verification`, nivel de autenticación de sesión, invitaciones ligadas a sesión y rol dedicado de bootstrap. | `000005`/`000006` y `tp_bootstrap_runtime` provisionado. | `down` sólo en PostgreSQL 16 efímero; DEV persistente recibe únicamente `up`. |
 | `000008+` | Índices, políticas o cambios expand/contract aditivos. | Versión anterior. | Cada versión tiene su propio `down`; no se reutilizan números. |
 
 Los nombres son una propuesta de planificación, no deben confundirse con la migración `007_driver_device_auth.sql` del proyecto Drayage. Esa migración pertenece a otra base y no se copia.
@@ -34,7 +34,26 @@ Reglas para la futura implementación:
 - Goose se ejecuta como rol migrador, nunca como runtime;
 - las tablas append-only no reciben `DELETE` desde el runtime;
 - no se guarda ningún secreto claro, token de sesión, OTP, respuesta WebAuthn completa o clave privada;
+- el hash Argon2 almacenado no se acepta como prueba reutilizable para crear un grant; el handoff usa una verificación efímera identificada por nonce hash y consumida una sola vez;
 - los timestamps de seguridad los genera PostgreSQL/servidor; un timestamp del cliente es sólo telemetría no confiable.
+
+### 3.4 Estado de bootstrap y verificación de password
+
+**[V]** `platform.bootstrap_control` contiene una única fila protegida por RLS
+y `FORCE ROW LEVEL SECURITY`. `prepare_bootstrap_request` y
+`complete_bootstrap_request` bloquean esa fila con `FOR UPDATE`; la finalización
+registra `completed_at`, request y cuenta en la misma transacción de creación.
+El estado no se calcula desde `GLOBAL_ADMIN`, por lo que deshabilitar o revocar
+administradores no reabre el bootstrap. Ambas funciones exigen el
+`session_user` dedicado `tp_bootstrap_runtime`; `tp_runtime` y
+`tp_auth_runtime` no tienen EXECUTE.
+
+**[V]** `resolve_login_credential` crea `auth_password_verification` con
+identidad derivada, credential ID, nonce hash y TTL corto. La función de
+handoff de `tp_runtime` consume ese registro y deriva de él la cuenta/persona;
+no recibe `user_account_id`, `person_id` ni `password_hash`. El riesgo residual
+de compromiso del mismo proceso Go durante el TTL se documenta y se reduce con
+pools separados, sin DML directo y firmas antiguas revocadas.
 
 ## 3. Entidades y ownership
 

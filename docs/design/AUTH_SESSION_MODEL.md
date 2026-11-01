@@ -37,6 +37,7 @@ Mantener una sesión online revocable asociada a una `UserAccount`, no a una emp
 | `revoked_at`, `expired_at`, `compromised_at`, `terminal_reason` | timestamptz/text | Exactamente el timestamp correspondiente al estado terminal. |
 | `session_epoch` | bigint | Snapshot del epoch global de `UserAccount` al emitir la sesión. |
 | `context_version` | bigint | Se incrementa al cambiar contexto sensible. |
+| `authentication_level` | text | Nivel verificable de la sesión; `PASSWORD` es el nivel actual de 1B.2-B y `WEBAUTHN_STEP_UP` queda reservado. |
 | `active_company_id` | uuid nullable | FK opcional; nunca autoridad sin revalidación. |
 | `active_operation_id` | uuid nullable | FK compuesto con empresa; sólo si company existe. |
 | `authenticator_credential_id` | uuid nullable | Credencial usada recientemente, no prueba de DeviceAuthorization. |
@@ -65,7 +66,7 @@ Una sesión inválida no vuelve a `ACTIVE` ni cambia entre estados terminales. L
 
 ## Implementación 1B.2-B
 
-- **[V]** `auth_session.session_policy` se fija a `ADMINISTRATIVE` para las sesiones de contraseña de esta fase; la función de emisión aplica 30 minutos idle y 8 horas absolutas.
+- **[V]** `auth_session.session_policy` se fija a `ADMINISTRATIVE` y `authentication_level` a `PASSWORD` para las sesiones de contraseña de esta fase; la función de emisión aplica 30 minutos idle y 8 horas absolutas.
 - **[V]** `resolve_auth_session_http` bloquea y revalida sesión, cuenta, persona, epoch y TTL; actualiza `last_seen_at` con reloj de PostgreSQL.
 - **[V]** `SessionPrincipalResolver` construye el principal sólo desde la cookie opaca y la fila resuelta. El contexto guardado no reemplaza la autorización de cada operación.
 - **[D]** Logout y revocación global permanecen en las funciones SQL existentes; la revocación global bloquea cuenta y token antes de incrementar el epoch.

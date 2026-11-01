@@ -49,6 +49,22 @@ func OpenOnlinePools(ctx context.Context, database config.DatabaseConfig) (*Onli
 	return &OnlinePools{Runtime: runtime, Auth: authPool}, nil
 }
 
+// OpenBootstrapPool is intentionally separate from OpenOnlinePools. The
+// explicit bootstrap command is the only production-facing caller and uses a
+// dedicated database role that is not available to the HTTP server pools.
+func OpenBootstrapPool(ctx context.Context, database config.DatabaseConfig) (*pgxpool.Pool, error) {
+	if database.Host == "" || database.Port == "" || database.Name == "" {
+		return nil, errors.New("database host, port and name are required")
+	}
+	if database.BootstrapUser != "tp_bootstrap_runtime" {
+		return nil, errors.New("bootstrap pool requires tp_bootstrap_runtime")
+	}
+	if database.BootstrapPassword == "" {
+		return nil, errors.New("bootstrap database password is required")
+	}
+	return openPool(ctx, database, database.BootstrapUser, database.BootstrapPassword)
+}
+
 func openPool(ctx context.Context, database config.DatabaseConfig, user, password string) (*pgxpool.Pool, error) {
 	dsn := url.URL{
 		Scheme:   "postgres",

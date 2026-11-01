@@ -32,7 +32,7 @@ El resultado de la fase debe permitir probar el acceso online y la resolución d
 - **[D]** No usar `driver_code` como credencial ni crear cuentas por empresa/dispositivo.
 - **[D]** No abrir `/api/v1/admin` hasta que la frontera de autenticación y su suite estén aprobadas.
 - **[D]** No introducir un proveedor externo de identidad o un motor de plugins sin una decisión posterior.
-- **[D]** No modificar migraciones 000001–000004; las extensiones serán Goose posteriores.
+- **[D]** No modificar migraciones 000001–000006; las correcciones de frontera son Goose posteriores.
 
 ## 4. Arquitectura recomendada
 
@@ -88,7 +88,7 @@ No se recomienda crear un IdP genérico propio ni un sistema de plugins de auten
 
 - **Objetivo:** crear posteriormente sólo persistencia, repositorios y contratos internos de sesiones, challenges, credenciales y auditoría; no implementar login, WebAuthn, recovery, invitaciones ni habilitar rutas productivas.
 - **Dependencias:** `UserAccount`, `Person`, memberships, roles, RLS y auditoría de 1B.1.
-- **Migraciones propuestas:** 000005 `auth_core`, 000006 `device_authorization`, 000007 `auth_recovery_and_idempotency`, sólo después de una autorización separada; `000001`–`000004` permanecen inmutables.
+- **Migraciones históricas:** 000005 `auth_foundation`, 000006 `online_auth` y 000007 `auth_boundary_hardening`; recovery/idempotencia quedan para una versión posterior. `000001`–`000006` permanecen inmutables.
 - **Contratos:** repositorios para token hash, sesión, epoch, challenge y auditoría; funciones SQL mínimas `resolve_auth_session` y `consume_auth_challenge`, sin consultas globales ni selección de identidad por payload.
 - **Dependencias prohibidas en A:** no agregar todavía la biblioteca WebAuthn, un proveedor de identidad, credenciales reales, secretos productivos ni un canal de invitaciones.
 - **Pruebas:** SQL constraints, RLS, expiración materializada, revocación, reutilización de challenges, hash de tokens, `pgxpool` A→B→A y harness destructivo seguro creado/verificado automáticamente.
@@ -97,7 +97,7 @@ No se recomienda crear un IdP genérico propio ni un sistema de plugins de auten
 ### 1B.2-B — autenticación online y acceso administrativo
 
 - **[V] Objetivo entregado:** login administrativo por contraseña Argon2id, sesiones opacas, logout, revocación, cambio de contexto y `PrincipalResolver` real.
-- **[V] Dependencias entregadas:** migración 000006, dos pools con roles separados, CSRF/Origin, rate limiting persistente y cookies seguras configurables.
+- **[V] Dependencias entregadas:** migraciones 000006–000007, dos pools HTTP con roles separados, pool dedicado de bootstrap, CSRF/Origin, rate limiting persistente y cookies seguras configurables.
 - **[V] Contratos:** `/api/v1/auth/login`, `/me`, `/logout`, `/sessions`, `/revoke-all`, `/context` e invitación de aceptación. Las rutas administrativas sólo se abren con configuración explícita.
 - **[V] Pruebas:** migración UP/DOWN/UP, FORCE RLS, roles, handoff de emisión, login, revocación, invitación, bootstrap y pruebas unitarias de cookies/CSRF.
 - **[P] Pendiente:** activación productiva, entrega de invitaciones, step-up, recovery y autenticación WebAuthn.
@@ -116,8 +116,8 @@ No se propone una 1B.2-D offline: offline permanece bloqueado hasta una fase pos
 
 - **[D]** `db/migrations` sigue siendo la única fuente canónica y las nuevas migraciones son reversibles sólo en bases efímeras. En entornos con datos, se usará expand/contract y precheck.
 - **[D]** La numeración 000005+ pertenece a `platform`; no se reutiliza ni se copia la migración heredada `Consulta drayage/db/migrations/007_driver_device_auth.sql`.
-- **[D]** `tp_owner` conserva ownership; `tp_migrator` ejecuta Goose; `tp_runtime` no tiene DDL, `SUPERUSER` ni `BYPASSRLS`; no se agrega un rol de runtime de autenticación en 1B.2-A.
-- **[V]** `platform.resolve_auth_session_http(bytea)` y los contratos de 000006 sólo aceptan hashes calculados por el servidor; el nuevo emisor consume un grant de un solo uso y no recibe un `user_account_id` arbitrario como autoridad.
+- **[D]** `tp_owner` conserva ownership; `tp_migrator` ejecuta Goose; `tp_runtime` no tiene DDL, `SUPERUSER` ni `BYPASSRLS`; `tp_auth_runtime` permanece separado y `tp_bootstrap_runtime` se reserva al CLI explícito.
+- **[V]** `platform.resolve_auth_session_http(bytea)` y los contratos de 000006–000007 sólo aceptan hashes calculados por el servidor; el nuevo emisor consume un grant derivado de una verificación efímera y no recibe un `user_account_id` arbitrario como autoridad.
 - **[D]** Ambas funciones, si se implementan en una migración posterior, usarán `SECURITY DEFINER`, `search_path = pg_catalog, platform`, nombres calificados, `REVOKE ALL FROM PUBLIC` y `EXECUTE` exacto para `tp_runtime`; no consultarán por `user_account_id`, tenant, role o permission suministrados por el cliente.
 - **[V]** `tp_security_audit_writer` es el rol existente para `record_denied_attempt`; no se introduce `tp_security_writer`. Es `NOLOGIN`, `NOSUPERUSER`, `NOBYPASSRLS` y no recibe lectura global.
 

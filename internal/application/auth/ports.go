@@ -183,6 +183,8 @@ type SecurityAuditWriter interface {
 // LoginCredential is the minimum server-side material required to verify a
 // password. It is never constructed from an HTTP payload.
 type LoginCredential struct {
+	VerificationID       uuid.UUID
+	VerificationNonce    []byte
 	UserAccountID        uuid.UUID
 	PersonID             uuid.UUID
 	PasswordCredentialID uuid.UUID
@@ -222,11 +224,10 @@ type SessionSummary struct {
 }
 
 type LoginGrant struct {
-	ID            uuid.UUID
-	GrantHash     []byte
-	UserAccountID uuid.UUID
-	PersonID      uuid.UUID
-	PasswordHash  string
+	ID                    uuid.UUID
+	GrantHash             []byte
+	VerificationID        uuid.UUID
+	VerificationNonceHash []byte
 }
 
 type Invitation struct {
@@ -244,7 +245,7 @@ type OnlineAuthStore interface {
 	RevokeSession(context.Context, uuid.UUID, []byte, string) error
 	RevokeAllSessions(context.Context, []byte, string) error
 	SetAuthSessionContext(context.Context, []byte, uuid.UUID, *uuid.UUID, *uuid.UUID) (int64, error)
-	CreateAdminInvitation(context.Context, uuid.UUID, uuid.UUID, []byte, string, string, int) (Invitation, error)
+	CreateAdminInvitation(context.Context, []byte, uuid.UUID, []byte, string, string, int) (Invitation, error)
 	ConsumeAdminInvitation(context.Context, []byte, string, json.RawMessage, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID) (uuid.UUID, uuid.UUID, string, error)
 	PrepareBootstrapRequest(context.Context, uuid.UUID, []byte, []byte, string, string, string, json.RawMessage, int) error
 	CompleteBootstrapRequest(context.Context, []byte, []byte, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID) (uuid.UUID, uuid.UUID, error)

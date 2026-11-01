@@ -226,7 +226,7 @@ Para 1B.2-A, la aceptación adicional es: `ClosedAdminHandler` continúa activo,
 
 ## 13. Evidencia ejecutada en 1B.2-B
 
-- **[V]** La suite PostgreSQL 16 efímera ejecuta 000001–000006 con `up/down/up`, verifica FORCE RLS y roles, comprueba que `tp_runtime` y `tp_auth_runtime` no tienen DML directo sensible, y prueba el handoff de grant sin emisión arbitraria.
+- **[V]** La suite PostgreSQL 16 efímera ejecuta 000001–000007 con `up/down/up`, verifica FORCE RLS y roles, comprueba que `tp_runtime`, `tp_auth_runtime` y `tp_bootstrap_runtime` no tienen DML directo sensible, y prueba bootstrap concurrente/irreversible, invitación ligada a sesión y handoff de grant sin reutilización del hash Argon2.
 - **[V]** La suite cubre login válido e inválido, hash no reversible en `auth_session`, logout, revocación, invitación de un solo uso sin roles automáticos, revalidación de contexto y bootstrap único.
 - **[V]** `httptest` cubre cookies `HttpOnly`/CSRF, `SameSite=Lax`, Origin no confiable y rechazo de mutaciones sin CSRF.
 - **[D]** Antes de activar administración se mantiene como gate la ejecución completa de `go test ./...`, `go vet ./...`, frontend, build Go y Docker.

@@ -78,7 +78,12 @@ func (s *OnlineAuthService) Login(ctx context.Context, identifier, password, rem
 	if err != nil {
 		return LoginResult{}, err
 	}
-	grant := LoginGrant{ID: uuid.New(), GrantHash: HashSessionToken(grantRaw), UserAccountID: credential.UserAccountID, PersonID: credential.PersonID, PasswordHash: credential.PasswordHash}
+	grant := LoginGrant{
+		ID:                    uuid.New(),
+		GrantHash:             HashSessionToken(grantRaw),
+		VerificationID:        credential.VerificationID,
+		VerificationNonceHash: HashSessionToken(credential.VerificationNonce),
+	}
 	if err := s.Store.RecordVerifiedPasswordLogin(ctx, grant, 120); err != nil {
 		return LoginResult{}, ErrAuthenticationFailed
 	}
@@ -176,15 +181,15 @@ func (s *OnlineAuthService) ChangeContext(ctx context.Context, token []byte, com
 	return version, err
 }
 
-func (s *OnlineAuthService) IssueInvitation(ctx context.Context, actorID uuid.UUID, identifier, legalName string, expiresSeconds int) (IssuedInvitation, error) {
-	if actorID == uuid.Nil || strings.TrimSpace(identifier) == "" || strings.TrimSpace(legalName) == "" {
+func (s *OnlineAuthService) IssueInvitation(ctx context.Context, sessionToken []byte, identifier, legalName string, expiresSeconds int) (IssuedInvitation, error) {
+	if len(sessionToken) != 32 || strings.TrimSpace(identifier) == "" || strings.TrimSpace(legalName) == "" {
 		return IssuedInvitation{}, ErrInvalidInput
 	}
 	raw, err := randomBytes(32)
 	if err != nil {
 		return IssuedInvitation{}, err
 	}
-	invit, err := s.Store.CreateAdminInvitation(ctx, actorID, uuid.New(), HashSessionToken(raw), identifier, legalName, expiresSeconds)
+	invit, err := s.Store.CreateAdminInvitation(ctx, HashSessionToken(sessionToken), uuid.New(), HashSessionToken(raw), identifier, legalName, expiresSeconds)
 	if err != nil {
 		return IssuedInvitation{}, err
 	}

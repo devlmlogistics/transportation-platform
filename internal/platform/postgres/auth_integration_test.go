@@ -207,7 +207,7 @@ func testAuthFoundation(t *testing.T, ctx context.Context, runtimePool, authPool
 	})
 
 	t.Run("runtime_cannot_select_global_auth_rows", func(t *testing.T) {
-		for _, table := range []string{"auth_session", "auth_challenge", "authenticator_credential", "password_credential", "recovery_request"} {
+		for _, table := range []string{"auth_session", "auth_challenge", "authenticator_credential", "password_credential", "recovery_request", "bootstrap_control", "auth_password_verification"} {
 			err := withAccessReturningError(ctx, runtimePool, tenancy.Platform(), func(tx pgx.Tx) error {
 				var count int
 				return tx.QueryRow(ctx, "SELECT count(*) FROM platform."+table).Scan(&count)
@@ -234,7 +234,8 @@ func testAuthFoundation(t *testing.T, ctx context.Context, runtimePool, authPool
 			for _, table := range []string{
 				"auth_session", "auth_challenge", "authenticator_credential",
 				"password_credential", "recovery_request", "device_authorization",
-				"device_enrollment_request", "security_audit_event",
+				"device_enrollment_request", "security_audit_event", "bootstrap_control",
+				"auth_password_verification",
 			} {
 				var allowed bool
 				if err := rolePool.QueryRow(ctx, `

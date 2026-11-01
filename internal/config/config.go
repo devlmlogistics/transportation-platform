@@ -26,16 +26,18 @@ type Config struct {
 }
 
 type DatabaseConfig struct {
-	Host            string
-	Port            string
-	Name            string
-	User            string
-	Password        string
-	SSLMode         string
-	RuntimeUser     string
-	RuntimePassword string
-	AuthUser        string
-	AuthPassword    string
+	Host              string
+	Port              string
+	Name              string
+	User              string
+	Password          string
+	SSLMode           string
+	RuntimeUser       string
+	RuntimePassword   string
+	AuthUser          string
+	AuthPassword      string
+	BootstrapUser     string
+	BootstrapPassword string
 }
 
 func (c Config) ListenAddr() string {
@@ -122,16 +124,18 @@ func databaseConfig(getenv func(string) string) DatabaseConfig {
 		runtimePassword = getenv("DATABASE_PASSWORD")
 	}
 	return DatabaseConfig{
-		Host:            strings.TrimSpace(getenv("DATABASE_HOST")),
-		Port:            strings.TrimSpace(getenv("DATABASE_PORT")),
-		Name:            strings.TrimSpace(getenv("DATABASE_NAME")),
-		User:            baseUser,
-		Password:        getenv("DATABASE_PASSWORD"),
-		SSLMode:         valueOrDefault(getenv("DATABASE_SSLMODE"), "disable"),
-		RuntimeUser:     runtimeUser,
-		RuntimePassword: runtimePassword,
-		AuthUser:        valueOrDefault(getenv("DATABASE_AUTH_USER"), "tp_auth_runtime"),
-		AuthPassword:    getenv("DATABASE_AUTH_PASSWORD"),
+		Host:              strings.TrimSpace(getenv("DATABASE_HOST")),
+		Port:              strings.TrimSpace(getenv("DATABASE_PORT")),
+		Name:              strings.TrimSpace(getenv("DATABASE_NAME")),
+		User:              baseUser,
+		Password:          getenv("DATABASE_PASSWORD"),
+		SSLMode:           valueOrDefault(getenv("DATABASE_SSLMODE"), "disable"),
+		RuntimeUser:       runtimeUser,
+		RuntimePassword:   runtimePassword,
+		AuthUser:          valueOrDefault(getenv("DATABASE_AUTH_USER"), "tp_auth_runtime"),
+		AuthPassword:      getenv("DATABASE_AUTH_PASSWORD"),
+		BootstrapUser:     valueOrDefault(getenv("DATABASE_BOOTSTRAP_USER"), "tp_bootstrap_runtime"),
+		BootstrapPassword: getenv("DATABASE_BOOTSTRAP_PASSWORD"),
 	}
 }
 

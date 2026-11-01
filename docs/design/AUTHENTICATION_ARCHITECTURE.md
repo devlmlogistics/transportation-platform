@@ -200,11 +200,30 @@ Alternativas consideradas:
 
 ## 12. Implementación 1B.2-B
 
-- **[V]** La implementación concreta está en `docs/implementation/PHASE_1B2B_IMPLEMENTATION.md` y usa `000006_online_auth.sql` sin modificar `000001`–`000005`.
-- **[D]** La frontera de emisión no concede `EXECUTE` general sobre `create_auth_session`: Go verifica Argon2id, `tp_runtime` registra un grant de un solo uso y `tp_auth_runtime` lo consume.
+- **[V]** La implementación concreta está en `docs/implementation/PHASE_1B2B_IMPLEMENTATION.md` y usa `000006_online_auth.sql` más `000007_auth_boundary_hardening.sql` sin modificar `000001`–`000006`.
+- **[D]** La frontera de emisión no concede `EXECUTE` general sobre `create_auth_session`: Go verifica Argon2id, `tp_auth_runtime` crea una verificación efímera, `tp_runtime` registra un grant de un solo uso derivado de ella y `tp_auth_runtime` lo consume.
 - **[D]** `SessionPrincipalResolver` sólo acepta la cookie de sesión y vuelve a resolver estado, TTL y `session_epoch` en PostgreSQL. No acepta headers de identidad.
 - **[D]** Las mutaciones HTTP exigen Origin permitido y CSRF asociado a la sesión. La configuración sin servicio real registra rutas cerradas.
 - **[P]** WebAuthn, recovery, step-up y entrega de invitaciones permanecen fuera de esta fase.
+
+### Hardening correctivo de la frontera
+
+- **[V]** `tp_bootstrap_runtime` es una frontera SQL separada, usada sólo por
+  `cmd/bootstrap`; `prepare_bootstrap_request` y `complete_bootstrap_request`
+  rechazan otros `session_user`, bloquean `bootstrap_control` y no dependen de
+  un `GLOBAL_ADMIN` activo para decidir si el bootstrap ya fue consumido.
+- **[V]** `create_admin_invitation` recibe únicamente el hash de una sesión y
+  deriva el actor dentro de PostgreSQL. Exige sesión administrativa vigente,
+  epoch coincidente, `authentication_level='PASSWORD'` en esta fase y rol
+  `GLOBAL_ADMIN`; las firmas con actor UUID permanecen sin EXECUTE.
+- **[V]** El handoff de contraseña ya no recibe el hash Argon2 almacenado ni
+  IDs de cuenta/persona desde `tp_runtime`. Consume un registro de
+  `auth_password_verification` creado por el rol de autenticación y ligado a
+  un nonce hash de un solo uso.
+- **[D]** El riesgo residual del mismo proceso Go se acepta sólo para esta
+  fase: un código que comprometa simultáneamente el proceso y el pool podría
+  usar un nonce efímero dentro de su TTL. Una frontera de credenciales aislada
+  o HSM se reserva para una fase posterior.
 
 ## 13. Referencias
 

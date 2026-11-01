@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -96,8 +97,8 @@ func testOnlineAuth(t *testing.T, ctx context.Context, runtimePool, authPool *pg
 			t.Fatal("runtime role executed the session issuance boundary")
 		}
 		if _, err := authPool.Exec(ctx, `
-			SELECT platform.record_verified_password_login($1, $2, $3, $4, $5, 120)
-		`, uuid.New(), makeHash(0x61), fixture.UserGlobal, fixture.PersonGlobal, hash); err == nil {
+			SELECT platform.record_verified_password_login($1, $2, $3, $4, 120)
+		`, uuid.New(), makeHash(0x61), uuid.New(), makeHash(0x62)); err == nil {
 			t.Fatal("authentication role inserted a verification grant")
 		}
 		if _, err := authPool.Exec(ctx, `UPDATE platform.user_account SET session_epoch = session_epoch + 1 WHERE id = $1`, fixture.UserGlobal); err == nil {
@@ -105,6 +106,16 @@ func testOnlineAuth(t *testing.T, ctx context.Context, runtimePool, authPool *pg
 		}
 		if _, err := runtimePool.Exec(ctx, `SELECT platform.issue_auth_session_from_verified_login($1, $2, $3, $4, $5, $6, 'ADMINISTRATIVE', NULL, NULL, NULL, NULL, NULL, '')`, makeHash(0x71), uuid.New(), uuid.New(), uuid.New(), makeHash(0x72), makeHash(0x73)); err == nil {
 			t.Fatal("runtime role issued a session through the auth function")
+		}
+		if _, err := runtimePool.Exec(ctx, `
+			SELECT platform.record_verified_password_login($1, $2, $3, $4, $5, $6)
+		`, uuid.New(), makeHash(0x74), fixture.UserGlobal, fixture.PersonGlobal, hash, 120); err == nil {
+			t.Fatal("runtime role reused the stored password hash as authentication proof")
+		}
+		if _, err := runtimePool.Exec(ctx, `
+			SELECT platform.create_admin_invitation($1, $2, $3, $4, $5, $6)
+		`, fixture.UserGlobal, uuid.New(), makeHash(0x75), "spoof@example.test", "Spoof", 600); err == nil {
+			t.Fatal("runtime role invoked the legacy actor-id invitation boundary")
 		}
 	})
 
@@ -130,7 +141,11 @@ func testOnlineAuth(t *testing.T, ctx context.Context, runtimePool, authPool *pg
 	})
 
 	t.Run("invitation_is_single_use_and_does_not_assign_role", func(t *testing.T) {
-		issued, err := service.IssueInvitation(ctx, fixture.UserGlobal, "invited.admin@example.test", "Invited Admin", 600)
+		adminLogin, err := service.Login(ctx, identifier, "correct horse battery staple", "192.0.2.13:443", "test-agent")
+		if err != nil {
+			t.Fatal(err)
+		}
+		issued, err := service.IssueInvitation(ctx, adminLogin.Token, "invited.admin@example.test", "Invited Admin", 600)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -150,6 +165,9 @@ func testOnlineAuth(t *testing.T, ctx context.Context, runtimePool, authPool *pg
 		}
 		if roles != 0 {
 			t.Fatalf("invitation assigned %d roles", roles)
+		}
+		if err := service.Logout(ctx, adminLogin.Token, adminLogin.Session.ID); err != nil {
+			t.Fatal(err)
 		}
 	})
 
@@ -183,6 +201,11 @@ func TestPostgres16OnlineBootstrap(t *testing.T) {
 	if err := migrations.Up(ctx, migrator, migrationDirectory(t)); err != nil {
 		t.Fatal(err)
 	}
+	bootstrapPool, err := pgxpool.New(ctx, harness.BootstrapDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bootstrapPool.Close()
 	runtimePool, err := pgxpool.New(ctx, harness.RuntimeDSN)
 	if err != nil {
 		t.Fatal(err)
@@ -198,7 +221,7 @@ func TestPostgres16OnlineBootstrap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer adminPool.Close()
-	repository, err := NewOnlineAuthRepository(runtimePool, authPool)
+	repository, err := NewBootstrapAuthRepository(bootstrapPool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,12 +229,82 @@ func TestPostgres16OnlineBootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	accountID, err := service.Bootstrap(ctx, "bootstrap-secret-from-test", "first.admin@example.test", "First Administrator", "bootstrap password secure")
-	if err != nil || accountID == uuid.Nil {
-		t.Fatalf("bootstrap account = %s, err=%v", accountID, err)
+	var bootstrapSuperuser, bootstrapBypassRLS bool
+	if err := adminPool.QueryRow(ctx, `
+		SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = 'tp_bootstrap_runtime'
+	`).Scan(&bootstrapSuperuser, &bootstrapBypassRLS); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := service.Bootstrap(ctx, "bootstrap-secret-from-test", "second.admin@example.test", "Second Administrator", "bootstrap password secure"); !errors.Is(err, applicationauth.ErrBootstrapUnavailable) {
-		t.Fatalf("second bootstrap error = %v", err)
+	if bootstrapSuperuser || bootstrapBypassRLS {
+		t.Fatalf("bootstrap role is overprivileged superuser=%v bypassrls=%v", bootstrapSuperuser, bootstrapBypassRLS)
+	}
+	for _, table := range []string{"bootstrap_control", "auth_password_verification", "auth_session"} {
+		var allowed bool
+		if err := adminPool.QueryRow(ctx, `SELECT has_table_privilege('tp_bootstrap_runtime', $1, 'SELECT')`, "platform."+table).Scan(&allowed); err != nil {
+			t.Fatal(err)
+		}
+		if allowed {
+			t.Fatalf("bootstrap role unexpectedly has SELECT on platform.%s", table)
+		}
+	}
+	for _, signature := range []string{
+		"platform.prepare_bootstrap_request(uuid,bytea,bytea,text,text,text,jsonb,integer)",
+		"platform.complete_bootstrap_request(bytea,bytea,uuid,uuid,uuid,uuid,uuid)",
+	} {
+		var allowed bool
+		if err := adminPool.QueryRow(ctx, `SELECT has_function_privilege('tp_bootstrap_runtime', $1, 'EXECUTE')`, signature).Scan(&allowed); err != nil {
+			t.Fatal(err)
+		}
+		if !allowed {
+			t.Fatalf("bootstrap role lacks EXECUTE on %s", signature)
+		}
+	}
+	// The dedicated bootstrap role is the only role allowed to reach these
+	// functions. The ordinary runtime roles cannot prepare or complete a
+	// request even when supplied with arbitrary UUIDs and hashes.
+	if _, err := runtimePool.Exec(ctx, `
+		SELECT platform.prepare_bootstrap_request($1, $2, $3, $4, $5, $6, $7, 600)
+	`, uuid.New(), makeHash(0x81), makeHash(0x82), "runtime@example.test", "Runtime", "argon2id$invalid", `{}`); err == nil {
+		t.Fatal("runtime role prepared a bootstrap request")
+	}
+	if _, err := authPool.Exec(ctx, `
+		SELECT platform.complete_bootstrap_request($1, $2, $3, $4, $5, $6, $7)
+	`, makeHash(0x81), makeHash(0x82), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()); err == nil {
+		t.Fatal("authentication role completed a bootstrap request")
+	}
+
+	results := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, identifier := range []string{"first.admin@example.test", "second.admin@example.test"} {
+		wg.Add(1)
+		go func(loginIdentifier string) {
+			defer wg.Done()
+			_, bootstrapErr := service.Bootstrap(ctx, "bootstrap-secret-from-test", loginIdentifier, "First Administrator", "bootstrap password secure")
+			results <- bootstrapErr
+		}(identifier)
+	}
+	wg.Wait()
+	close(results)
+	var successes int
+	for bootstrapErr := range results {
+		if bootstrapErr == nil {
+			successes++
+		} else if !errors.Is(bootstrapErr, applicationauth.ErrBootstrapUnavailable) {
+			t.Fatalf("concurrent bootstrap error = %v", bootstrapErr)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("concurrent bootstrap successes = %d, want 1", successes)
+	}
+
+	var accountID uuid.UUID
+	if err := adminPool.QueryRow(ctx, `
+		SELECT completed_user_account_id FROM platform.bootstrap_control WHERE id = true
+	`).Scan(&accountID); err != nil {
+		t.Fatal(err)
+	}
+	if accountID == uuid.Nil {
+		t.Fatal("bootstrap control did not record completed account")
 	}
 	var globals int
 	if err := adminPool.QueryRow(ctx, `
@@ -222,6 +315,19 @@ func TestPostgres16OnlineBootstrap(t *testing.T) {
 	}
 	if globals != 1 {
 		t.Fatalf("global admins = %d, want 1", globals)
+	}
+	if _, err := adminPool.Exec(ctx, `
+		UPDATE platform.role_assignment
+		SET lifecycle_status = 'REVOKED', revoked_at = clock_timestamp()
+		WHERE role_code = 'GLOBAL_ADMIN'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminPool.Exec(ctx, `UPDATE platform.user_account SET status = 'DISABLED' WHERE id = $1`, accountID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Bootstrap(ctx, "bootstrap-secret-from-test", "third.admin@example.test", "Third Administrator", "bootstrap password secure"); !errors.Is(err, applicationauth.ErrBootstrapUnavailable) {
+		t.Fatalf("bootstrap after global admin disable error = %v", err)
 	}
 }
 

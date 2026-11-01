@@ -39,13 +39,13 @@ func main() {
 		os.Exit(1)
 	}
 	ctx := context.Background()
-	pools, err := postgres.OpenOnlinePools(ctx, cfg.Database)
+	bootstrapPool, err := postgres.OpenBootstrapPool(ctx, cfg.Database)
 	if err != nil {
 		slog.Error("bootstrap_database_unavailable", "error", err)
 		os.Exit(1)
 	}
-	defer pools.Close()
-	repository, err := postgres.NewOnlineAuthRepository(pools.Runtime, pools.Auth)
+	defer bootstrapPool.Close()
+	repository, err := postgres.NewBootstrapAuthRepository(bootstrapPool)
 	if err != nil {
 		slog.Error("bootstrap_repository_unavailable", "error", err)
 		os.Exit(1)

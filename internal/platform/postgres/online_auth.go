@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -18,8 +19,9 @@ import (
 // tp_runtime; methods that consume grants or resolve authentication state use
 // tp_auth_runtime. Neither pool is a migration or superuser pool.
 type OnlineAuthRepository struct {
-	runtimePool *pgxpool.Pool
-	authPool    *pgxpool.Pool
+	runtimePool   *pgxpool.Pool
+	authPool      *pgxpool.Pool
+	bootstrapPool *pgxpool.Pool
 }
 
 func NewOnlineAuthRepository(runtimePool, authPool *pgxpool.Pool) (*OnlineAuthRepository, error) {
@@ -29,24 +31,40 @@ func NewOnlineAuthRepository(runtimePool, authPool *pgxpool.Pool) (*OnlineAuthRe
 	return &OnlineAuthRepository{runtimePool: runtimePool, authPool: authPool}, nil
 }
 
+// NewBootstrapAuthRepository is used only by the explicit bootstrap command.
+// It deliberately has no runtime or authentication pool, preventing the
+// command from accidentally reusing the HTTP server's database boundaries.
+func NewBootstrapAuthRepository(bootstrapPool *pgxpool.Pool) (*OnlineAuthRepository, error) {
+	if bootstrapPool == nil {
+		return nil, errors.New("bootstrap pool is required")
+	}
+	return &OnlineAuthRepository{bootstrapPool: bootstrapPool}, nil
+}
+
 func (r *OnlineAuthRepository) ResolveLoginCredential(ctx context.Context, identifier string) (auth.LoginCredential, error) {
 	if r == nil || r.authPool == nil || strings.TrimSpace(identifier) == "" {
 		return auth.LoginCredential{}, auth.ErrInvalidInput
 	}
+	verificationNonce := make([]byte, 32)
+	if _, err := rand.Read(verificationNonce); err != nil {
+		return auth.LoginCredential{}, err
+	}
+	verificationID := uuid.New()
 	var result auth.LoginCredential
 	var parameters []byte
 	err := r.authPool.QueryRow(ctx, `
-		SELECT user_account_id, person_id, password_credential_id,
+		SELECT verification_id, user_account_id, person_id, password_credential_id,
 		       password_hash, kdf_name, kdf_parameters
-		FROM platform.resolve_login_credential($1)
-	`, strings.ToLower(strings.TrimSpace(identifier))).Scan(
-		&result.UserAccountID, &result.PersonID, &result.PasswordCredentialID,
+		FROM platform.resolve_login_credential($1, $2, $3)
+	`, strings.ToLower(strings.TrimSpace(identifier)), verificationID, auth.HashSessionToken(verificationNonce)).Scan(
+		&result.VerificationID, &result.UserAccountID, &result.PersonID, &result.PasswordCredentialID,
 		&result.PasswordHash, &result.KDFName, &parameters,
 	)
 	if err != nil {
 		return auth.LoginCredential{}, err
 	}
 	result.KDFParameters = json.RawMessage(parameters)
+	result.VerificationNonce = verificationNonce
 	return result, nil
 }
 
@@ -62,13 +80,13 @@ func (r *OnlineAuthRepository) ConsumeRateLimit(ctx context.Context, keyHash []b
 }
 
 func (r *OnlineAuthRepository) RecordVerifiedPasswordLogin(ctx context.Context, grant auth.LoginGrant, expiresSeconds int) error {
-	if r == nil || r.runtimePool == nil || grant.ID == uuid.Nil || grant.UserAccountID == uuid.Nil || grant.PersonID == uuid.Nil || len(grant.GrantHash) != 32 || grant.PasswordHash == "" {
+	if r == nil || r.runtimePool == nil || grant.ID == uuid.Nil || grant.VerificationID == uuid.Nil || len(grant.VerificationNonceHash) != 32 || len(grant.GrantHash) != 32 {
 		return auth.ErrInvalidInput
 	}
 	var id uuid.UUID
 	err := r.runtimePool.QueryRow(ctx, `
-		SELECT platform.record_verified_password_login($1, $2, $3, $4, $5, $6)
-	`, grant.ID, grant.GrantHash, grant.UserAccountID, grant.PersonID, grant.PasswordHash, expiresSeconds).Scan(&id)
+		SELECT platform.record_verified_password_login($1, $2, $3, $4, $5)
+	`, grant.VerificationID, grant.VerificationNonceHash, grant.ID, grant.GrantHash, expiresSeconds).Scan(&id)
 	return err
 }
 
@@ -204,15 +222,15 @@ func (r *OnlineAuthRepository) SetAuthSessionContext(ctx context.Context, tokenH
 	return version, err
 }
 
-func (r *OnlineAuthRepository) CreateAdminInvitation(ctx context.Context, actorID, invitationID uuid.UUID, tokenHash []byte, identifier, legalName string, expiresSeconds int) (auth.Invitation, error) {
-	if r == nil || r.runtimePool == nil || actorID == uuid.Nil || invitationID == uuid.Nil || len(tokenHash) != 32 {
+func (r *OnlineAuthRepository) CreateAdminInvitation(ctx context.Context, sessionTokenHash []byte, invitationID uuid.UUID, tokenHash []byte, identifier, legalName string, expiresSeconds int) (auth.Invitation, error) {
+	if r == nil || r.runtimePool == nil || len(sessionTokenHash) != 32 || invitationID == uuid.Nil || len(tokenHash) != 32 {
 		return auth.Invitation{}, auth.ErrInvalidInput
 	}
 	var result auth.Invitation
 	err := r.runtimePool.QueryRow(ctx, `
 		SELECT invitation_id, expires_at
-		FROM platform.create_admin_invitation($1, $2, $3, $4, $5, $6)
-	`, actorID, invitationID, tokenHash, identifier, legalName, expiresSeconds).Scan(&result.ID, &result.ExpiresAt)
+		FROM platform.create_admin_invitation($1::bytea, $2::uuid, $3::bytea, $4::text, $5::text, $6::integer)
+	`, sessionTokenHash, invitationID, tokenHash, identifier, legalName, expiresSeconds).Scan(&result.ID, &result.ExpiresAt)
 	return result, err
 }
 
@@ -233,22 +251,22 @@ func (r *OnlineAuthRepository) ConsumeAdminInvitation(ctx context.Context, token
 }
 
 func (r *OnlineAuthRepository) PrepareBootstrapRequest(ctx context.Context, requestID uuid.UUID, requestHash, secretHash []byte, identifier, legalName, passwordHash string, parameters json.RawMessage, expiresSeconds int) error {
-	if r == nil || r.runtimePool == nil || requestID == uuid.Nil {
+	if r == nil || r.bootstrapPool == nil || requestID == uuid.Nil {
 		return auth.ErrInvalidInput
 	}
 	var id uuid.UUID
-	err := r.runtimePool.QueryRow(ctx, `
+	err := r.bootstrapPool.QueryRow(ctx, `
 		SELECT platform.prepare_bootstrap_request($1, $2, $3, $4, $5, $6, $7, $8)
 	`, requestID, requestHash, secretHash, identifier, legalName, passwordHash, parameters, expiresSeconds).Scan(&id)
 	return err
 }
 
 func (r *OnlineAuthRepository) CompleteBootstrapRequest(ctx context.Context, requestHash, secretHash []byte, personID, accountID, credentialID, roleAssignmentID, auditID uuid.UUID) (uuid.UUID, uuid.UUID, error) {
-	if r == nil || r.authPool == nil {
+	if r == nil || r.bootstrapPool == nil {
 		return uuid.Nil, uuid.Nil, auth.ErrInvalidInput
 	}
 	var result struct{ AccountID, PersonID uuid.UUID }
-	err := r.authPool.QueryRow(ctx, `
+	err := r.bootstrapPool.QueryRow(ctx, `
 		SELECT user_account_id, person_id
 		FROM platform.complete_bootstrap_request($1, $2, $3, $4, $5, $6, $7)
 	`, requestHash, secretHash, personID, accountID, credentialID, roleAssignmentID, auditID).Scan(&result.AccountID, &result.PersonID)
