@@ -35,9 +35,9 @@ Para este entorno se utilizan tres DSN transitorios, construidos en memoria a pa
 | Aplicación | `tp_runtime` | Pool de la aplicación. Sin `BYPASSRLS`, superusuario ni acceso directo a autenticación. |
 | Contratos internos de autenticación | `tp_auth_runtime` | Pool separado. Sin DML directo sobre tablas de autenticación o dispositivos. |
 
-**[D]** No se agregan DSN persistentes al repositorio. Las contraseñas por rol deben inyectarse desde la configuración privada local o un gestor de secretos. El `Config.Load` actual sólo consume la tupla `DATABASE_*`; por ello, al iniciar la aplicación debe sobrescribirse esa tupla con `tp_runtime`, nunca con `tp_migrator`.
+**[V]** No se agregan DSN persistentes al repositorio. La configuración de Fase 1B.2-B admite `DATABASE_RUNTIME_USER`, `DATABASE_RUNTIME_PASSWORD`, `DATABASE_AUTH_USER` y `DATABASE_AUTH_PASSWORD` además de la tupla de Goose; el servidor exige `tp_runtime` y `tp_auth_runtime` cuando se habilita autenticación online.
 
-**[P]** Antes de conectar pools productivos de autenticación, se debe formalizar en la configuración de runtime el nombre de las credenciales separadas para `tp_auth_runtime`. En Fase 1B.2-A no se habilita login ni emisión de sesiones.
+**[D]** `AUTH_ONLINE_ENABLED` y `ADMIN_HTTP_ENABLED` permanecen desactivados por defecto. La aplicación no usa `tp_migrator` como runtime ni ejecuta migraciones al arrancar.
 
 ## 3. Precondiciones verificadas
 
@@ -60,9 +60,10 @@ Se ejecutó únicamente Goose UP desde `db/migrations`, usando `tp_migrator` y l
 000003_platform_rls.sql
 000004_identity_rls_audit_hardening.sql
 000005_auth_foundation.sql
+000006_online_auth.sql
 ```
 
-- **[V]** Goose terminó en la versión 5.
+- **[V]** Goose terminó en la versión 6 después de aplicar únicamente `000006_online_auth.sql` por TCP local como `tp_migrator`.
 - **[V]** La fuente canónica continúa siendo `db/migrations`.
 - **[V]** No se modificaron las migraciones aprobadas.
 - **[D]** En cambios futuros sólo se ejecutará `goose up` explícito. Una migración ya aplicada no se edita; las correcciones requieren una nueva versión.
@@ -85,8 +86,8 @@ go run github.com/pressly/goose/v3/cmd/goose@v3.24.3 `
 - **[V]** `tp_auth_runtime` no tiene DML directo sobre tablas empresariales, de identidad, autenticación, dispositivos ni auditoría.
 - **[V]** Las funciones de autenticación son propiedad de `tp_owner` y están marcadas `SECURITY DEFINER` con `search_path` seguro.
 - **[V]** `tp_runtime` no tiene `EXECUTE` sobre las funciones de autenticación.
-- **[V]** `tp_auth_runtime` puede ejecutar sólo los contratos estrechos previstos: resolver sesiones, crear/consumir challenges y revocar sesiones. No puede ejecutar `create_auth_session` ni `record_auth_security_audit`.
-- **[V]** La emisión arbitraria de sesiones permanece cerrada.
+- **[V]** `tp_auth_runtime` puede ejecutar sólo los contratos estrechos previstos: resolver credenciales y sesiones, rate limit, consumir grants, revocar, cambiar contexto, aceptar invitaciones, completar bootstrap y registrar fallos cerrados. No puede ejecutar `create_auth_session` ni `record_auth_security_audit`.
+- **[V]** `tp_runtime` sólo registra grants de password verificados mediante la función de handoff; no puede emitir sesiones. La emisión arbitraria de sesiones permanece cerrada.
 
 La validación se realizó mediante `has_table_privilege`, `has_function_privilege`, `pg_class.relrowsecurity`, `pg_class.relforcerowsecurity`, `pg_proc.prosecdef` y comprobación del propietario. No se leyeron filas sensibles ni se alteró información de negocio.
 
@@ -107,5 +108,5 @@ Nunca ejecutar sobre esta base DEV: Goose DOWN, DROP DATABASE, TRUNCATE, elimina
 
 - **[P]** El contenedor actualmente publica `0.0.0.0:5432` además de IPv6, aunque el contrato previsto usa `127.0.0.1`. Debe restringirse el binding antes de compartir el entorno o ejecutar servicios fuera de la máquina local.
 - **[P]** `.env.local` conserva una configuración base histórica de migrador; iniciar la aplicación sin sobrescribir `DATABASE_USER` y `DATABASE_PASSWORD` podría usar privilegios de migración. La configuración de aplicación debe quedar explícitamente en `tp_runtime`.
-- **[P]** Falta formalizar el almacenamiento local de la credencial de `tp_auth_runtime` y su inyección separada, sin habilitar todavía login ni WebAuthn.
+- **[D]** La credencial de `tp_auth_runtime` se mantiene fuera de Git y se inyecta sólo mediante `DATABASE_AUTH_PASSWORD`; no se creó una cuenta administrativa real en DEV.
 - **[D]** La base persistente DEV no es un entorno de pruebas destructivas ni un sustituto de staging.

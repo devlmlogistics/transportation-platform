@@ -1,0 +1,234 @@
+package postgres
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"testing"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+	applicationauth "transportation-platform/internal/application/auth"
+	"transportation-platform/internal/platform/migrations"
+	"transportation-platform/internal/platform/testdb"
+)
+
+func testOnlineAuth(t *testing.T, ctx context.Context, runtimePool, authPool *pgxpool.Pool, adminDSN string, fixture foundationFixture) {
+	t.Helper()
+	adminPool, err := pgxpool.New(ctx, adminDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adminPool.Close()
+	hash, parameters, err := applicationauth.HashPassword("correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identifier := "global.admin@example.test"
+	if _, err := adminPool.Exec(ctx, `
+		INSERT INTO platform.login_identifier (id, user_account_id, normalized_identifier)
+		VALUES ($1, $2, $3)
+	`, uuid.New(), fixture.UserGlobal, identifier); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminPool.Exec(ctx, `
+		INSERT INTO platform.password_credential (id, user_account_id, purpose, password_hash, kdf_name, kdf_parameters)
+		VALUES ($1, $2, 'LOGIN', $3, 'argon2id', $4)
+	`, uuid.New(), fixture.UserGlobal, hash, parameters); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewOnlineAuthRepository(runtimePool, authPool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := applicationauth.NewOnlineAuthService(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("valid_login_resolves_and_replays_no_secret", func(t *testing.T) {
+		result, err := service.Login(ctx, identifier, "correct horse battery staple", "192.0.2.10:443", "test-agent")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Token) != 32 || len(result.CSRFToken) != 32 || result.Session.ID == uuid.Nil {
+			t.Fatalf("invalid login result: %+v", result.Session)
+		}
+		var tokenHash []byte
+		if err := adminPool.QueryRow(ctx, `SELECT token_hash FROM platform.auth_session WHERE id = $1`, result.Session.ID).Scan(&tokenHash); err != nil {
+			t.Fatal(err)
+		}
+		if string(tokenHash) == string(result.Token) {
+			t.Fatal("raw session token was stored")
+		}
+		resolved, err := service.ResolveSession(ctx, result.Token)
+		if err != nil || resolved.UserAccountID != fixture.UserGlobal || resolved.PersonID != fixture.PersonGlobal {
+			t.Fatalf("resolved session = %+v, err=%v", resolved, err)
+		}
+		if _, err := service.Login(ctx, identifier, "wrong password", "192.0.2.10:443", "test-agent"); !errors.Is(err, applicationauth.ErrAuthenticationFailed) {
+			t.Fatalf("invalid password error = %v", err)
+		}
+		if err := service.Logout(ctx, result.Token, result.Session.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.ResolveSession(ctx, result.Token); !errors.Is(err, applicationauth.ErrSessionNotFound) {
+			t.Fatalf("revoked session resolved: %v", err)
+		}
+	})
+
+	t.Run("role_bound_handoff_rejects_arbitrary_session", func(t *testing.T) {
+		var rows int
+		if err := authPool.QueryRow(ctx, `
+			SELECT count(*) FROM platform.issue_auth_session_from_verified_login(
+				$1, $2, $3, $4, $5, $6, 'ADMINISTRATIVE', NULL, NULL, NULL, NULL, NULL, ''
+			)
+		`, makeHash(0x41), uuid.New(), uuid.New(), uuid.New(), makeHash(0x42), makeHash(0x43)).Scan(&rows); err != nil {
+			t.Fatal(err)
+		}
+		if rows != 0 {
+			t.Fatal("authentication role issued a session without a verified grant")
+		}
+		if _, err := runtimePool.Exec(ctx, `
+			SELECT platform.issue_auth_session_from_verified_login(
+				$1, $2, $3, $4, $5, $6, 'ADMINISTRATIVE', NULL, NULL, NULL, NULL, NULL, ''
+			)
+		`, makeHash(0x51), uuid.New(), uuid.New(), uuid.New(), makeHash(0x52), makeHash(0x53)); err == nil {
+			t.Fatal("runtime role executed the session issuance boundary")
+		}
+		if _, err := authPool.Exec(ctx, `
+			SELECT platform.record_verified_password_login($1, $2, $3, $4, $5, 120)
+		`, uuid.New(), makeHash(0x61), fixture.UserGlobal, fixture.PersonGlobal, hash); err == nil {
+			t.Fatal("authentication role inserted a verification grant")
+		}
+		if _, err := authPool.Exec(ctx, `UPDATE platform.user_account SET session_epoch = session_epoch + 1 WHERE id = $1`, fixture.UserGlobal); err == nil {
+			t.Fatal("authentication role altered account epoch directly")
+		}
+		if _, err := runtimePool.Exec(ctx, `SELECT platform.issue_auth_session_from_verified_login($1, $2, $3, $4, $5, $6, 'ADMINISTRATIVE', NULL, NULL, NULL, NULL, NULL, '')`, makeHash(0x71), uuid.New(), uuid.New(), uuid.New(), makeHash(0x72), makeHash(0x73)); err == nil {
+			t.Fatal("runtime role issued a session through the auth function")
+		}
+	})
+
+	t.Run("disabled_account_and_expired_credential_fail_closed", func(t *testing.T) {
+		if _, err := adminPool.Exec(ctx, `UPDATE platform.user_account SET status = 'DISABLED' WHERE id = $1`, fixture.UserGlobal); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.Login(ctx, identifier, "correct horse battery staple", "192.0.2.12:443", "test-agent"); !errors.Is(err, applicationauth.ErrAuthenticationFailed) {
+			t.Fatalf("disabled account login error = %v", err)
+		}
+		if _, err := adminPool.Exec(ctx, `UPDATE platform.user_account SET status = 'ACTIVE' WHERE id = $1`, fixture.UserGlobal); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := adminPool.Exec(ctx, `UPDATE platform.password_credential SET created_at = clock_timestamp() - interval '2 hours', expires_at = clock_timestamp() - interval '1 second' WHERE user_account_id = $1 AND purpose = 'LOGIN'`, fixture.UserGlobal); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.Login(ctx, identifier, "correct horse battery staple", "192.0.2.12:443", "test-agent"); !errors.Is(err, applicationauth.ErrAuthenticationFailed) {
+			t.Fatalf("expired credential login error = %v", err)
+		}
+		if _, err := adminPool.Exec(ctx, `UPDATE platform.password_credential SET expires_at = NULL WHERE user_account_id = $1 AND purpose = 'LOGIN'`, fixture.UserGlobal); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("invitation_is_single_use_and_does_not_assign_role", func(t *testing.T) {
+		issued, err := service.IssueInvitation(ctx, fixture.UserGlobal, "invited.admin@example.test", "Invited Admin", 600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		accountID, personID, err := service.AcceptInvitation(ctx, issued.Token, "another correct password")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if accountID == uuid.Nil || personID == uuid.Nil {
+			t.Fatal("invitation did not create identity")
+		}
+		if _, _, err := service.AcceptInvitation(ctx, issued.Token, "another correct password"); !errors.Is(err, applicationauth.ErrInvitationInvalid) {
+			t.Fatalf("invitation replay error = %v", err)
+		}
+		var roles int
+		if err := adminPool.QueryRow(ctx, `SELECT count(*) FROM platform.role_assignment WHERE person_id = $1`, personID).Scan(&roles); err != nil {
+			t.Fatal(err)
+		}
+		if roles != 0 {
+			t.Fatalf("invitation assigned %d roles", roles)
+		}
+	})
+
+	t.Run("context_revalidates_membership", func(t *testing.T) {
+		result, err := service.Login(ctx, identifier, "correct horse battery staple", "192.0.2.11:443", "test-agent")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.ChangeContext(ctx, result.Token, ptrUUID(fixture.CompanyA), nil); !errors.Is(err, applicationauth.ErrSessionNotFound) {
+			t.Fatalf("global identity context result = %v", err)
+		}
+		if err := service.Logout(ctx, result.Token, result.Session.ID); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestPostgres16OnlineBootstrap(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Clean(filepath.Join(migrationDirectory(t), "..", ".."))
+	harness, err := testdb.Start(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = harness.Close(context.Background()) })
+	migrator, err := migrations.Open(ctx, harness.MigratorDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrator.Close()
+	if err := migrations.Up(ctx, migrator, migrationDirectory(t)); err != nil {
+		t.Fatal(err)
+	}
+	runtimePool, err := pgxpool.New(ctx, harness.RuntimeDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtimePool.Close()
+	authPool, err := pgxpool.New(ctx, harness.AuthDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer authPool.Close()
+	adminPool, err := pgxpool.New(ctx, harness.AdminDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adminPool.Close()
+	repository, err := NewOnlineAuthRepository(runtimePool, authPool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := applicationauth.NewOnlineAuthService(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, err := service.Bootstrap(ctx, "bootstrap-secret-from-test", "first.admin@example.test", "First Administrator", "bootstrap password secure")
+	if err != nil || accountID == uuid.Nil {
+		t.Fatalf("bootstrap account = %s, err=%v", accountID, err)
+	}
+	if _, err := service.Bootstrap(ctx, "bootstrap-secret-from-test", "second.admin@example.test", "Second Administrator", "bootstrap password secure"); !errors.Is(err, applicationauth.ErrBootstrapUnavailable) {
+		t.Fatalf("second bootstrap error = %v", err)
+	}
+	var globals int
+	if err := adminPool.QueryRow(ctx, `
+		SELECT count(*) FROM platform.role_assignment
+		WHERE role_code = 'GLOBAL_ADMIN' AND lifecycle_status = 'ACTIVE'
+	`).Scan(&globals); err != nil {
+		t.Fatal(err)
+	}
+	if globals != 1 {
+		t.Fatalf("global admins = %d, want 1", globals)
+	}
+}
+
+func makeHash(value byte) []byte {
+	hash := make([]byte, 32)
+	for i := range hash {
+		hash[i] = value
+	}
+	return hash
+}

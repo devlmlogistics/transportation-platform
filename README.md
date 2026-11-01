@@ -13,10 +13,11 @@ El estado actual implementa:
 - contratos iniciales de Company, OperationType y CompanyOperation;
 - persistencia multiempresa, RLS y autorización por scope de Fase 1B.1-A;
 - servicios de aplicación y contratos administrativos de Fase 1B.1-B;
+- persistencia y contratos de autenticación online de Fase 1B.2-B, con login administrativo, sesiones opacas, CSRF y bootstrap controlado detrás de configuración explícita;
 - frontera de autenticación explícita, con rutas administrativas cerradas por defecto;
 - pruebas unitarias, de router y de UI.
 
-No se implementan autenticación real, WebAuthn, sesiones productivas, formularios operativos, offline ni funcionalidades de Drayage/Transportation. Las rutas administrativas no son funcionales en producción hasta conectar un proveedor de identidad real.
+WebAuthn, recovery, sesiones de conductor, formularios operativos, offline y funcionalidades de Drayage/Transportation siguen fuera de alcance. La autenticación online y las rutas administrativas permanecen cerradas por defecto y requieren configuración, credenciales separadas y revisión de seguridad para activarse.
 
 ## Versiones fijadas
 

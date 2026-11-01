@@ -1,6 +1,6 @@
 # Transportation Platform — Esquema de autenticación online
 
-Estado: diseño propuesto para Fase 1B.2. No crea tablas, no ejecuta migraciones y no autoriza cambios en PostgreSQL.
+Estado: diseño actualizado con la implementación de Fase 1B.2-B. La migración 000006 se prueba primero en PostgreSQL efímero; su aplicación persistente requiere un paso explícito posterior.
 
 ## Convención de evidencia
 
@@ -14,14 +14,14 @@ Estado: diseño propuesto para Fase 1B.2. No crea tablas, no ejecuta migraciones
 
 **[D]** Fase 1B.2 agregará autenticación online como un bounded context del mismo monolito modular y de la misma base nueva. No se modifican destructivamente las tablas de identidad, membresías, roles, permisos ni auditoría de 1B.1. La autenticación resolverá una cuenta existente; no creará pertenencias ni permisos como efecto implícito de iniciar sesión.
 
-**[P]** Los números exactos de migración, la política de retención y la eventual separación física de un esquema de seguridad deben aprobarse antes de escribir SQL en `db/migrations`. Fase 1B.2-A no debe agregar todavía la dependencia WebAuthn ni modificar `000001`–`000004`.
+**[V]** `000001`–`000005` permanecen inmutables. La política de retención y la eventual separación física de un esquema de seguridad siguen pendientes.
 
 ## 2. Secuencia de migraciones propuesta
 
 | Versión propuesta | Contenido | Dependencias | Reversa propuesta |
 |---|---|---|---|
 | `000005` | Credenciales locales de bootstrap, credenciales WebAuthn y challenges. | Fase 1B.1, `user_account`. | Eliminar tablas sólo en base efímera y con precondiciones; nunca borrar historial de producción automáticamente. |
-| `000006` | Sesiones online, autorizaciones de instalación y solicitudes de enrollment. | `000005`, `person`, `company`, `company_operation`. | Revocar/archivar primero; `down` destructivo sólo en entorno de pruebas propio. |
+| `000006` | Identificadores de login, contraseña LOGIN Argon2id, invitaciones, bootstrap, rate limits, grants de login y contratos HTTP de sesión. | `000005`, `person`, `company`, `company_operation`, roles y auditoría. | `down` sólo en PostgreSQL efímero; DEV persistente recibe únicamente `up`. |
 | `000007` | Recovery, claves de idempotencia y eventos de seguridad, si se confirma que no se reutiliza el canal de auditoría existente. | `000005`/`000006`. | Retirar políticas y tablas sólo con datos sintéticos; documentar retención antes de producción. |
 | `000008+` | Índices, políticas o cambios expand/contract aditivos. | Versión anterior. | Cada versión tiene su propio `down`; no se reutilizan números. |
 
@@ -342,3 +342,12 @@ Las pruebas usan sólo cuentas ficticias, claves generadas durante el test y un 
 ## 9. Bloqueos para implementación
 
 No iniciar migraciones hasta resolver: proveedor/canal de bootstrap, política de contraseña, compatibilidad de la biblioteca WebAuthn con Go 1.25, RP ID/origins, TTLs, política de passkeys sincronizadas, autoridad de recovery, retención, función `SECURITY DEFINER` mínima y primer gate de activación. Ver `docs/design/OPEN_QUESTIONS.md`.
+
+## 15. Implementación 1B.2-B
+
+- **[V]** `login_identifier` evita resolver una cuenta por nombre; `password_credential.purpose=LOGIN` se acepta sólo con estado y expiración vigentes.
+- **[V]** `auth_verified_login_grant` vincula cuenta, persona y hash de credencial verificada. Es de un solo uso y expira rápidamente.
+- **[V]** `tp_runtime` puede registrar el grant sólo con el hash Argon2id que Go obtuvo por la frontera de autenticación; `tp_auth_runtime` puede consumirlo, pero no insertarlo ni leer tablas sensibles directamente.
+- **[V]** Las funciones HTTP de sesión devuelven sólo el estado necesario para resolver un principal. Los tokens, secretos CSRF y credenciales no se almacenan en claro.
+- **[D]** `auth_invitation` y `auth_bootstrap_request` no asignan roles salvo el `GLOBAL_ADMIN` inicial del bootstrap; la aceptación de invitación no crea privilegios.
+- **[P]** Recovery, WebAuthn, device authorization y retención definitiva de auditoría requieren migraciones y decisiones propias.

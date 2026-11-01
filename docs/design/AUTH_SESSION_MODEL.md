@@ -1,6 +1,6 @@
 # Transportation Platform — Modelo de sesiones y credenciales
 
-Estado: diseño propuesto para revisión. No crea tablas ni modifica PostgreSQL.
+Estado: diseño implementado parcialmente en Fase 1B.2-B; WebAuthn, recovery y offline siguen fuera de alcance.
 
 ## 1. Separación conceptual
 
@@ -62,6 +62,14 @@ Semántica exacta:
 - `COMPROMISED`: señal o incidente de seguridad; fija `compromised_at`, invalida el uso y exige nueva autenticación/step-up según riesgo.
 
 Una sesión inválida no vuelve a `ACTIVE` ni cambia entre estados terminales. La renovación crea un token nuevo o rota el token; no extiende indefinidamente el TTL absoluto. Los timestamps los genera el servidor y se escriben una sola vez.
+
+## Implementación 1B.2-B
+
+- **[V]** `auth_session.session_policy` se fija a `ADMINISTRATIVE` para las sesiones de contraseña de esta fase; la función de emisión aplica 30 minutos idle y 8 horas absolutas.
+- **[V]** `resolve_auth_session_http` bloquea y revalida sesión, cuenta, persona, epoch y TTL; actualiza `last_seen_at` con reloj de PostgreSQL.
+- **[V]** `SessionPrincipalResolver` construye el principal sólo desde la cookie opaca y la fila resuelta. El contexto guardado no reemplaza la autorización de cada operación.
+- **[D]** Logout y revocación global permanecen en las funciones SQL existentes; la revocación global bloquea cuenta y token antes de incrementar el epoch.
+- **[P]** Rotación de sesión, step-up, recovery y sesiones de conductor se implementarán únicamente con sus políticas aprobadas.
 
 `UserAccount.session_epoch` comienza en cero. Para revocación global, la transacción bloquea la cuenta, incrementa el epoch y marca las sesiones activas como `REVOKED`; el resolver comprueba además la igualdad del epoch para protegerse ante una materialización incompleta. Una sesión creada después del incremento captura el nuevo epoch. Suspender la cuenta/persona también invalida la resolución, aunque la limpieza física de filas ocurra después.
 

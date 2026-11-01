@@ -1,6 +1,6 @@
 # Transportation Platform — Planificación Fase 1B.2: autenticación online
 
-Estado: planificación propuesta para revisión. No autoriza código productivo, migraciones, activación de autenticación ni apertura de endpoints.
+Estado: 1B.2-B implementada en rama de trabajo; la apertura HTTP y la aplicación persistente de 000006 siguen sujetas a gates explícitos.
 
 ## 1. Evidencia y línea base
 
@@ -96,11 +96,11 @@ No se recomienda crear un IdP genérico propio ni un sistema de plugins de auten
 
 ### 1B.2-B — autenticación online y acceso administrativo
 
-- **Objetivo:** login inicial de perfiles administrativos, sesiones opacas, logout, revocación y `PrincipalResolver` real.
-- **Dependencias:** 1B.2-A, política de invitaciones, CSRF, rate limiting y decisión de passkey obligatoria por acción.
-- **Contratos:** `/auth/invitations/accept`, `/auth/login`, `/auth/logout`, `/auth/sessions`, `/auth/context`, `/auth/revoke-all`; nombres sujetos a aprobación.
-- **Pruebas:** `httptest`, PostgreSQL efímero, cookie attributes, CSRF, rate limits, cuenta/membership suspendida, cross-tenant y step-up.
-- **Aceptación:** `ClosedAdminHandler` sólo se reemplaza en una configuración explícita y probada; no se aceptan headers arbitrarios; las sesiones revocadas fallan inmediatamente.
+- **[V] Objetivo entregado:** login administrativo por contraseña Argon2id, sesiones opacas, logout, revocación, cambio de contexto y `PrincipalResolver` real.
+- **[V] Dependencias entregadas:** migración 000006, dos pools con roles separados, CSRF/Origin, rate limiting persistente y cookies seguras configurables.
+- **[V] Contratos:** `/api/v1/auth/login`, `/me`, `/logout`, `/sessions`, `/revoke-all`, `/context` e invitación de aceptación. Las rutas administrativas sólo se abren con configuración explícita.
+- **[V] Pruebas:** migración UP/DOWN/UP, FORCE RLS, roles, handoff de emisión, login, revocación, invitación, bootstrap y pruebas unitarias de cookies/CSRF.
+- **[P] Pendiente:** activación productiva, entrega de invitaciones, step-up, recovery y autenticación WebAuthn.
 
 ### 1B.2-C — WebAuthn, DeviceAuthorization y recuperación
 
@@ -117,7 +117,7 @@ No se propone una 1B.2-D offline: offline permanece bloqueado hasta una fase pos
 - **[D]** `db/migrations` sigue siendo la única fuente canónica y las nuevas migraciones son reversibles sólo en bases efímeras. En entornos con datos, se usará expand/contract y precheck.
 - **[D]** La numeración 000005+ pertenece a `platform`; no se reutiliza ni se copia la migración heredada `Consulta drayage/db/migrations/007_driver_device_auth.sql`.
 - **[D]** `tp_owner` conserva ownership; `tp_migrator` ejecuta Goose; `tp_runtime` no tiene DDL, `SUPERUSER` ni `BYPASSRLS`; no se agrega un rol de runtime de autenticación en 1B.2-A.
-- **[D]** `platform.resolve_auth_session(bytea)` sólo acepta el token hash calculado por el servidor y devuelve una fila activa mínima; `platform.consume_auth_challenge(uuid,text,bytea,bytea)` bloquea, valida y consume un challenge una sola vez, devolviendo únicamente `SessionData` y el contexto mínimo de la ceremonia.
+- **[V]** `platform.resolve_auth_session_http(bytea)` y los contratos de 000006 sólo aceptan hashes calculados por el servidor; el nuevo emisor consume un grant de un solo uso y no recibe un `user_account_id` arbitrario como autoridad.
 - **[D]** Ambas funciones, si se implementan en una migración posterior, usarán `SECURITY DEFINER`, `search_path = pg_catalog, platform`, nombres calificados, `REVOKE ALL FROM PUBLIC` y `EXECUTE` exacto para `tp_runtime`; no consultarán por `user_account_id`, tenant, role o permission suministrados por el cliente.
 - **[V]** `tp_security_audit_writer` es el rol existente para `record_denied_attempt`; no se introduce `tp_security_writer`. Es `NOLOGIN`, `NOSUPERUSER`, `NOBYPASSRLS` y no recibe lectura global.
 

@@ -174,3 +174,17 @@ Los documentos de diseño asociados son `AUTHENTICATION_ARCHITECTURE.md`, `AUTH_
 | H-04 | Actor, empresa, operación y reason code de una denegación deben derivarse de objetos internos del servidor, no de HTTP. | [V] Corregido con `NewDeniedAttempt` |
 | H-05 | ¿Qué rate limit, alertas, retención y acceso break-glass aplican a `AdminDeniedAttempt`? | [P] Seguridad/compliance |
 | H-06 | `db/migrations` es la única fuente canónica; cualquier paquete o archivo derivado requiere generación y verificación explícitas. | [V] Confirmado |
+
+## Addendum — decisiones de implementación Fase 1B.2-B
+
+| ID | Decisión | Estado |
+|---|---|---|
+| A-36 | KDF administrativo inicial | [V] Argon2id Go, v19, m=65536 KiB, t=3, p=1, salt 16 bytes y clave 32 bytes. |
+| A-37 | Emisión de sesión | [V] Grant de un solo uso dividido entre `tp_runtime` y `tp_auth_runtime`; `create_auth_session` permanece cerrado. |
+| A-38 | Sesiones HTTP | [V] Cookie opaca `HttpOnly`, `SameSite=Lax`, `Secure` configurable/obligatorio en producción; CSRF y Origin para mutaciones. |
+| A-39 | Bootstrap inicial | [V] CLI explícito con secreto externo; sin endpoint ni ejecución automática; se bloquea después del primer `GLOBAL_ADMIN`. |
+| A-40 | Invitaciones | [V] Token hash, expiración y consumo único; aceptar una invitación no asigna roles. **[P]** Canal de entrega. |
+| A-41 | Activación de administración | [V] `ClosedAdminHandler` sigue siendo el default; requiere `AUTH_ONLINE_ENABLED`, `ADMIN_HTTP_ENABLED`, pools de roles esperados y origins explícitos. |
+| A-42 | Pendientes que siguen bloqueando producción | [P] WebAuthn, recovery, step-up, entrega de invitaciones, origins definitivos, retención y aplicación de 000006 sobre DEV persistente. |
+
+La implementación de 1B.2-B se documenta en `docs/implementation/PHASE_1B2B_IMPLEMENTATION.md`. No se inicia 1B.2-C ni se modifica código heredado.

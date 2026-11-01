@@ -1,6 +1,6 @@
 # Transportation Platform — Plan de pruebas de autenticación online
 
-Estado: plan propuesto para Fase 1B.2. No implementa autenticación ni ejecuta migraciones.
+Estado: plan y evidencia de pruebas de Fase 1B.2-B. Las pruebas destructivas usan únicamente el harness PostgreSQL 16 efímero.
 
 ## Convención de evidencia
 
@@ -23,7 +23,7 @@ Estado: plan propuesto para Fase 1B.2. No implementa autenticación ni ejecuta m
 
 No se prueban offline, sincronización de formularios ni cambios en Drayage; esas capacidades quedan fuera de 1B.2.
 
-Fase 1B.2-A no ejecuta login, registration, authentication, recovery ni invitaciones. Sus pruebas se limitan a persistencia, repositorios, contratos internos, estados, RLS, auditoría y protección del harness. Las ceremonias WebAuthn son un gate posterior y no deben introducir una dependencia mientras la compatibilidad Go 1.25 siga pendiente.
+Fase 1B.2-A no ejecutó login, registration, recovery ni WebAuthn. Fase 1B.2-B agrega login administrativo por contraseña, sesiones online, invitación de aceptación y bootstrap controlado; WebAuthn, recovery, offline y dispositivos siguen fuera de alcance.
 
 ## 2. Capas de prueba
 
@@ -223,6 +223,14 @@ La implementación futura no pasa el gate si falla uno de estos bloques:
 Los endpoints productivos permanecen cerrados hasta que los resultados sean reproducibles y el gate de activación sea aprobado explícitamente.
 
 Para 1B.2-A, la aceptación adicional es: `ClosedAdminHandler` continúa activo, no existe endpoint de login/WebAuthn funcional, no se agregó proveedor de identidad ni credencial real, y las pruebas de repositorio cubren la semántica `ACTIVE`/`EXPIRED`/`REVOKED`/`COMPROMISED`, `expired_at`/`revoked_at`/`compromised_at` y `session_epoch`.
+
+## 13. Evidencia ejecutada en 1B.2-B
+
+- **[V]** La suite PostgreSQL 16 efímera ejecuta 000001–000006 con `up/down/up`, verifica FORCE RLS y roles, comprueba que `tp_runtime` y `tp_auth_runtime` no tienen DML directo sensible, y prueba el handoff de grant sin emisión arbitraria.
+- **[V]** La suite cubre login válido e inválido, hash no reversible en `auth_session`, logout, revocación, invitación de un solo uso sin roles automáticos, revalidación de contexto y bootstrap único.
+- **[V]** `httptest` cubre cookies `HttpOnly`/CSRF, `SameSite=Lax`, Origin no confiable y rechazo de mutaciones sin CSRF.
+- **[D]** Antes de activar administración se mantiene como gate la ejecución completa de `go test ./...`, `go vet ./...`, frontend, build Go y Docker.
+- **[P]** Faltan pruebas de navegador real, step-up, recovery, WebAuthn, offline y entrega de invitaciones; corresponden a fases posteriores.
 
 ## 12. Riesgos y decisiones pendientes
 

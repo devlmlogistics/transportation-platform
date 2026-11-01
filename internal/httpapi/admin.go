@@ -370,5 +370,6 @@ func writeAdminServiceError(w http.ResponseWriter, r *http.Request, err error) {
 }
 
 func writeNoContent(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusNoContent)
 }

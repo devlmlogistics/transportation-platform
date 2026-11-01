@@ -49,9 +49,15 @@ func (CompanyRepository) Get(ctx context.Context, tx pgx.Tx, id uuid.UUID) (Comp
 }
 
 type Principal struct {
-	UserAccountID uuid.UUID
-	PersonID      uuid.UUID
-	Active        bool
+	UserAccountID     uuid.UUID
+	PersonID          uuid.UUID
+	Active            bool
+	SessionID         uuid.UUID
+	SessionEpoch      int64
+	ContextVersion    int64
+	ActiveCompanyID   *uuid.UUID
+	ActiveOperationID *uuid.UUID
+	CSRFSecretHash    []byte
 }
 
 type AuthorizationRequest struct {
