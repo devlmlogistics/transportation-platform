@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"transportation-platform/internal/platform/migrations"
 	"transportation-platform/internal/platform/tenancy"
+	"transportation-platform/internal/platform/testdb"
 )
 
 type foundationFixture struct {
@@ -38,14 +39,21 @@ type foundationFixture struct {
 }
 
 func TestPostgres16Foundation(t *testing.T) {
-	runtimeDSN := os.Getenv("TEST_DATABASE_URL")
-	migratorDSN := os.Getenv("TEST_DATABASE_MIGRATOR_URL")
-	adminDSN := os.Getenv("TEST_DATABASE_ADMIN_URL")
-	if runtimeDSN == "" || migratorDSN == "" || adminDSN == "" {
-		t.Skip("set TEST_DATABASE_URL, TEST_DATABASE_MIGRATOR_URL and TEST_DATABASE_ADMIN_URL for PostgreSQL integration tests")
-	}
-
 	ctx := context.Background()
+	repositoryRoot := filepath.Clean(filepath.Join(migrationDirectory(t), "..", ".."))
+	harness, err := testdb.Start(ctx, repositoryRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := harness.Close(context.Background()); err != nil {
+			t.Errorf("close PostgreSQL harness: %v", err)
+		}
+	})
+	runtimeDSN := harness.RuntimeDSN
+	migratorDSN := harness.MigratorDSN
+	adminDSN := harness.AdminDSN
+
 	migratorDB, err := migrations.Open(ctx, migratorDSN)
 	if err != nil {
 		t.Fatal(err)
@@ -61,6 +69,14 @@ func TestPostgres16Foundation(t *testing.T) {
 	if err := runtimePool.Ping(ctx); err != nil {
 		t.Fatal(err)
 	}
+	authPool, err := pgxpool.New(ctx, harness.AuthDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer authPool.Close()
+	if err := authPool.Ping(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	fixture := seedFoundation(t, ctx, runtimePool)
 	t.Run("tenant_isolation", func(t *testing.T) { testTenantIsolation(t, ctx, runtimePool, fixture) })
@@ -72,10 +88,11 @@ func TestPostgres16Foundation(t *testing.T) {
 	t.Run("audit_and_privileges", func(t *testing.T) { testAuditAndPrivileges(t, ctx, runtimePool, adminDSN, fixture) })
 	t.Run("owner_force_rls", func(t *testing.T) { testOwnerForceRLS(t, ctx, migratorDSN) })
 	t.Run("pool_context_a_b_a", func(t *testing.T) { testPoolContextSequence(t, ctx, runtimePool, fixture) })
+	t.Run("auth_foundation", func(t *testing.T) { testAuthFoundation(t, ctx, runtimePool, authPool, adminDSN, fixture) })
 
 	version, err := migrations.Version(ctx, migratorDB)
-	if err != nil || version != 4 {
-		t.Fatalf("expected migration version 4 after integration suite, version=%d err=%v", version, err)
+	if err != nil || version != 5 {
+		t.Fatalf("expected migration version 5 after integration suite, version=%d err=%v", version, err)
 	}
 }
 
@@ -92,8 +109,8 @@ func prepareSchema(t *testing.T, ctx context.Context, db *sql.DB, adminDSN strin
 		t.Fatalf("migrations up: %v", err)
 	}
 	version, err := migrations.Version(ctx, db)
-	if err != nil || version != 4 {
-		t.Fatalf("expected version 4 after up, version=%d err=%v", version, err)
+	if err != nil || version != 5 {
+		t.Fatalf("expected version 5 after up, version=%d err=%v", version, err)
 	}
 	if err := migrations.DownTo(ctx, db, directory, 0); err != nil {
 		t.Fatalf("migrations down: %v", err)
@@ -112,6 +129,14 @@ func clearSyntheticData(t *testing.T, ctx context.Context, adminDSN string) {
 	defer adminDB.Close()
 	if _, err := adminDB.ExecContext(ctx, `
 		TRUNCATE TABLE
+			platform.security_audit_event,
+			platform.recovery_request,
+			platform.auth_session,
+			platform.auth_challenge,
+			platform.device_enrollment_request,
+			platform.device_authorization,
+			platform.authenticator_credential,
+			platform.password_credential,
 			platform.admin_denied_attempt,
 			platform.admin_audit_event,
 			platform.permission_grant,
