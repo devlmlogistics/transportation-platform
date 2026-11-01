@@ -2,6 +2,14 @@
 
 Estado: plan y evidencia de pruebas de Fase 1B.2-B. Las pruebas destructivas usan únicamente el harness PostgreSQL 16 efímero.
 
+## Fase 1B.2-C — casos adicionales
+
+- **[D]** Registrar challenge con propósito, hash, binding y `auth_session.id`; repetir, expirar o usar desde otra sesión debe devolver rechazo sin mutar credential/sesión.
+- **[D]** Una respuesta con Origin/RP ID/firma incorrectos, UV ausente, credential revocada o cuenta distinta nunca llama a la finalización SQL.
+- **[D]** Step-up válido dura 10 minutos o hasta el TTL absoluto; el resolver degrada el nivel vencido a `PASSWORD`.
+- **[D]** La autorización de dispositivo exige request aprobado; la aprobación exige sesión, membership, permiso exacto y scope exacto; supervisor de A no opera B.
+- **[P]** La ceremonia real debe usar Virtual Authenticator o mecanismo estándar equivalente; no se acepta un mock que devuelva siempre éxito.
+
 ## Convención de evidencia
 
 - **[V] Verificado:** comportamiento o restricción ya observado.

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -130,13 +131,15 @@ func (r *OnlineAuthRepository) ResolveHTTPSession(ctx context.Context, tokenHash
 	err := r.authPool.QueryRow(ctx, `
 		SELECT session_id, user_account_id, person_id, session_epoch,
 		       context_version, active_company_id, active_operation_id,
-		       session_policy, csrf_secret_hash, status, idle_expires_at,
+		       session_policy, authentication_level, step_up_expires_at, step_up_credential_id,
+		       csrf_secret_hash, status, idle_expires_at,
 		       absolute_expires_at, created_at, last_seen_at
 		FROM platform.resolve_auth_session_http($1)
 	`, tokenHash).Scan(
 		&result.ID, &result.UserAccountID, &result.PersonID, &result.SessionEpoch,
 		&result.ContextVersion, &result.ActiveCompanyID, &result.ActiveOperationID,
-		&policy, &result.CSRFSecretHash, &result.Status, &result.IdleExpiresAt,
+		&policy, &result.AuthenticationLevel, &result.StepUpExpiresAt, &result.StepUpCredentialID,
+		&result.CSRFSecretHash, &result.Status, &result.IdleExpiresAt,
 		&result.AbsoluteExpiresAt, &result.CreatedAt, &result.LastSeenAt,
 	)
 	if err != nil {
@@ -281,6 +284,179 @@ func (r *OnlineAuthRepository) RecordLoginFailure(ctx context.Context, auditID u
 	return err
 }
 
+func (r *OnlineAuthRepository) BeginWebAuthnChallenge(ctx context.Context, tokenHash []byte, request auth.WebAuthnChallengeRequest) error {
+	if r == nil || r.authPool == nil || len(tokenHash) != 32 || request.ID == uuid.Nil || request.AuditID == uuid.Nil {
+		return auth.ErrInvalidInput
+	}
+	if len(request.ChallengeHash) != 32 || len(request.BindingHash) != 32 || len(request.SessionData) == 0 || request.ExpiresAt.IsZero() {
+		return auth.ErrInvalidInput
+	}
+	var id *uuid.UUID
+	err := r.authPool.QueryRow(ctx, `
+		SELECT platform.begin_webauthn_challenge($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+	`, tokenHash, request.ID, string(request.Purpose), request.ChallengeHash, request.SessionData,
+		request.SessionDataFormat, request.BindingHash, request.ExpiresAt.UTC(), nullableUUID(request.DeviceRequestID), request.AuditID).Scan(&id)
+	if err != nil {
+		return err
+	}
+	if id == nil || *id != request.ID {
+		return auth.ErrInvalidSession
+	}
+	return nil
+}
+
+func (r *OnlineAuthRepository) GetWebAuthnChallenge(ctx context.Context, tokenHash []byte, id uuid.UUID, purpose auth.ChallengePurpose) (auth.WebAuthnChallenge, error) {
+	if r == nil || r.authPool == nil || len(tokenHash) != 32 || id == uuid.Nil {
+		return auth.WebAuthnChallenge{}, auth.ErrInvalidInput
+	}
+	var result auth.WebAuthnChallenge
+	result.ID = id
+	var deviceID *uuid.UUID
+	err := r.authPool.QueryRow(ctx, `
+		SELECT challenge_hash,session_data,session_data_format,binding_hash,user_account_id,device_enrollment_request_id
+		FROM platform.get_webauthn_challenge($1,$2,$3)
+	`, tokenHash, id, string(purpose)).Scan(&result.ChallengeHash, &result.SessionData,
+		&result.SessionDataFormat, &result.BindingHash, &result.UserAccountID, &deviceID)
+	if err != nil {
+		return auth.WebAuthnChallenge{}, err
+	}
+	result.DeviceRequestID = deviceID
+	return result, nil
+}
+
+func (r *OnlineAuthRepository) CompleteWebAuthnRegistration(ctx context.Context, tokenHash []byte, request auth.CompleteRegistrationRequest) (uuid.UUID, *uuid.UUID, error) {
+	if r == nil || r.authPool == nil || len(tokenHash) != 32 || request.ChallengeID == uuid.Nil || request.CredentialID == uuid.Nil || request.AuditID == uuid.Nil {
+		return uuid.Nil, nil, auth.ErrInvalidInput
+	}
+	var credentialID uuid.UUID
+	var deviceID *uuid.UUID
+	err := r.authPool.QueryRow(ctx, `
+		SELECT credential_id,device_authorization_id
+		FROM platform.complete_webauthn_registration($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+	`, tokenHash, request.ChallengeID, request.ChallengeHash, request.BindingHash,
+		request.CredentialID, request.CredentialKey, request.PublicKey, request.SignCount,
+		request.Transports, request.BackupEligible, nullableString(request.BackupState), request.UserVerified,
+		request.DisplayName, request.Metadata, request.DeviceAuthorizationID, request.AuditID).Scan(&credentialID, &deviceID)
+	if err != nil {
+		return uuid.Nil, nil, err
+	}
+	return credentialID, deviceID, nil
+}
+
+func (r *OnlineAuthRepository) CompleteWebAuthnStepUp(ctx context.Context, tokenHash []byte, request auth.CompleteStepUpRequest) (time.Time, error) {
+	if r == nil || r.authPool == nil || len(tokenHash) != 32 || request.ChallengeID == uuid.Nil || request.AuditID == uuid.Nil {
+		return time.Time{}, auth.ErrInvalidInput
+	}
+	var expires time.Time
+	err := r.authPool.QueryRow(ctx, `
+		SELECT platform.complete_webauthn_step_up($1,$2,$3,$4,$5,$6)
+	`, tokenHash, request.ChallengeID, request.ChallengeHash, request.BindingHash, request.CredentialKey, request.AuditID).Scan(&expires)
+	return expires, err
+}
+
+func (r *OnlineAuthRepository) ListAuthenticatorCredentials(ctx context.Context, tokenHash []byte) ([]auth.AuthenticatorCredentialRecord, error) {
+	if r == nil || r.authPool == nil || len(tokenHash) != 32 {
+		return nil, auth.ErrInvalidInput
+	}
+	rows, err := r.authPool.Query(ctx, `
+		SELECT id,credential_id,public_key,sign_count,transports,display_name,status,backup_eligible,backup_state,user_verified_last,
+		       created_at,last_used_at,revoked_at
+		FROM platform.list_authenticator_credentials($1)
+	`, tokenHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []auth.AuthenticatorCredentialRecord
+	for rows.Next() {
+		var item auth.AuthenticatorCredentialRecord
+		if err := rows.Scan(&item.ID, &item.CredentialID, &item.PublicKey, &item.SignCount, &item.Transports,
+			&item.DisplayName, &item.Status, &item.BackupEligible, &item.BackupState, &item.UserVerifiedLast,
+			&item.CreatedAt, &item.LastUsedAt, &item.RevokedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (r *OnlineAuthRepository) RevokeOwnAuthenticator(ctx context.Context, tokenHash []byte, credentialID uuid.UUID, reason string) error {
+	if r == nil || r.authPool == nil || len(tokenHash) != 32 || credentialID == uuid.Nil {
+		return auth.ErrInvalidInput
+	}
+	var changed bool
+	err := r.authPool.QueryRow(ctx, `SELECT platform.revoke_own_authenticator($1,$2,$3,$4)`, tokenHash, credentialID, reason, uuid.New()).Scan(&changed)
+	if err == nil && !changed {
+		return pgx.ErrNoRows
+	}
+	return err
+}
+
+func (r *OnlineAuthRepository) CreateDeviceEnrollmentRequest(ctx context.Context, tokenHash []byte, input auth.DeviceEnrollmentRequestInput) (auth.DeviceEnrollmentRequest, error) {
+	if r == nil || r.authPool == nil || len(tokenHash) != 32 || input.ID == uuid.Nil || input.AuditID == uuid.Nil {
+		return auth.DeviceEnrollmentRequest{}, auth.ErrInvalidInput
+	}
+	var result auth.DeviceEnrollmentRequest
+	err := r.authPool.QueryRow(ctx, `
+		SELECT request_id,correlation_code,company_id,company_operation_id,installation_id,status,expires_at
+		FROM platform.create_device_enrollment_request($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+	`, tokenHash, input.ID, input.CorrelationCode, input.CompanyID, nullableUUID(input.CompanyOperationID), input.InstallationID,
+		input.InstallationPublicKey, input.KeyAlgorithm, input.BindingHash, input.ExpiresAt.UTC(), input.AuditID).Scan(
+		&result.ID, &result.CorrelationCode, &result.CompanyID, &result.CompanyOperationID, &result.InstallationID, &result.Status, &result.ExpiresAt)
+	return result, err
+}
+
+func (r *OnlineAuthRepository) ApproveDeviceEnrollmentRequest(ctx context.Context, tokenHash []byte, requestID uuid.UUID, reason string) error {
+	return r.changeDeviceRequest(ctx, "approve_device_enrollment_request", tokenHash, requestID, reason)
+}
+
+func (r *OnlineAuthRepository) RejectDeviceEnrollmentRequest(ctx context.Context, tokenHash []byte, requestID uuid.UUID, reason string) error {
+	return r.changeDeviceRequest(ctx, "reject_device_enrollment_request", tokenHash, requestID, reason)
+}
+
+func (r *OnlineAuthRepository) RevokeDeviceAuthorization(ctx context.Context, tokenHash []byte, authorizationID uuid.UUID, reason string) error {
+	if r == nil || r.authPool == nil || len(tokenHash) != 32 || authorizationID == uuid.Nil {
+		return auth.ErrInvalidInput
+	}
+	var changed bool
+	err := r.authPool.QueryRow(ctx, `SELECT platform.revoke_device_authorization($1,$2,$3,$4)`, tokenHash, authorizationID, reason, uuid.New()).Scan(&changed)
+	if err == nil && !changed {
+		return pgx.ErrNoRows
+	}
+	return err
+}
+
+func (r *OnlineAuthRepository) changeDeviceRequest(ctx context.Context, function string, tokenHash []byte, requestID uuid.UUID, reason string) error {
+	if r == nil || r.authPool == nil || len(tokenHash) != 32 || requestID == uuid.Nil {
+		return auth.ErrInvalidInput
+	}
+	var changed bool
+	switch function {
+	case "approve_device_enrollment_request", "reject_device_enrollment_request":
+	default:
+		return auth.ErrInvalidInput
+	}
+	err := r.authPool.QueryRow(ctx, `SELECT platform.`+function+`($1,$2,$3,$4)`, tokenHash, requestID, reason, uuid.New()).Scan(&changed)
+	if err == nil && !changed {
+		return pgx.ErrNoRows
+	}
+	return err
+}
+
 func (r *OnlineAuthRepository) withAuthTx(ctx context.Context, fn func(context.Context, pgx.Tx) error) error {
 	return WithTenantTx(ctx, r.authPool, tenancy.Platform(), fn)
+}
+
+func nullableUUID(value *uuid.UUID) any {
+	if value == nil || *value == uuid.Nil {
+		return nil
+	}
+	return *value
+}
+
+func nullableString(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return strings.TrimSpace(value)
 }

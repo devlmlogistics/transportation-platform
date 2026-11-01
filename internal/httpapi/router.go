@@ -12,8 +12,9 @@ func NewRouter(cfg config.Config, logger *slog.Logger) (http.Handler, error) {
 }
 
 type RouterDependencies struct {
-	Auth  OnlineAuthHTTPService
-	Admin AdminService
+	Auth     OnlineAuthHTTPService
+	Admin    AdminService
+	WebAuthn WebAuthnHTTPService
 }
 
 func NewRouterWithDependencies(cfg config.Config, logger *slog.Logger, dependencies RouterDependencies) (http.Handler, error) {
@@ -37,6 +38,15 @@ func NewRouterWithDependencies(cfg config.Config, logger *slog.Logger, dependenc
 		authSecurity = configured
 	}
 	mux.Handle("/api/v1/auth/", authHandler)
+	webauthnHandler := http.Handler(ClosedWebAuthnHandler())
+	if cfg.WebAuthnEnabled && dependencies.Auth != nil && dependencies.WebAuthn != nil && authSecurity != nil {
+		configured, err := NewWebAuthnHandler(dependencies.Auth, dependencies.WebAuthn, cfg.AllowedOrigins, cfg.AuthCookieSecure)
+		if err != nil {
+			return nil, err
+		}
+		webauthnHandler = configured
+	}
+	mux.Handle("/api/v1/auth/webauthn/", webauthnHandler)
 	adminHandler := ClosedAdminHandler()
 	if cfg.AdminHTTPEnabled && dependencies.Admin != nil && authSecurity != nil {
 		resolver := SessionPrincipalResolver{Service: dependencies.Auth}

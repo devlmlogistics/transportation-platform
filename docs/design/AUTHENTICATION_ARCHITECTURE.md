@@ -2,6 +2,13 @@
 
 Estado: diseño base actualizado con implementación de Fase 1B.2-B. La activación HTTP sigue siendo explícita y fail-closed.
 
+## Fase 1B.2-C
+
+- **[D]** WebAuthn es un segundo factor/capability de autenticación; no es equivalente a la autorización física de una instalación.
+- **[D]** `WEBAUTHN_STEP_UP` sólo se materializa después de verificar RP ID/origin configurados, UV requerido, credential activa, challenge de un solo uso y sesión original vigente.
+- **[D]** Los challenges incluyen `session_id`; una sesión diferente de la misma cuenta no puede consumirlos.
+- **[P]** El flag WebAuthn requiere ceremonia real con Virtual Authenticator y aprobación de la frontera de confianza residual Go → PostgreSQL.
+
 ## Evidencia y decisiones
 
 - **[V]** La plataforma ya separa `Person`, `UserAccount`, memberships, roles y permisos; el `PrincipalResolver` de 1B.1-B aún no tiene proveedor real.
@@ -165,15 +172,15 @@ Cada gate debe ser una configuración explícita y fail-closed; no se permite un
 
 ## 11. Biblioteca WebAuthn evaluada
 
-**[P] Resultado de la comprobación:** no puede confirmarse actualmente una versión que cumpla simultáneamente “mantenida” y “toolchain fijo Go 1.25”. El candidato concreto más cercano es `v0.17.4`: su módulo declara `go 1.25.0`, pero su `go.mod` fija `toolchain go1.26.3`. La versión `v0.18.2` declara `go 1.26.0` y `toolchain go1.27.1`. No se debe permitir que Go descargue o cambie automáticamente el toolchain en este proyecto.
+**[V]** La versión fijada para Fase 1B.2-C es `github.com/go-webauthn/webauthn@v0.13.0`: declara `go 1.23.0` y `toolchain go1.24.3`, y compila con el Go 1.25.0 del proyecto. Versiones posteriores requieren una revisión de toolchain y cambios mayores.
 
-**[D] Recomendación provisional:** reservar `github.com/go-webauthn/webauthn@v0.17.4` como candidato para una prueba aislada, sin agregarlo a Fase 1B.2-A. La adopción sólo se aprueba si un build reproducible con el toolchain obligatorio Go 1.25 pasa compilación y pruebas de protocolo; si no, se debe aprobar cambiar el toolchain o seleccionar otra biblioteca mantenida. El adaptador propio seguirá siendo `WebAuthnService`.
+**[D]** El adaptador propio `WebAuthnService` encapsula la versión fijada; una actualización no puede cambiar el toolchain automáticamente y requiere repetir pruebas de protocolo.
 
 Motivos observados en la fuente oficial:
 
 - biblioteca FIDO2/WebAuthn para Go con soporte de registro y login;
 - pruebas de conformidad declaradas;
-- `v0.17.4` es una versión etiquetada publicada en mayo de 2026 y expone `BeginRegistration`/`FinishRegistration`, `BeginLogin`/`FinishLogin` y `SessionData` server-side;
+- `v0.13.0` expone `BeginRegistration`/`FinishRegistration`, `BeginLogin`/`FinishLogin` y `SessionData` server-side;
 - releases recientes incluyen correcciones de validación de ceremonies/challenges, pero las versiones más nuevas elevan la versión de Go requerida;
 - licencia BSD-3-Clause.
 
@@ -181,11 +188,11 @@ Precaución: el repositorio declara semver 0 y su política oficial actual marca
 
 ### API y persistencia que deberá encapsular `WebAuthnService`
 
-Para el candidato `v0.17.4`, el contrato conceptual será:
+Para `v0.13.0`, el contrato implementado es:
 
 1. `BeginRegistration`/`BeginLogin` reciben un usuario ya resuelto y devuelven options más `SessionData`.
 2. El servidor serializa y almacena `SessionData` íntegro, ligado a `AuthChallenge`, `UserAccount`, RP ID, purpose, expiry y binding opaco; el navegador no puede modificarlo.
-3. El servicio consume atómicamente `AuthChallenge` antes de entregar `SessionData` al `FinishRegistration`/`FinishLogin` o a sus variantes `Validate*`.
+3. El servicio entrega `SessionData` sólo a una sesión vigente; la finalización SQL consume atómicamente el challenge después de la verificación de la biblioteca, bajo lock y con binding de sesión.
 4. El adaptador valida la respuesta con la API de la versión fijada; sólo después persiste `AuthenticatorCredential`, actualiza `sign_count`/flags y crea `AuthSession`.
 5. `DeviceAuthorization` queda fuera de la biblioteca y sólo se activa mediante aprobación independiente y scope verificado.
 6. Un error de verificación consume el challenge y exige uno nuevo; no se reintenta con el mismo estado.
@@ -229,9 +236,9 @@ Alternativas consideradas:
 
 - [Repositorio oficial go-webauthn/webauthn](https://github.com/go-webauthn/webauthn)
 - [Módulo y versión publicada](https://pkg.go.dev/github.com/go-webauthn/webauthn)
-- [`go.mod` de v0.17.4](https://raw.githubusercontent.com/go-webauthn/webauthn/v0.17.4/go.mod)
+- [`go.mod` de v0.13.0](https://raw.githubusercontent.com/go-webauthn/webauthn/v0.13.0/go.mod)
 - [`go.mod` de v0.18.2](https://raw.githubusercontent.com/go-webauthn/webauthn/v0.18.2/go.mod)
-- [API de `v0.17.4`](https://pkg.go.dev/github.com/go-webauthn/webauthn@v0.17.4/webauthn)
+- [API de `v0.13.0`](https://pkg.go.dev/github.com/go-webauthn/webauthn@v0.13.0/webauthn)
 - [Releases oficiales](https://github.com/go-webauthn/webauthn/releases)
 - `docs/design/DEVICE_AUTHENTICATION.md`
 - `docs/design/IDENTITY_AND_ACCESS.md`

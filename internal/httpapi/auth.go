@@ -316,15 +316,17 @@ func (r SessionPrincipalResolver) Resolve(ctx context.Context, request *http.Req
 		return postgres.Principal{}, err
 	}
 	return postgres.Principal{
-		UserAccountID:     session.UserAccountID,
-		PersonID:          session.PersonID,
-		Active:            true,
-		SessionID:         session.ID,
-		SessionEpoch:      session.SessionEpoch,
-		ContextVersion:    session.ContextVersion,
-		ActiveCompanyID:   session.ActiveCompanyID,
-		ActiveOperationID: session.ActiveOperationID,
-		CSRFSecretHash:    session.CSRFSecretHash,
+		UserAccountID:       session.UserAccountID,
+		PersonID:            session.PersonID,
+		Active:              true,
+		SessionID:           session.ID,
+		SessionEpoch:        session.SessionEpoch,
+		ContextVersion:      session.ContextVersion,
+		ActiveCompanyID:     session.ActiveCompanyID,
+		ActiveOperationID:   session.ActiveOperationID,
+		CSRFSecretHash:      session.CSRFSecretHash,
+		AuthenticationLevel: session.AuthenticationLevel,
+		StepUpExpiresAt:     session.StepUpExpiresAt,
 	}, nil
 }
 

@@ -10,19 +10,23 @@ import (
 // Config contains runtime configuration. Secret values are intentionally not
 // logged or required during Phase 1A.
 type Config struct {
-	AppEnv            string
-	Port              string
-	WebDir            string
-	ReadHeaderTimeout time.Duration
-	ReadTimeout       time.Duration
-	WriteTimeout      time.Duration
-	IdleTimeout       time.Duration
-	ShutdownTimeout   time.Duration
-	AuthOnlineEnabled bool
-	AdminHTTPEnabled  bool
-	AllowedOrigins    []string
-	AuthCookieSecure  bool
-	Database          DatabaseConfig
+	AppEnv              string
+	Port                string
+	WebDir              string
+	ReadHeaderTimeout   time.Duration
+	ReadTimeout         time.Duration
+	WriteTimeout        time.Duration
+	IdleTimeout         time.Duration
+	ShutdownTimeout     time.Duration
+	AuthOnlineEnabled   bool
+	AdminHTTPEnabled    bool
+	AllowedOrigins      []string
+	AuthCookieSecure    bool
+	WebAuthnEnabled     bool
+	WebAuthnRPID        string
+	WebAuthnDisplayName string
+	WebAuthnOrigins     []string
+	Database            DatabaseConfig
 }
 
 type DatabaseConfig struct {
@@ -62,14 +66,18 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	config := Config{
-		AppEnv:            appEnv,
-		Port:              strconv.Itoa(port),
-		WebDir:            valueOrDefault(getenv("WEB_DIR"), "web/dist"),
-		AuthOnlineEnabled: parseBool(getenv("AUTH_ONLINE_ENABLED")),
-		AdminHTTPEnabled:  parseBool(getenv("ADMIN_HTTP_ENABLED")),
-		AllowedOrigins:    splitOrigins(getenv("AUTH_ALLOWED_ORIGINS")),
-		AuthCookieSecure:  parseBool(getenv("AUTH_COOKIE_SECURE")) || appEnv == "production",
-		Database:          databaseConfig(getenv),
+		AppEnv:              appEnv,
+		Port:                strconv.Itoa(port),
+		WebDir:              valueOrDefault(getenv("WEB_DIR"), "web/dist"),
+		AuthOnlineEnabled:   parseBool(getenv("AUTH_ONLINE_ENABLED")),
+		AdminHTTPEnabled:    parseBool(getenv("ADMIN_HTTP_ENABLED")),
+		AllowedOrigins:      splitOrigins(getenv("AUTH_ALLOWED_ORIGINS")),
+		AuthCookieSecure:    parseBool(getenv("AUTH_COOKIE_SECURE")) || appEnv == "production",
+		WebAuthnEnabled:     parseBool(getenv("WEBAUTHN_ENABLED")),
+		WebAuthnRPID:        strings.TrimSpace(getenv("WEBAUTHN_RP_ID")),
+		WebAuthnDisplayName: valueOrDefault(getenv("WEBAUTHN_RP_DISPLAY_NAME"), "Transportation Platform"),
+		WebAuthnOrigins:     splitOrigins(getenv("WEBAUTHN_ORIGINS")),
+		Database:            databaseConfig(getenv),
 	}
 	for _, origin := range config.AllowedOrigins {
 		if !isLocalOrigin(origin) {
@@ -108,6 +116,14 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		if len(config.AllowedOrigins) == 0 {
 			return Config{}, fmt.Errorf("AUTH_ALLOWED_ORIGINS must contain at least one origin when online authentication is enabled")
+		}
+	}
+	if config.WebAuthnEnabled {
+		if !config.AuthOnlineEnabled {
+			return Config{}, fmt.Errorf("WEBAUTHN_ENABLED requires AUTH_ONLINE_ENABLED")
+		}
+		if config.WebAuthnRPID == "" || len(config.WebAuthnOrigins) == 0 {
+			return Config{}, fmt.Errorf("WebAuthn RP id and origins are required when WebAuthn is enabled")
 		}
 	}
 	return config, nil

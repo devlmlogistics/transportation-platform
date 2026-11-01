@@ -131,6 +131,7 @@ func PrincipalFromSession(session AuthenticatedSession) (Principal, error) {
 		PersonID:      session.PersonID.String(),
 		SessionID:     session.ID.String(), SessionEpoch: session.SessionEpoch,
 		ContextVersion: session.ContextVersion, CSRFSecretHash: append([]byte(nil), session.CSRFSecretHash...),
+		AuthenticationLevel: session.AuthenticationLevel, StepUpExpiresAt: session.StepUpExpiresAt,
 	}
 	if session.ActiveCompanyID != nil {
 		principal.ActiveCompanyID = session.ActiveCompanyID.String()

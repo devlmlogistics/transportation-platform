@@ -495,6 +495,14 @@ func (s *Service) run(ctx context.Context, access tenancy.Context, principal pos
 	if s == nil || s.Pool == nil {
 		return errors.New("admin service requires postgres pool")
 	}
+	if requiresStepUp(request) && !hasRecentStepUp(principal, s.now()) {
+		if denied, buildErr := postgres.NewDeniedAttempt(uuid.New(), principal, request, request.PermissionCode, "admin-api", postgres.DeniedReasonCode("step_up_required"), nil, nil, []byte(`{"source":"admin-api","reason":"step_up_required"}`)); buildErr == nil {
+			if auditErr := postgres.RecordDeniedAttempt(ctx, s.Pool, denied); auditErr != nil {
+				return fmt.Errorf("step-up denied and denial audit failed: %w", auditErr)
+			}
+		}
+		return fmt.Errorf("%w: step_up_required", ErrForbidden)
+	}
 	decision, err := postgres.WithAuthorizedTenantTx(ctx, s.Pool, access, request, fn)
 	if err != nil {
 		return mapDatabaseError(err)
@@ -517,6 +525,15 @@ func (s *Service) run(ctx context.Context, access tenancy.Context, principal pos
 		return fmt.Errorf("%w: %s", ErrForbidden, decision.ReasonCode)
 	}
 	return nil
+}
+
+func requiresStepUp(request postgres.AuthorizationRequest) bool {
+	return request.ScopeType == "PLATFORM" || request.PermissionCode == "platform.role_assignment.manage" ||
+		request.PermissionCode == "authenticator.manage" || request.PermissionCode == "device.enrollment.revoke"
+}
+
+func hasRecentStepUp(principal postgres.Principal, now time.Time) bool {
+	return principal.AuthenticationLevel == "WEBAUTHN_STEP_UP" && principal.StepUpExpiresAt != nil && now.Before(*principal.StepUpExpiresAt)
 }
 
 func (s *Service) now() time.Time {

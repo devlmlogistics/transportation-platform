@@ -48,7 +48,7 @@ func newLogger(appEnv string) *slog.Logger {
 func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	dependencies := httpapi.RouterDependencies{}
 	var pools *postgres.OnlinePools
-	if cfg.AuthOnlineEnabled || cfg.AdminHTTPEnabled {
+	if cfg.AuthOnlineEnabled || cfg.AdminHTTPEnabled || cfg.WebAuthnEnabled {
 		var err error
 		pools, err = postgres.OpenOnlinePools(ctx, cfg.Database)
 		if err != nil {
@@ -64,6 +64,15 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 			return err
 		}
 		dependencies.Auth = authService
+		if cfg.WebAuthnEnabled {
+			webauthnService, err := applicationauth.NewWebAuthnService(repository, applicationauth.WebAuthnConfig{
+				RPID: cfg.WebAuthnRPID, RPDisplayName: cfg.WebAuthnDisplayName, RPOrigins: cfg.WebAuthnOrigins,
+			})
+			if err != nil {
+				return err
+			}
+			dependencies.WebAuthn = webauthnService
+		}
 		if cfg.AdminHTTPEnabled {
 			dependencies.Admin = admin.NewService(pools.Runtime)
 		}

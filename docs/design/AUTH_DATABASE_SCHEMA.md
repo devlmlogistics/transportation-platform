@@ -243,6 +243,8 @@ La función no usa SQL dinámico, no consulta tablas por un identificador sumini
 
 #### `platform.consume_auth_challenge(p_challenge_id uuid, p_purpose text, p_challenge_hash bytea, p_binding_hash bytea)`
 
+En 1B.2-C las ceremonias nuevas usan además las fronteras de 000008 (`begin_webauthn_challenge`, `get_webauthn_challenge` y sus finalizadores), que vinculan el challenge a `auth_session.id` y no sustituyen el contrato histórico.
+
 - `p_challenge_id` es un identificador opaco emitido por el servidor; no permite seleccionar una cuenta arbitraria;
 - valida purpose, hash del challenge, binding, estado pendiente y `expires_at > clock_timestamp()`;
 - toma `FOR UPDATE`, cambia el registro a `CONSUMED`, fija `consumed_at` y devuelve una sola vez `challenge_id`, `user_account_id`, `device_enrollment_request_id`, `session_data` y `session_data_format`;

@@ -183,6 +183,29 @@ func testOnlineAuth(t *testing.T, ctx context.Context, runtimePool, authPool *pg
 			t.Fatal(err)
 		}
 	})
+
+	t.Run("webauthn_sql_boundary_denies_arbitrary_elevation", func(t *testing.T) {
+		var runtimeCanExecute bool
+		if err := adminPool.QueryRow(ctx, `SELECT has_function_privilege('tp_runtime', $1, 'EXECUTE')`,
+			"platform.complete_webauthn_step_up(bytea,uuid,bytea,bytea,bytea,uuid)").Scan(&runtimeCanExecute); err != nil {
+			t.Fatal(err)
+		}
+		if runtimeCanExecute {
+			t.Fatal("tp_runtime can execute WebAuthn step-up boundary")
+		}
+		var elevated bool
+		if err := authPool.QueryRow(ctx, `SELECT platform.complete_webauthn_step_up($1,$2,$3,$4,$5,$6) IS NOT NULL`,
+			makeHash(0x91), uuid.New(), makeHash(0x92), makeHash(0x93), makeHash(0x94), uuid.New()).Scan(&elevated); err != nil {
+			t.Fatal(err)
+		}
+		if elevated {
+			t.Fatal("authentication role elevated a session without a live session/challenge")
+		}
+		if _, err := runtimePool.Exec(ctx, `SELECT platform.begin_webauthn_challenge($1,$2,'STEP_UP',$3,$4,'webauthn.v1',$5,clock_timestamp()+interval '5 minutes',NULL,$6)`,
+			makeHash(0x95), uuid.New(), makeHash(0x96), []byte("session-data"), makeHash(0x97), uuid.New()); err == nil {
+			t.Fatal("runtime role created an arbitrary WebAuthn challenge")
+		}
+	})
 }
 
 func TestPostgres16OnlineBootstrap(t *testing.T) {

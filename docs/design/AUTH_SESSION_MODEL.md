@@ -1,6 +1,12 @@
 # Transportation Platform — Modelo de sesiones y credenciales
 
-Estado: diseño implementado parcialmente en Fase 1B.2-B; WebAuthn, recovery y offline siguen fuera de alcance.
+Estado: diseño implementado parcialmente en Fase 1B.2-B y extendido aditivamente en 1B.2-C; recovery y offline siguen fuera de alcance.
+
+## Extensión 1B.2-C
+
+- **[D]** `AuthChallenge.session_id` ata cada ceremonia a la sesión que la inició; la cuenta por sí sola no es suficiente.
+- **[D]** `authentication_level=WEBAUTHN_STEP_UP` usa `step_up_expires_at` y `step_up_credential_id`; el resolver degrada el nivel a `PASSWORD` al vencer y nunca acepta el nivel desde HTTP/SQL payload.
+- **[D]** La autorización física de dispositivo sigue siendo independiente de `AuthenticatorCredential`; una passkey sincronizada sólo permite autenticación online según política.
 
 ## 1. Separación conceptual
 
