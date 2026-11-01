@@ -12,10 +12,13 @@ Este repositorio contiene sólo la fundación de Transportation Platform. Los pr
 
 - No modificar los proyectos originales.
 - Fase 1B.1-A sólo puede usar un PostgreSQL 16 nuevo, efímero o un contenedor dedicado al proyecto, con datos sintéticos.
+- Fase 1B.2-A puede implementar únicamente persistencia y contratos internos de autenticación online en el mismo tipo de PostgreSQL 16 efímero; no habilita login, WebAuthn, recovery, invitaciones, sesiones HTTP productivas, offline ni endpoints administrativos.
+- Las migraciones `000001`–`000004` son inmutables. La migración de autenticación de esta fase es `000005` y permanece en `db/migrations` como fuente canónica.
 - Las migraciones se ejecutan sólo de forma explícita con Goose en el entorno aislado; Go no las ejecuta al iniciar.
 - No conectar servicios de producción ni reutilizar contenedores o volúmenes PostgreSQL ajenos al proyecto.
 - `lmlogistics` permanece estrictamente en modo de lectura y no se modifica.
 - No implementar autenticación real, WebAuthn, passkeys, sesiones productivas, formularios operativos u offline en Fase 1B.1-B.
+- En Fase 1B.2-A no agregar la dependencia WebAuthn ni implementar ceremonias; los repositorios de sesión/challenge son contratos internos y no crean un login.
 - En Fase 1B.1-B se permiten contratos y handlers administrativos cerrados por defecto, además de servicios de aplicación y tests con Principal inyectado exclusivamente dentro de tests.
 - Las rutas administrativas de producción deben rechazar por defecto mientras no exista una frontera de autenticación real; no aceptar identidad desde headers ni habilitar bypass por ambiente.
 - No implementar Drayage ni Transportation en esta fase.
@@ -50,6 +53,6 @@ Este repositorio contiene sólo la fundación de Transportation Platform. Los pr
     docker compose config --quiet
     docker build -t transportation-platform:0.1.0 .
 
-Las pruebas de integración PostgreSQL deben recibir explícitamente `TEST_DATABASE_URL`, `TEST_DATABASE_MIGRATOR_URL` y `TEST_DATABASE_ADMIN_URL` apuntando al contenedor efímero dedicado. La limpieza no debe tocar otros contenedores ni volúmenes.
+Las pruebas de integración PostgreSQL de Fase 1B.2-A crean y verifican automáticamente su propio contenedor PostgreSQL 16, con etiqueta y marcador de propiedad, sin volúmenes persistentes ni DSN arbitrarios. La limpieza sólo elimina ese contenedor previamente verificado. Las variables `TEST_DATABASE_URL`, `TEST_DATABASE_MIGRATOR_URL` y `TEST_DATABASE_ADMIN_URL` ya no son la ruta canónica de esta suite.
 
 No ejecutar comandos destructivos ni operaciones sobre bases externas como parte de una tarea normal.
