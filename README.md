@@ -1,20 +1,22 @@
 # Transportation Platform
 
-Fundación técnica de Fase 1A para la nueva plataforma multiempresa.
+Fundación técnica de Fase 1A y capa administrativa cerrada de Fase 1B.1-B para la nueva plataforma multiempresa.
 
 ## Estado
 
-Esta fase implementa únicamente una base técnica:
+El estado actual implementa:
 
 - monolito modular Go con net/http;
 - frontend React 19 + TypeScript + Vite + Tailwind CSS 4;
 - servidor Go que sirve la aplicación React compilada;
 - healthcheck, logging estructurado, request/correlation ID y cierre ordenado;
 - contratos iniciales de Company, OperationType y CompanyOperation;
-- interfaces futuras de autenticación, autorización y PostgreSQL;
+- persistencia multiempresa, RLS y autorización por scope de Fase 1B.1-A;
+- servicios de aplicación y contratos administrativos de Fase 1B.1-B;
+- frontera de autenticación explícita, con rutas administrativas cerradas por defecto;
 - pruebas unitarias, de router y de UI.
 
-No se implementan autenticación real, WebAuthn, sesiones, formularios operativos, offline, persistencia real, endpoints de negocio ni migraciones.
+No se implementan autenticación real, WebAuthn, sesiones productivas, formularios operativos, offline ni funcionalidades de Drayage/Transportation. Las rutas administrativas no son funcionales en producción hasta conectar un proveedor de identidad real.
 
 ## Versiones fijadas
 
@@ -127,6 +129,8 @@ La separación entre handlers, aplicación, dominio y adapters es intencional. D
 - docs/design/AUTHORIZATION_CONTRACT.md
 - docs/testing/TENANT_ISOLATION_TEST_PLAN.md
 - docs/implementation/PHASE_1A_IMPLEMENTATION_DECISIONS.md
+- docs/implementation/PHASE_1B1A_IMPLEMENTATION.md
+- docs/implementation/PHASE_1B1B_IMPLEMENTATION.md
 - docs/design/DOMAIN_MODEL.md
 - docs/design/IDENTITY_AND_ACCESS.md
 - docs/design/DEVICE_AUTHENTICATION.md
