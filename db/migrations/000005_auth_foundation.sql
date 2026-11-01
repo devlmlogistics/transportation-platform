@@ -439,6 +439,7 @@ CREATE TRIGGER user_account_session_epoch_guard
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION platform.create_auth_session(
     p_session_id uuid,
+    p_audit_id uuid,
     p_user_account_id uuid,
     p_token_hash bytea,
     p_csrf_secret_hash bytea,
@@ -474,6 +475,7 @@ DECLARE
     issued_at timestamptz;
 BEGIN
     IF p_session_id IS NULL
+       OR p_audit_id IS NULL
        OR p_user_account_id IS NULL
        OR octet_length(p_token_hash) <> 32
        OR (p_csrf_secret_hash IS NOT NULL AND octet_length(p_csrf_secret_hash) <> 32)
@@ -514,6 +516,11 @@ BEGIN
         p_user_agent_hash, NULLIF(p_ip_prefix, '')
     );
 
+    INSERT INTO platform.security_audit_event (
+        id, event_type, outcome, subject_user_account_id, details
+    )
+    VALUES (p_audit_id, 'SESSION_CREATED', 'SUCCESS', p_user_account_id, '{}'::jsonb);
+
     RETURN QUERY
     SELECT p_session_id, p_user_account_id, account_epoch, 'ACTIVE'::text,
            issued_at, issued_at,
@@ -524,13 +531,16 @@ END;
 $$;
 -- +goose StatementEnd
 
-ALTER FUNCTION platform.create_auth_session(uuid, uuid, bytea, bytea, bigint, bigint, uuid, uuid, uuid, uuid, bytea, text) OWNER TO tp_owner;
-REVOKE ALL ON FUNCTION platform.create_auth_session(uuid, uuid, bytea, bytea, bigint, bigint, uuid, uuid, uuid, uuid, bytea, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION platform.create_auth_session(uuid, uuid, bytea, bytea, bigint, bigint, uuid, uuid, uuid, uuid, bytea, text) TO tp_auth_runtime;
+ALTER FUNCTION platform.create_auth_session(uuid, uuid, uuid, bytea, bytea, bigint, bigint, uuid, uuid, uuid, uuid, bytea, text) OWNER TO tp_owner;
+REVOKE ALL ON FUNCTION platform.create_auth_session(uuid, uuid, uuid, bytea, bytea, bigint, bigint, uuid, uuid, uuid, uuid, bytea, text) FROM PUBLIC;
+-- Deliberately closed in 1B.2-A. Credential verification must be completed
+-- by a later authentication boundary before this function is exposed.
+REVOKE EXECUTE ON FUNCTION platform.create_auth_session(uuid, uuid, uuid, bytea, bytea, bigint, bigint, uuid, uuid, uuid, uuid, bytea, text) FROM tp_auth_runtime;
 
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION platform.create_auth_challenge(
     p_id uuid,
+    p_audit_id uuid,
     p_purpose text,
     p_user_account_id uuid,
     p_device_enrollment_request_id uuid,
@@ -549,6 +559,7 @@ SET search_path = pg_catalog, platform
 AS $$
 BEGIN
     IF p_id IS NULL
+       OR p_audit_id IS NULL
        OR p_purpose IS NULL
        OR octet_length(p_challenge_hash) <> 32
        OR octet_length(p_binding_hash) <> 32
@@ -571,13 +582,21 @@ BEGIN
         p_binding_hash, p_expires_at, p_request_fingerprint
     );
 
+    INSERT INTO platform.security_audit_event (
+        id, event_type, outcome, subject_user_account_id, details
+    )
+    VALUES (
+        p_audit_id, 'CHALLENGE_CREATED', 'SUCCESS', p_user_account_id,
+        jsonb_build_object('purpose', p_purpose)
+    );
+
 END;
 $$;
 -- +goose StatementEnd
 
-ALTER FUNCTION platform.create_auth_challenge(uuid, text, uuid, uuid, bytea, bytea, text, bytea, timestamptz, bytea) OWNER TO tp_owner;
-REVOKE ALL ON FUNCTION platform.create_auth_challenge(uuid, text, uuid, uuid, bytea, bytea, text, bytea, timestamptz, bytea) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION platform.create_auth_challenge(uuid, text, uuid, uuid, bytea, bytea, text, bytea, timestamptz, bytea) TO tp_auth_runtime;
+ALTER FUNCTION platform.create_auth_challenge(uuid, uuid, text, uuid, uuid, bytea, bytea, text, bytea, timestamptz, bytea) OWNER TO tp_owner;
+REVOKE ALL ON FUNCTION platform.create_auth_challenge(uuid, uuid, text, uuid, uuid, bytea, bytea, text, bytea, timestamptz, bytea) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION platform.create_auth_challenge(uuid, uuid, text, uuid, uuid, bytea, bytea, text, bytea, timestamptz, bytea) TO tp_auth_runtime;
 
 -- A bearer token hash is the only proof accepted by these self-revocation
 -- functions. The user_account_id is derived from the matching session; it is
@@ -586,6 +605,7 @@ GRANT EXECUTE ON FUNCTION platform.create_auth_challenge(uuid, text, uuid, uuid,
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION platform.revoke_auth_session(
     p_session_id uuid,
+    p_audit_id uuid,
     p_token_hash bytea,
     p_reason text
 )
@@ -599,7 +619,7 @@ DECLARE
     subject_user_account_id uuid;
     v_revoked_at timestamptz;
 BEGIN
-    IF p_session_id IS NULL OR octet_length(p_token_hash) <> 32 THEN
+    IF p_session_id IS NULL OR p_audit_id IS NULL OR octet_length(p_token_hash) <> 32 THEN
         RETURN false;
     END IF;
 
@@ -619,17 +639,23 @@ BEGIN
     SET status = 'REVOKED', revoked_at = v_revoked_at, terminal_reason = p_reason
     WHERE id = p_session_id;
 
+    INSERT INTO platform.security_audit_event (
+        id, event_type, outcome, subject_user_account_id, details
+    )
+    VALUES (p_audit_id, 'SESSION_REVOKED', 'SUCCESS', subject_user_account_id, '{}'::jsonb);
+
     RETURN true;
 END;
 $$;
 -- +goose StatementEnd
 
-ALTER FUNCTION platform.revoke_auth_session(uuid, bytea, text) OWNER TO tp_owner;
-REVOKE ALL ON FUNCTION platform.revoke_auth_session(uuid, bytea, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION platform.revoke_auth_session(uuid, bytea, text) TO tp_auth_runtime;
+ALTER FUNCTION platform.revoke_auth_session(uuid, uuid, bytea, text) OWNER TO tp_owner;
+REVOKE ALL ON FUNCTION platform.revoke_auth_session(uuid, uuid, bytea, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION platform.revoke_auth_session(uuid, uuid, bytea, text) TO tp_auth_runtime;
 
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION platform.revoke_all_auth_sessions(
+    p_audit_id uuid,
     p_token_hash bytea,
     p_reason text
 )
@@ -645,7 +671,7 @@ DECLARE
     v_revoked_at timestamptz;
     revoked_count integer;
 BEGIN
-    IF octet_length(p_token_hash) <> 32 THEN
+    IF p_audit_id IS NULL OR octet_length(p_token_hash) <> 32 THEN
         RETURN 0;
     END IF;
 
@@ -679,18 +705,27 @@ BEGIN
       AND status = 'ACTIVE';
     GET DIAGNOSTICS revoked_count = ROW_COUNT;
 
+    INSERT INTO platform.security_audit_event (
+        id, event_type, outcome, subject_user_account_id, details
+    )
+    VALUES (
+        p_audit_id, 'SESSION_REVOKED_ALL', 'SUCCESS', subject_user_account_id,
+        jsonb_build_object('previous_session_epoch', previous_epoch)
+    );
+
     RETURN revoked_count;
 END;
 $$;
 -- +goose StatementEnd
 
-ALTER FUNCTION platform.revoke_all_auth_sessions(bytea, text) OWNER TO tp_owner;
-REVOKE ALL ON FUNCTION platform.revoke_all_auth_sessions(bytea, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION platform.revoke_all_auth_sessions(bytea, text) TO tp_auth_runtime;
+ALTER FUNCTION platform.revoke_all_auth_sessions(uuid, bytea, text) OWNER TO tp_owner;
+REVOKE ALL ON FUNCTION platform.revoke_all_auth_sessions(uuid, bytea, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION platform.revoke_all_auth_sessions(uuid, bytea, text) TO tp_auth_runtime;
 
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION platform.consume_auth_challenge(
     p_challenge_id uuid,
+    p_audit_id uuid,
     p_purpose text,
     p_challenge_hash bytea,
     p_binding_hash bytea
@@ -711,6 +746,7 @@ DECLARE
     v_consumed_at timestamptz;
 BEGIN
     IF p_challenge_id IS NULL
+       OR p_audit_id IS NULL
        OR p_purpose IS NULL
        OR octet_length(p_challenge_hash) <> 32
        OR octet_length(p_binding_hash) <> 32
@@ -738,6 +774,14 @@ BEGIN
     SET status = 'CONSUMED', consumed_at = v_consumed_at, last_attempt_at = v_consumed_at
     WHERE id = challenge_row.id;
 
+    INSERT INTO platform.security_audit_event (
+        id, event_type, outcome, subject_user_account_id, details
+    )
+    VALUES (
+        p_audit_id, 'CHALLENGE_CONSUMED', 'SUCCESS', challenge_row.user_account_id,
+        jsonb_build_object('purpose', challenge_row.purpose)
+    );
+
     RETURN QUERY
     SELECT challenge_row.id,
            challenge_row.user_account_id,
@@ -748,9 +792,9 @@ END;
 $$;
 -- +goose StatementEnd
 
-ALTER FUNCTION platform.consume_auth_challenge(uuid, text, bytea, bytea) OWNER TO tp_owner;
-REVOKE ALL ON FUNCTION platform.consume_auth_challenge(uuid, text, bytea, bytea) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION platform.consume_auth_challenge(uuid, text, bytea, bytea) TO tp_auth_runtime;
+ALTER FUNCTION platform.consume_auth_challenge(uuid, uuid, text, bytea, bytea) OWNER TO tp_owner;
+REVOKE ALL ON FUNCTION platform.consume_auth_challenge(uuid, uuid, text, bytea, bytea) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION platform.consume_auth_challenge(uuid, uuid, text, bytea, bytea) TO tp_auth_runtime;
 
 -- This writer is still behind a dedicated auth-role function and does not
 -- grant table INSERT to either runtime role.
@@ -799,23 +843,25 @@ $$;
 
 ALTER FUNCTION platform.record_auth_security_audit(uuid, text, text, uuid, uuid, uuid, uuid, text, text, jsonb) OWNER TO tp_owner;
 REVOKE ALL ON FUNCTION platform.record_auth_security_audit(uuid, text, text, uuid, uuid, uuid, uuid, text, text, jsonb) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION platform.record_auth_security_audit(uuid, text, text, uuid, uuid, uuid, uuid, text, text, jsonb) TO tp_auth_runtime;
+-- Generic actor/outcome input is not a safe runtime contract. It remains an
+-- owner-only design placeholder until a fixed-event audit service exists.
+REVOKE EXECUTE ON FUNCTION platform.record_auth_security_audit(uuid, text, text, uuid, uuid, uuid, uuid, text, text, jsonb) FROM tp_auth_runtime;
 
 -- +goose Down
 
 REVOKE EXECUTE ON FUNCTION platform.record_auth_security_audit(uuid, text, text, uuid, uuid, uuid, uuid, text, text, jsonb) FROM tp_auth_runtime;
-REVOKE EXECUTE ON FUNCTION platform.consume_auth_challenge(uuid, text, bytea, bytea) FROM tp_auth_runtime;
-REVOKE EXECUTE ON FUNCTION platform.revoke_all_auth_sessions(bytea, text) FROM tp_auth_runtime;
-REVOKE EXECUTE ON FUNCTION platform.revoke_auth_session(uuid, bytea, text) FROM tp_auth_runtime;
-REVOKE EXECUTE ON FUNCTION platform.create_auth_challenge(uuid, text, uuid, uuid, bytea, bytea, text, bytea, timestamptz, bytea) FROM tp_auth_runtime;
-REVOKE EXECUTE ON FUNCTION platform.create_auth_session(uuid, uuid, bytea, bytea, bigint, bigint, uuid, uuid, uuid, uuid, bytea, text) FROM tp_auth_runtime;
+REVOKE EXECUTE ON FUNCTION platform.consume_auth_challenge(uuid, uuid, text, bytea, bytea) FROM tp_auth_runtime;
+REVOKE EXECUTE ON FUNCTION platform.revoke_all_auth_sessions(uuid, bytea, text) FROM tp_auth_runtime;
+REVOKE EXECUTE ON FUNCTION platform.revoke_auth_session(uuid, uuid, bytea, text) FROM tp_auth_runtime;
+REVOKE EXECUTE ON FUNCTION platform.create_auth_challenge(uuid, uuid, text, uuid, uuid, bytea, bytea, text, bytea, timestamptz, bytea) FROM tp_auth_runtime;
+REVOKE EXECUTE ON FUNCTION platform.create_auth_session(uuid, uuid, uuid, bytea, bytea, bigint, bigint, uuid, uuid, uuid, uuid, bytea, text) FROM tp_auth_runtime;
 REVOKE EXECUTE ON FUNCTION platform.resolve_auth_session(bytea) FROM tp_auth_runtime;
 DROP FUNCTION IF EXISTS platform.record_auth_security_audit(uuid, text, text, uuid, uuid, uuid, uuid, text, text, jsonb);
-DROP FUNCTION IF EXISTS platform.consume_auth_challenge(uuid, text, bytea, bytea);
-DROP FUNCTION IF EXISTS platform.revoke_all_auth_sessions(bytea, text);
-DROP FUNCTION IF EXISTS platform.revoke_auth_session(uuid, bytea, text);
-DROP FUNCTION IF EXISTS platform.create_auth_challenge(uuid, text, uuid, uuid, bytea, bytea, text, bytea, timestamptz, bytea);
-DROP FUNCTION IF EXISTS platform.create_auth_session(uuid, uuid, bytea, bytea, bigint, bigint, uuid, uuid, uuid, uuid, bytea, text);
+DROP FUNCTION IF EXISTS platform.consume_auth_challenge(uuid, uuid, text, bytea, bytea);
+DROP FUNCTION IF EXISTS platform.revoke_all_auth_sessions(uuid, bytea, text);
+DROP FUNCTION IF EXISTS platform.revoke_auth_session(uuid, uuid, bytea, text);
+DROP FUNCTION IF EXISTS platform.create_auth_challenge(uuid, uuid, text, uuid, uuid, bytea, bytea, text, bytea, timestamptz, bytea);
+DROP FUNCTION IF EXISTS platform.create_auth_session(uuid, uuid, uuid, bytea, bytea, bigint, bigint, uuid, uuid, uuid, uuid, bytea, text);
 DROP FUNCTION IF EXISTS platform.resolve_auth_session(bytea);
 
 DROP TRIGGER IF EXISTS user_account_session_epoch_guard ON platform.user_account;

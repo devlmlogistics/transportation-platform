@@ -15,6 +15,7 @@ Este repositorio contiene sólo la fundación de Transportation Platform. Los pr
 - Fase 1B.2-A puede implementar únicamente persistencia y contratos internos de autenticación online en el mismo tipo de PostgreSQL 16 efímero; no habilita login, WebAuthn, recovery, invitaciones, sesiones HTTP productivas, offline ni endpoints administrativos.
 - Las migraciones `000001`–`000004` son inmutables. La migración de autenticación de esta fase es `000005` y permanece en `db/migrations` como fuente canónica.
 - `tp_runtime` no recibe acceso directo ni `EXECUTE` sobre tablas/funciones de autenticación. La frontera SQL de autenticación usa `tp_auth_runtime`, sin DML directo sobre tablas y sin permisos de dispositivos; el repositorio Go de autenticación sólo se construye dentro de su paquete.
+- En 1B.2-A `create_auth_session` y el escritor genérico de auditoría permanecen cerrados para `tp_runtime` y `tp_auth_runtime`; la emisión requiere una frontera de credenciales de una fase posterior.
 - Las migraciones se ejecutan sólo de forma explícita con Goose en el entorno aislado; Go no las ejecuta al iniciar.
 - No conectar servicios de producción ni reutilizar contenedores o volúmenes PostgreSQL ajenos al proyecto.
 - `lmlogistics` permanece estrictamente en modo de lectura y no se modifica.

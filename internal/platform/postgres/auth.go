@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -16,8 +15,8 @@ import (
 )
 
 var (
-	ErrAuthRepositoryUnavailable = errors.New("authentication repository requires a pool")
-	ErrSecurityAuditInvalid      = errors.New("invalid security audit event")
+	ErrAuthRepositoryUnavailable   = errors.New("authentication repository requires a pool")
+	ErrSecurityAuditBoundaryClosed = errors.New("generic authentication audit writer is closed")
 )
 
 // AuthRepository contains only persistence contracts for 1B.2-A. It is
@@ -53,9 +52,9 @@ func (r *AuthRepository) CreateSession(ctx context.Context, request auth.CreateS
 			       created_at, last_seen_at, idle_expires_at, absolute_expires_at,
 			       active_company_id, active_operation_id, context_version
 			FROM platform.create_auth_session(
-				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
 			)
-		`, request.ID, request.UserAccountID, request.TokenHash,
+		`, request.ID, uuid.New(), request.UserAccountID, request.TokenHash,
 			nullableBytes(request.CSRFSecretHash),
 			int64(request.Policy.IdleTTL/time.Second),
 			int64(request.Policy.AbsoluteTTL/time.Second),
@@ -70,16 +69,6 @@ func (r *AuthRepository) CreateSession(ctx context.Context, request auth.CreateS
 			if errors.Is(err, pgx.ErrNoRows) {
 				return auth.ErrInactiveAccount
 			}
-			return err
-		}
-
-		if err := writeSecurityAuditEventTx(ctx, tx, auth.SecurityAuditEvent{
-			ID:                   uuid.New(),
-			EventType:            "SESSION_CREATED",
-			Outcome:              "SUCCESS",
-			SubjectUserAccountID: uuidPointer(request.UserAccountID),
-			Details:              []byte(`{}`),
-		}); err != nil {
 			return err
 		}
 
@@ -126,8 +115,8 @@ func (r *AuthRepository) RevokeSession(ctx context.Context, sessionID uuid.UUID,
 	return r.withPlatformTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		var changed bool
 		err := tx.QueryRow(ctx, `
-			SELECT platform.revoke_auth_session($1, $2, $3)
-		`, sessionID, tokenHash, strings.TrimSpace(reason)).Scan(&changed)
+			SELECT platform.revoke_auth_session($1, $2, $3, $4)
+		`, sessionID, uuid.New(), tokenHash, strings.TrimSpace(reason)).Scan(&changed)
 		if err != nil {
 			return err
 		}
@@ -148,8 +137,8 @@ func (r *AuthRepository) RevokeAllSessions(ctx context.Context, tokenHash []byte
 	return r.withPlatformTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		var changed int
 		if err := tx.QueryRow(ctx, `
-			SELECT platform.revoke_all_auth_sessions($1, $2)
-		`, tokenHash, strings.TrimSpace(reason)).Scan(&changed); err != nil {
+			SELECT platform.revoke_all_auth_sessions($1, $2, $3)
+		`, uuid.New(), tokenHash, strings.TrimSpace(reason)).Scan(&changed); err != nil {
 			return err
 		}
 		if changed == 0 {
@@ -169,22 +158,16 @@ func (r *AuthRepository) CreateChallenge(ctx context.Context, request auth.Creat
 	return r.withPlatformTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
 			SELECT platform.create_auth_challenge(
-				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
 			)
-		`, request.ID, string(request.Purpose), request.UserAccountID,
+		`, request.ID, uuid.New(), string(request.Purpose), request.UserAccountID,
 			request.DeviceEnrollmentRequestID, request.ChallengeHash, request.SessionData,
 			request.SessionDataFormat, request.BindingHash, request.ExpiresAt.UTC(),
 			nullableBytes(request.RequestFingerprint))
 		if err != nil {
 			return err
 		}
-		return writeSecurityAuditEventTx(ctx, tx, auth.SecurityAuditEvent{
-			ID:                   uuid.New(),
-			EventType:            "CHALLENGE_CREATED",
-			Outcome:              "SUCCESS",
-			SubjectUserAccountID: request.UserAccountID,
-			Details:              []byte(`{"purpose":"server_defined"}`),
-		})
+		return nil
 	})
 }
 
@@ -200,21 +183,15 @@ func (r *AuthRepository) ConsumeChallenge(ctx context.Context, id uuid.UUID, pur
 		err := tx.QueryRow(ctx, `
 			SELECT challenge_id, user_account_id, device_enrollment_request_id,
 			       session_data, session_data_format
-			FROM platform.consume_auth_challenge($1, $2, $3, $4)
-		`, id, string(purpose), challengeHash, bindingHash).Scan(
+			FROM platform.consume_auth_challenge($1, $2, $3, $4, $5)
+		`, id, uuid.New(), string(purpose), challengeHash, bindingHash).Scan(
 			&result.ID, &result.UserAccountID, &result.DeviceEnrollmentRequestID,
 			&result.SessionData, &result.SessionDataFormat,
 		)
 		if err != nil {
 			return err
 		}
-		return writeSecurityAuditEventTx(ctx, tx, auth.SecurityAuditEvent{
-			ID:                   uuid.New(),
-			EventType:            "CHALLENGE_CONSUMED",
-			Outcome:              "SUCCESS",
-			SubjectUserAccountID: result.UserAccountID,
-			Details:              []byte(`{"purpose":"server_defined"}`),
-		})
+		return nil
 	})
 	if err != nil {
 		return auth.ConsumedChallenge{}, err
@@ -223,40 +200,7 @@ func (r *AuthRepository) ConsumeChallenge(ctx context.Context, id uuid.UUID, pur
 }
 
 func (r *AuthRepository) WriteSecurityAudit(ctx context.Context, event auth.SecurityAuditEvent) error {
-	if err := r.requirePool(); err != nil {
-		return err
-	}
-	return r.withPlatformTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		return writeSecurityAuditEventTx(ctx, tx, event)
-	})
-}
-
-func writeSecurityAuditEventTx(ctx context.Context, tx pgx.Tx, event auth.SecurityAuditEvent) error {
-	if event.ID == uuid.Nil || strings.TrimSpace(event.EventType) == "" {
-		return ErrSecurityAuditInvalid
-	}
-	if event.Outcome != "SUCCESS" && event.Outcome != "FAILURE" && event.Outcome != "DENIED" {
-		return ErrSecurityAuditInvalid
-	}
-	if event.CompanyOperationID != nil && event.CompanyID == nil {
-		return ErrSecurityAuditInvalid
-	}
-	details := event.Details
-	if len(details) == 0 {
-		details = []byte(`{}`)
-	}
-	var object map[string]any
-	if len(details) > 8192 || json.Unmarshal(details, &object) != nil || object == nil {
-		return ErrSecurityAuditInvalid
-	}
-	_, err := tx.Exec(ctx, `
-		SELECT platform.record_auth_security_audit(
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb
-		)
-	`, event.ID, strings.TrimSpace(event.EventType), event.Outcome,
-		event.ActorUserAccountID, event.SubjectUserAccountID, event.CompanyID,
-		event.CompanyOperationID, event.ReasonCode, event.CorrelationID, details)
-	return err
+	return ErrSecurityAuditBoundaryClosed
 }
 
 func (r *AuthRepository) withPlatformTx(ctx context.Context, fn func(context.Context, pgx.Tx) error) error {

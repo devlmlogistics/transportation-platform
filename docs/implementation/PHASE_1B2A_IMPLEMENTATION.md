@@ -116,7 +116,7 @@ Se considera cerrado el alcance técnico cuando la rama contiene esta migración
 - **[V]** La revisión confirmó que la versión inicial concedía a `tp_runtime` DML sobre sesiones/challenges/auditoría y dispositivos, además de `EXECUTE` sobre las funciones de resolución y revocación. También permitía que las funciones de revocación recibieran un `user_account_id` arbitrario.
 - **[V]** La migración 000005 fue corregida directamente porque sólo había sido aplicada por el harness PostgreSQL efímero de esta rama y no estaba fusionada ni compartida con un entorno persistente. Si se detectara una aplicación persistente futura, la corrección equivalente deberá ser una migración nueva, nunca una reescritura.
 - **[V]** `tp_runtime` ahora tiene `REVOKE ALL` sobre `auth_session`, `auth_challenge`, `security_audit_event`, `device_authorization` y `device_enrollment_request`; no puede ejecutar las funciones de autenticación.
-- **[V]** Se agregó `tp_auth_runtime` como rol de infraestructura separado. Tiene únicamente `EXECUTE` sobre funciones estrechas de creación/resolución/consumo de autenticación, auditoría y autorrevocación; no tiene `SELECT`, `INSERT` ni `UPDATE` directo sobre tablas globales o de dispositivos.
+- **[V]** Se agregó `tp_auth_runtime` como rol de infraestructura separado. Tiene únicamente `EXECUTE` sobre funciones estrechas de resolución/creación de challenges/consumo/autorrevocación; la emisión de sesiones y la auditoría genérica están cerradas. No tiene `SELECT`, `INSERT` ni `UPDATE` directo sobre tablas globales o de dispositivos.
 - **[V]** `revoke_auth_session` sólo acepta la combinación de sesión y hash del token de esa misma sesión. `revoke_all_auth_sessions` deriva la cuenta desde un token activo y nunca recibe un `user_account_id` del caller. La revocación administrativa de otra persona permanece bloqueada hasta diseñar una frontera autorizada separada.
 - **[V]** `user_account.session_epoch` tiene un trigger que rechaza cambios originados por `tp_runtime`; el incremento global sólo se realiza dentro de la función de revocación de la frontera de autenticación.
 - **[V]** La emisión y el consumo de challenges/sesiones pasan por funciones `SECURITY DEFINER`; el repositorio Go es deliberadamente no exportado y sólo puede construirse dentro del paquete con un pool destinado a `tp_auth_runtime`. No se conecta a HTTP.
@@ -126,11 +126,19 @@ Se considera cerrado el alcance técnico cuando la rama contiene esta migración
 | Operación | `tp_runtime` | `tp_auth_runtime` |
 |---|---:|---:|
 | Leer credenciales, sesiones, challenges o recovery | No | No directo; sólo resultado mínimo de funciones autorizadas |
-| Insertar/actualizar `auth_session` | No | No directo; función de creación o revocación |
+| Insertar/actualizar `auth_session` | No | No directo; revocación por función; emisión cerrada |
 | Insertar/consumir `auth_challenge` | No | No directo; funciones de challenge |
 | Activar/revocar dispositivos | No | No; requiere futura frontera de administración de dispositivos |
 | Cambiar `session_epoch` | No; trigger lo rechaza | No directo; sólo revocación global por token activo |
 | Resolver una sesión | No | Sí, sólo por hash de token |
-| Registrar auditoría de autenticación | No directo | Sí, sólo función validada |
+| Registrar auditoría de autenticación | No directo | Sólo eventos fijos dentro de funciones; writer genérico cerrado |
 
 - **[V]** Las pruebas negativas verifican ambos roles, acceso cruzado de sesión por hash, modificación de dispositivos, cambio de epoch, DML directo, lectura global y privilegios de función, preservando replay, concurrencia, auditoría, RLS y migraciones.
+
+## 11. Cierre de emisión y auditoría genérica
+
+- **[V]** `platform.create_auth_session` se conserva como contrato de persistencia, pero `EXECUTE` está revocado para `tp_runtime` y `tp_auth_runtime`. Ningún rol runtime puede emitir una sesión indicando una cuenta activa arbitraria.
+- **[V]** `AuthRepository.CreateSession` permanece cerrado al uso productivo: su pool dedicado no tiene permiso para ejecutar la función y la prueba confirma el rechazo. Las pruebas que necesitan estado sintético usan exclusivamente el DSN administrativo del harness efímero verificado; no amplían privilegios productivos.
+- **[V]** Los eventos de creación, consumo y revocación se escriben dentro de sus funciones internas con tipo y outcome fijos. `record_auth_security_audit` queda como placeholder propiedad de `tp_owner`, sin `EXECUTE` para roles runtime.
+- **[V]** `AuthRepository.WriteSecurityAudit` falla cerrado con `ErrSecurityAuditBoundaryClosed`; no acepta entradas de un futuro handler HTTP ni permite suplantar actor, subject u outcome en esta fase.
+- **[D]** Fase 1B.2-B deberá verificar explícitamente credenciales, derivar la cuenta desde esa evidencia y autorizar la emisión antes de conceder acceso a `create_auth_session` mediante una frontera revisada.
