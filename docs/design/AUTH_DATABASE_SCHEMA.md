@@ -14,7 +14,7 @@ Estado: diseño propuesto para Fase 1B.2. No crea tablas, no ejecuta migraciones
 
 **[D]** Fase 1B.2 agregará autenticación online como un bounded context del mismo monolito modular y de la misma base nueva. No se modifican destructivamente las tablas de identidad, membresías, roles, permisos ni auditoría de 1B.1. La autenticación resolverá una cuenta existente; no creará pertenencias ni permisos como efecto implícito de iniciar sesión.
 
-**[P]** Los números exactos de migración, la política de retención y la eventual separación física de un esquema de seguridad deben aprobarse antes de escribir SQL en `db/migrations`.
+**[P]** Los números exactos de migración, la política de retención y la eventual separación física de un esquema de seguridad deben aprobarse antes de escribir SQL en `db/migrations`. Fase 1B.2-A no debe agregar todavía la dependencia WebAuthn ni modificar `000001`–`000004`.
 
 ## 2. Secuencia de migraciones propuesta
 
@@ -92,6 +92,8 @@ Campos:
 - `user_account_id uuid references platform.user_account(id)`; puede ser nulo sólo durante identificación inicial controlada;
 - `device_enrollment_request_id uuid` si aplica;
 - `challenge_hash bytea not null` o valor protegido por el servicio, nunca un secreto expuesto al cliente;
+- `session_data bytea not null` y `session_data_format text not null`, que conservan el `webauthn.SessionData` completo generado por la biblioteca;
+- `binding_hash bytea not null`, derivado de un binding opaco de la ceremonia y no de una identidad enviada por el cliente;
 - `created_at`, `expires_at`, `consumed_at`;
 - `attempt_count`, `last_attempt_at` y fingerprint minimizado;
 - `status` derivable o explícito si se necesita `REJECTED`/`EXPIRED` auditable.
@@ -109,16 +111,27 @@ Campos mínimos:
 - `token_hash bytea not null unique`;
 - `status text` en `ACTIVE`, `REVOKED`, `EXPIRED`, `COMPROMISED`;
 - `created_at`, `last_seen_at`, `idle_expires_at`, `absolute_expires_at`;
-- `revoked_at`, `revoked_reason`;
-- `session_epoch bigint not null` o una versión comparable;
+- `revoked_at`, `expired_at`, `compromised_at`, `terminal_reason`;
+- `session_epoch bigint not null` como snapshot del `platform.user_account.session_epoch` vigente al emitir la sesión;
 - `context_version bigint not null default 0`;
 - `active_company_id uuid null references platform.company(id)` y `active_operation_id uuid null` como contexto seleccionado, nunca autoridad autónoma;
 - `authenticator_credential_id uuid null` y `device_authorization_id uuid null` como procedencia opcional;
 - `user_agent_hash` e `ip_prefix` minimizados.
 
-Un check conceptual debe asegurar que `absolute_expires_at > created_at` y que los estados terminales tengan `revoked_at` o una razón equivalente. El servicio siempre vuelve a comprobar la cuenta, persona, memberships, operación habilitada y permisos; una sesión válida no conserva permisos históricos.
+Un check conceptual debe asegurar que `absolute_expires_at > created_at` y que cada estado terminal tenga únicamente su timestamp terminal correspondiente. El servicio siempre vuelve a comprobar la cuenta, persona, memberships, operación habilitada y permisos; una sesión válida no conserva permisos históricos.
 
 Índices: `token_hash`, `(user_account_id, status)`, expiración y referencias de instalación. La renovación rota el token y no extiende el límite absoluto.
+
+`platform.user_account` debe incorporar en una migración posterior `session_epoch bigint not null default 0`. Una revocación global bloquea la fila de cuenta, incrementa ese epoch y materializa la revocación de las sesiones activas en la misma transacción. El resolver exige igualdad entre ambos valores; así, el epoch es defensa contra una fila no materializada y no una autorización independiente.
+
+Semántica terminal exacta:
+
+- `ACTIVE`: sólo mientras la cuenta/persona están activas, el epoch coincide y `now()` no supera `idle_expires_at` ni `absolute_expires_at`. No tiene `expired_at`, `revoked_at` ni `compromised_at`.
+- `EXPIRED`: el servidor cerró la sesión por idle o TTL absoluto; fija `expired_at` y no se reactiva. No implica por sí mismo sospecha de ataque.
+- `REVOKED`: cierre voluntario, administrativo o por pérdida de autorización; fija `revoked_at` y reason code. No se reactiva.
+- `COMPROMISED`: existe una señal o incidente de seguridad; fija `compromised_at`, revoca el uso inmediatamente y requiere una sesión nueva/step-up según política. No se transforma silenciosamente en `REVOKED`.
+
+Las marcas de tiempo son del servidor y se escriben una sola vez. El resolver trata cualquier estado terminal, epoch desigual o expiración como no autenticado, aunque una tarea de limpieza todavía no haya materializado el estado.
 
 ### 3.5 `platform.device_authorization`
 
@@ -194,6 +207,41 @@ Campos: `id`, `user_account_id`, `scope_key`, `idempotency_key`, hash del reques
 
 La unicidad propuesta es `(user_account_id, scope_key, idempotency_key)`. Una misma clave con payload distinto produce `409`; la respuesta cacheada no incluye secretos. `If-Match`/versión de recurso será obligatorio para cambios que puedan sobrescribirse concurrentemente. La retención y la definición de `scope_key` son **[P]**.
 
+### 3.10 Contratos mínimos `SECURITY DEFINER`
+
+**[D]** Las funciones definidas son una frontera estrecha para operaciones que necesitan leer un secreto hash o consumir un challenge antes de tener un `Principal`. No son un repositorio global ni sustituyen autorización Go.
+
+#### `platform.resolve_auth_session(p_token_hash bytea)`
+
+- acepta únicamente el hash SHA-256 del token calculado dentro del servidor; no acepta token claro, `user_account_id`, `person_id`, `company_id`, roles, permisos ni un modo `PLATFORM`;
+- valida longitud/formato del hash y hace una búsqueda exacta por `token_hash`;
+- devuelve cero o una fila con los mínimos `session_id`, `user_account_id`, `person_id`, `session_epoch`, `context_version`, `active_company_id`, `active_operation_id`, `authenticator_credential_id`, `device_authorization_id`, `status`, `idle_expires_at`, `absolute_expires_at` y timestamps terminales;
+- sólo devuelve una sesión cuyo estado sea `ACTIVE`, cuya cuenta y persona estén `ACTIVE`, cuyo epoch coincida y cuyos TTL no hayan vencido; no enumera cuentas, sesiones ni memberships;
+- no devuelve nombre, correo, memberships, roles, permisos, documentos ni filas empresariales;
+- no modifica `last_seen_at`; el servicio aplica una actualización separada, optimista y auditada.
+
+La función no usa SQL dinámico, no consulta tablas por un identificador suministrado por el cliente y devuelve el mismo resultado vacío para hash desconocido, cuenta inactiva o sesión inexistente.
+
+#### `platform.consume_auth_challenge(p_challenge_id uuid, p_purpose text, p_challenge_hash bytea, p_binding_hash bytea)`
+
+- `p_challenge_id` es un identificador opaco emitido por el servidor; no permite seleccionar una cuenta arbitraria;
+- valida purpose, hash del challenge, binding, estado pendiente y `expires_at > clock_timestamp()`;
+- toma `FOR UPDATE`, cambia el registro a `CONSUMED`, fija `consumed_at` y devuelve una sola vez `challenge_id`, `user_account_id`, `device_enrollment_request_id`, `session_data` y `session_data_format`;
+- si el hash, propósito, binding o vigencia no coinciden, devuelve cero filas y no revela cuál condición falló;
+- consume antes de entregar el resultado al verificador criptográfico: una respuesta WebAuthn inválida requiere generar un challenge nuevo, impidiendo replay y carreras concurrentes;
+- no acepta `company_id`, operación, role, permission ni actor desde HTTP.
+
+El servicio compara el challenge devuelto por el autenticador con el `SessionData` recuperado y sólo después de la verificación protocolar crea o actualiza `AuthenticatorCredential`. El `DeviceAuthorization` se escribe por una transacción de servicio separada o coordinada, con aprobación y scope propios; nunca lo crea la función por inferencia.
+
+#### Privilegios comunes
+
+- las funciones son propiedad de `tp_owner`, salvo `record_denied_attempt`, que conserva su propietario existente `tp_security_audit_writer`;
+- `SET search_path = pg_catalog, platform` fijo; no se permite esquema escribible ni nombre sin calificar;
+- `REVOKE ALL ON FUNCTION ... FROM PUBLIC`; `tp_runtime` recibe sólo `EXECUTE` sobre las firmas exactas;
+- ningún caller recibe `SELECT` directo sobre tablas de sesiones/challenges por el mero hecho de ejecutar la función;
+- se audita el resultado de uso anómalo mediante el servicio seguro, con rate limit y sin guardar hashes o tokens en el evento;
+- no se crea un rol `tp_security_writer` nuevo.
+
 ## 4. SQL conceptual no ejecutado
 
 Los siguientes fragmentos ilustran restricciones; no son migraciones copiables ni se ejecutaron.
@@ -209,10 +257,19 @@ CREATE TABLE platform.auth_session (
     idle_expires_at timestamptz NOT NULL,
     absolute_expires_at timestamptz NOT NULL,
     revoked_at timestamptz,
-    revoked_reason text,
+    expired_at timestamptz,
+    compromised_at timestamptz,
+    terminal_reason text,
+    session_epoch bigint NOT NULL DEFAULT 0,
     CHECK (absolute_expires_at > created_at),
-    CHECK ((status = 'ACTIVE' AND revoked_at IS NULL)
-        OR (status <> 'ACTIVE' AND revoked_at IS NOT NULL))
+    CHECK ((status = 'ACTIVE'
+        AND revoked_at IS NULL AND expired_at IS NULL AND compromised_at IS NULL)
+        OR (status = 'REVOKED'
+        AND revoked_at IS NOT NULL AND expired_at IS NULL AND compromised_at IS NULL)
+        OR (status = 'EXPIRED'
+        AND revoked_at IS NULL AND expired_at IS NOT NULL AND compromised_at IS NULL)
+        OR (status = 'COMPROMISED'
+        AND revoked_at IS NULL AND expired_at IS NULL AND compromised_at IS NOT NULL))
 );
 
 CREATE INDEX auth_session_active_user_idx
@@ -230,11 +287,11 @@ Para retos, sessions, requests y autorizaciones de dispositivo, los índices de 
 | `tp_owner` | Ownership de objetos. | No se usa por la aplicación. Se evalúa `FORCE ROW LEVEL SECURITY` donde corresponda. |
 | `tp_migrator` | Goose y cambios de esquema. | Sólo durante migraciones controladas. |
 | `tp_runtime` | Queries de la aplicación. | Sin superusuario, sin `BYPASSRLS`, sin ownership de tablas. |
-| `tp_security_writer` | Inserción mínima del canal seguro de denegaciones/auditoría. | Sin lectura global ni administración de tenants. |
+| `tp_security_audit_writer` | Ownership de `record_denied_attempt` e inserción indirecta mínima del canal seguro de denegaciones/auditoría. | `NOLOGIN`, `NOSUPERUSER`, `NOBYPASSRLS`; sin lectura global ni administración de tenants. |
 
 Las tablas globales de credenciales, challenges y sesiones no implican que un actor `PLATFORM` pueda leer todo. Su acceso se realiza por servicios explícitos, con cuenta activa, auditoría y mínimo privilegio. Las tablas con `company_id` o con referencias a memberships reciben RLS tenant-aware; `app.tenant_id` es contexto auxiliar, no prueba de identidad.
 
-La frontera de autenticación puede necesitar una función `SECURITY DEFINER` para resolver un token hash o consumir un challenge antes de existir un principal. Si se usa:
+La frontera de autenticación usa sólo los contratos mínimos descritos arriba para resolver un token hash o consumir un challenge antes de existir un principal. Si se amplían:
 
 - la función se crea bajo ownership controlado;
 - `search_path` se fija a `pg_catalog, platform` y no incluye esquemas escribibles;
@@ -244,7 +301,7 @@ La frontera de autenticación puede necesitar una función `SECURITY DEFINER` pa
 - no permite elegir `user_account_id`, tenant o rol desde el cliente;
 - se audita el uso anómalo y se limita por servicio.
 
-No se recomienda una función `SECURITY DEFINER` genérica para saltar RLS ni una función que emita un principal privilegiado.
+No se recomienda una función `SECURITY DEFINER` genérica para saltar RLS, una función de búsqueda por `user_account_id`/tenant, ni una función que emita un principal privilegiado.
 
 ## 6. Writers autorizados y transacciones
 

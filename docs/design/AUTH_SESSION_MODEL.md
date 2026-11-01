@@ -21,6 +21,8 @@ Una passkey sincronizada puede corresponder a varias instalaciones; no crea auto
 
 Mantener una sesión online revocable asociada a una `UserAccount`, no a una empresa única ni a un `DriverProfile` aislado.
 
+`UserAccount.session_epoch` es el contador global de revocación de la cuenta y comienza en cero. `AuthSession.session_epoch` guarda el snapshot tomado al emitir la sesión. “Cerrar todos” bloquea la fila de cuenta, incrementa el contador y revoca las sesiones activas en una transacción; el resolver comprueba ambos valores en cada request.
+
 ### Campos propuestos
 
 | Campo | Tipo conceptual | Reglas |
@@ -32,7 +34,8 @@ Mantener una sesión online revocable asociada a una `UserAccount`, no a una emp
 | `status` | enum/text | `ACTIVE`, `REVOKED`, `EXPIRED`, `COMPROMISED`. |
 | `created_at`, `last_seen_at` | timestamptz | Servidor, no reloj cliente. |
 | `idle_expires_at`, `absolute_expires_at` | timestamptz | `absolute > created`; expiración explícita. |
-| `revoked_at`, `revoked_reason` | timestamptz/text | Obligatorios cuando `status` no es ACTIVE según checks. |
+| `revoked_at`, `expired_at`, `compromised_at`, `terminal_reason` | timestamptz/text | Exactamente el timestamp correspondiente al estado terminal. |
+| `session_epoch` | bigint | Snapshot del epoch global de `UserAccount` al emitir la sesión. |
 | `context_version` | bigint | Se incrementa al cambiar contexto sensible. |
 | `active_company_id` | uuid nullable | FK opcional; nunca autoridad sin revalidación. |
 | `active_operation_id` | uuid nullable | FK compuesto con empresa; sólo si company existe. |
@@ -51,7 +54,16 @@ ACTIVE ──security incident─────────────> COMPROMIS
 REVOKED/EXPIRED/COMPROMISED ───────────> terminal
 ```
 
-Una sesión inválida no vuelve a `ACTIVE`. La renovación crea un token nuevo o rota el token; no extiende indefinidamente el TTL absoluto.
+Semántica exacta:
+
+- `ACTIVE`: cuenta/persona activas, `session_epoch` igual al epoch actual de `UserAccount`, y reloj del servidor dentro de idle y TTL absoluto. No tiene timestamp terminal.
+- `EXPIRED`: cierre automático por idle o TTL absoluto; fija `expired_at`, conserva la evidencia y no sugiere por sí solo compromiso.
+- `REVOKED`: logout, revocación administrativa, pérdida de dispositivo o pérdida de membership; fija `revoked_at` y reason code.
+- `COMPROMISED`: señal o incidente de seguridad; fija `compromised_at`, invalida el uso y exige nueva autenticación/step-up según riesgo.
+
+Una sesión inválida no vuelve a `ACTIVE` ni cambia entre estados terminales. La renovación crea un token nuevo o rota el token; no extiende indefinidamente el TTL absoluto. Los timestamps los genera el servidor y se escriben una sola vez.
+
+`UserAccount.session_epoch` comienza en cero. Para revocación global, la transacción bloquea la cuenta, incrementa el epoch y marca las sesiones activas como `REVOKED`; el resolver comprueba además la igualdad del epoch para protegerse ante una materialización incompleta. Una sesión creada después del incremento captura el nuevo epoch. Suspender la cuenta/persona también invalida la resolución, aunque la limpieza física de filas ocurra después.
 
 ## 3. AuthenticatorCredential
 
@@ -119,10 +131,12 @@ Cada challenge tiene:
 - `id`, `purpose` (`LOGIN`, `REGISTRATION`, `DEVICE_APPROVAL`, `RECOVERY`, `STEP_UP`);
 - `user_account_id` nullable sólo durante identificación inicial controlada;
 - `device_enrollment_request_id` o `authenticator_credential_id` cuando corresponda;
-- `challenge_hash` o challenge protegido, `created_at`, `expires_at`, `consumed_at`;
+- `challenge_hash`, `session_data` íntegro serializado y `session_data_format`, `binding_hash`, `created_at`, `expires_at`, `consumed_at`;
 - `attempt_count`, `last_attempt_at`, `request fingerprint` minimizado.
 
-Constraints/índices: purpose válido, `expires_at > created_at`, índice por `(id,purpose)`, índice parcial de no consumidos y expiración. El consumo se hace con lock y sólo una transacción puede ganar.
+Constraints/índices: purpose válido, `expires_at > created_at`, índice por `(id,purpose)`, índice parcial de no consumidos y expiración. El consumo se hace con lock y sólo una transacción puede ganar. La función `platform.consume_auth_challenge` valida ID opaco, purpose, hash, binding y reloj del servidor, marca `CONSUMED` antes de la verificación protocolar y devuelve una sola vez `SessionData`; un fallo requiere un challenge nuevo.
+
+`SessionData` no se reconstruye parcialmente ni se acepta desde el cliente. Se persiste como un registro atómico asociado a la ceremonia, cuenta, RP ID y propósito. El `challenge` crudo se entrega sólo en las options WebAuthn; PostgreSQL conserva su hash y el estado server-side necesario para que la respuesta devuelta pueda compararse sin permitir replay.
 
 ## 8. Revocación y consistencia
 
@@ -147,17 +161,19 @@ La política de delegación de 1B.1-B se conserva:
 - una persona no puede aprobar su propia solicitud de dispositivo ni su propia recuperación cuando la política exige independencia;
 - una revocación exitosa produce auditoría atómica; una denegación produce evento seguro separado.
 
-## 10. TTLs iniciales propuestos
+## 10. TTLs iniciales adoptados provisionalmente
 
-Valores de diseño, no aprobados:
+Valores provisionales para el contrato de Fase 1B.2-A; siguen sujetos a una revisión de riesgo antes de producción:
 
 - challenge WebAuthn: 5 minutos;
 - invitación: 24 horas;
 - enrollment request: 10 minutos;
 - recovery request: 10–15 minutos para completar y una sola consumición;
 - sesión administrativa: 8 horas absoluto / 30 minutos idle;
-- sesión driver: 12 horas absoluto / 2 horas idle, sujeto a riesgo;
+- sesión driver: 12 horas absoluto / 2 horas idle;
 - DeviceAuthorization online: revocable y con expiración de política, sin habilitar offline en esta fase.
+
+Al emitir una sesión, `idle_expires_at = min(created_at + idle_ttl, absolute_expires_at)`. En una request autenticada válida, el servidor puede renovar sólo el límite idle hasta `min(server_now + idle_ttl, absolute_expires_at)`. Nunca se usa el reloj del cliente.
 
 ## 11. Retención
 

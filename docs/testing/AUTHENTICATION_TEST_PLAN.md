@@ -23,6 +23,8 @@ Estado: plan propuesto para Fase 1B.2. No implementa autenticación ni ejecuta m
 
 No se prueban offline, sincronización de formularios ni cambios en Drayage; esas capacidades quedan fuera de 1B.2.
 
+Fase 1B.2-A no ejecuta login, registration, authentication, recovery ni invitaciones. Sus pruebas se limitan a persistencia, repositorios, contratos internos, estados, RLS, auditoría y protección del harness. Las ceremonias WebAuthn son un gate posterior y no deben introducir una dependencia mientras la compatibilidad Go 1.25 siga pendiente.
+
 ## 2. Capas de prueba
 
 | Capa | Alcance | Dependencias | Gate |
@@ -160,6 +162,17 @@ Para las versiones nuevas propuestas:
 - fallo de auditoría atómica revierte la mutación exitosa;
 - denegación persistible sobrevive al rollback del intento solicitado y no autoriza la operación.
 
+### 8.4 Contratos `SECURITY DEFINER`
+
+- `platform.resolve_auth_session` acepta sólo un hash de token con formato válido y devuelve cero o una fila activa mínima;
+- hash desconocido, cuenta/persona inactiva, epoch desigual, estado terminal o TTL vencido producen la misma salida no autenticada y no enumeran identidades;
+- la función no acepta `user_account_id`, `person_id`, `company_id`, roles, permisos ni `app.tenant_id` como prueba;
+- `platform.consume_auth_challenge` exige ID opaco, purpose, hash, binding y vigencia, bloquea la fila y sólo una ejecución concurrente obtiene `SessionData`;
+- el challenge se marca `CONSUMED` antes de una verificación posterior, de modo que un replay o una respuesta inválida requiere un challenge nuevo;
+- `tp_runtime` tiene sólo `EXECUTE` sobre firmas exactas, no `SELECT` global sobre sesiones/challenges y no `BYPASSRLS`;
+- `tp_security_audit_writer` conserva su nombre existente, es `NOLOGIN`/`NOSUPERUSER`/`NOBYPASSRLS` y sólo se usa para el writer seguro de denegaciones;
+- `search_path`, ownership, `PUBLIC` privileges y ausencia de SQL dinámico se verifican en cada base de prueba.
+
 ## 9. Auditoría
 
 Eventos positivos mínimos: `LOGIN_SUCCESS`, `LOGIN_FAILURE`, `SESSION_CREATED`, `SESSION_REVOKED`, `CHALLENGE_CREATED`, `CHALLENGE_REJECTED`, `DEVICE_REQUESTED`, `DEVICE_APPROVED`, `DEVICE_REJECTED`, `CREDENTIAL_REGISTERED`, `CREDENTIAL_REVOKED`, `RECOVERY_REQUESTED`, `RECOVERY_COMPLETED` y `RATE_LIMITED`.
@@ -190,6 +203,8 @@ Requisitos antes de cualquier operación destructiva:
 
 No se permite ejecutar estas pruebas contra `lmlogistics`, otra base local, otro contenedor ni un volumen existente. Si la identidad del destino no puede verificarse, la prueba se marca `BLOCKED` y no intenta limpiar.
 
+La protección debe ser automática: la fixture destructiva falla antes de ejecutar `down`, `DROP`, `TRUNCATE` o cleanup si falta cualquier marker, nonce, container ID, versión PostgreSQL 16 o comprobación de `NOBYPASSRLS`. No se permite convertir este guard en una instrucción manual del operador.
+
 ## 11. Suite mínima de aceptación
 
 La implementación futura no pasa el gate si falla uno de estos bloques:
@@ -202,10 +217,12 @@ La implementación futura no pasa el gate si falla uno de estos bloques:
 - replay/concurrencia/idempotencia;
 - auditoría positiva atómica y denegación segura;
 - cookies/CSRF/Origin y rutas cerradas sin autenticación;
-- compatibilidad real de WebAuthn con Go 1.25 y navegador de prueba;
+- compatibilidad real de WebAuthn con Go 1.25 y navegador de prueba (gate de 1B.2-C; actualmente pendiente por el `toolchain` declarado por la biblioteca);
 - `docker build` sin secretos y sin modificar imágenes/volúmenes ajenos.
 
 Los endpoints productivos permanecen cerrados hasta que los resultados sean reproducibles y el gate de activación sea aprobado explícitamente.
+
+Para 1B.2-A, la aceptación adicional es: `ClosedAdminHandler` continúa activo, no existe endpoint de login/WebAuthn funcional, no se agregó proveedor de identidad ni credencial real, y las pruebas de repositorio cubren la semántica `ACTIVE`/`EXPIRED`/`REVOKED`/`COMPROMISED`, `expired_at`/`revoked_at`/`compromised_at` y `session_epoch`.
 
 ## 12. Riesgos y decisiones pendientes
 

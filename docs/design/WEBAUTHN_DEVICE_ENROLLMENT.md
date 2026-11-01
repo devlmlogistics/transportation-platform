@@ -2,6 +2,18 @@
 
 Estado: diseño propuesto para Fase 1B.2-C. El código heredado fue inspeccionado sólo en lectura; no se copia ni modifica.
 
+## 0. Compatibilidad de biblioteca y límite de decisión
+
+**[V]** La revisión de fuentes oficiales encontró:
+
+- `github.com/go-webauthn/webauthn@v0.17.4`, publicado en mayo de 2026, declara `go 1.25.0` pero su `go.mod` fija `toolchain go1.26.3`;
+- `v0.18.2` declara `go 1.26.0` y `toolchain go1.27.1`;
+- la política oficial actual del repositorio marca Go 1.25 como soporte no intencional.
+
+**[P]** No se puede confirmar todavía una versión que cumpla simultáneamente “mantenida” y toolchain fijo Go 1.25. `v0.17.4` queda como candidato concreto para una prueba aislada, no como dependencia aprobada. Fase 1B.2-A no agrega la biblioteca, no ejecuta ceremonias y no cambia el toolchain. La adopción requiere build reproducible con Go 1.25; si falla, debe aprobarse cambiar el toolchain o seleccionar otra implementación mantenida.
+
+El adaptador futuro será `WebAuthnService`; no se expondrán directamente APIs de la biblioteca desde handlers. La documentación oficial de `v0.17.4` expone `BeginRegistration`/`FinishRegistration`, `BeginLogin`/`FinishLogin` y exige conservar `SessionData` server-side entre ambos pasos.
+
 ## 1. Qué se conserva del sistema heredado
 
 **[V] Comportamientos útiles a conservar:**
@@ -117,6 +129,19 @@ El backend genera options sólo para un request aprobado, vigente, no consumido 
 
 `verify` comprueba challenge, origin, RP ID, user verification, credential ID, public key, attestation según la política y estado del request. La transacción inserta la credential, activa `DeviceAuthorization`, consume request/challenge y escribe auditoría. El número máximo de dispositivos se bloquea y verifica en la misma transacción.
 
+### 5.1 Contrato de challenge y protección contra replay
+
+**[D]** El challenge se genera con CSPRNG en el backend, con el tamaño requerido por la biblioteca, y nunca se deriva de `driver_code`, UUID predecible, timestamp del cliente o OTP. El flujo de persistencia es:
+
+1. `ChallengeService` crea `AuthChallenge` con `purpose`, `UserAccount`, RP ID/origin, binding opaco, `expires_at`, hash del challenge y `SessionData` íntegro serializado.
+2. Sólo las options se entregan al navegador. El navegador no puede editar `SessionData`, cuenta, purpose, RP ID, origin ni binding.
+3. La respuesta retorna el challenge dentro de la ceremonia; el servicio llama a `consume_auth_challenge` con ID opaco, purpose, hash calculado y binding. La función bloquea con `FOR UPDATE`, exige estado pendiente y vigencia de servidor, y cambia a `CONSUMED` antes de la verificación.
+4. El adaptador entrega el `SessionData` recuperado y la respuesta a `FinishRegistration`/`FinishLogin` o a la variante `Validate*` de la versión fijada. Verifica challenge, origin, RP ID, user verification, credential y firma.
+5. Sólo después de éxito se actualizan `AuthenticatorCredential` y sus flags/counter, se crea `AuthSession` y, en registro aprobado, se activa `DeviceAuthorization` con su propia transacción/auditoría.
+6. Un challenge inválido, expirado, consumido, de otro propósito, de otra cuenta o con binding distinto no revela la causa y no puede volver a utilizarse; el cliente debe iniciar una ceremonia nueva.
+
+Consumir antes de verificar hace que una respuesta malformada pierda el challenge y evita replay/concurrencia. La protección contra denegación de servicio se obtiene mediante rate limits y TTL corto, no reabriendo challenges consumidos.
+
 ### Paso 6 — autenticación habitual
 
 El driver puede introducir un locator opcional para UX, pero la autenticación se basa en la ceremonia WebAuthn y la credential permitida por `UserAccount`. El backend actualiza `sign_count`, `last_used_at` y señales de backup sólo después de verificación válida.
@@ -195,6 +220,8 @@ Son contratos de planificación; no deben exponerse hasta aprobar 1B.2-B/C.
 - navegador real: registration/authentication con autenticadores virtuales o dispositivos de prueba, passkey sincronizada, cierre/reinicio y origins HTTPS;
 - seguridad negativa: credential falsa, challenge reutilizado, user verification ausente, supervisor autoaprobador, cross-tenant y recovery replay.
 
+Las pruebas del adaptador deben fijar explícitamente la versión de biblioteca y comprobar `go.mod`, toolchain, API `Begin*`/`Finish*`/`Validate*`, persistencia atómica de `SessionData`, consumo concurrente y que ningún test pueda descargar automáticamente un toolchain distinto.
+
 ## 11. Fuentes heredadas
 
 - `Consulta drayage/server/driver-device-auth.mjs`
@@ -203,3 +230,11 @@ Son contratos de planificación; no deben exponerse hasta aprobar 1B.2-B/C.
 - `Consulta drayage/db/migrations/007_driver_device_auth.sql`
 - `Consulta drayage/app/page.tsx`
 - `Consulta drayage/app/supervisor.tsx`
+
+## 12. Fuentes técnicas consultadas
+
+- [Repositorio oficial go-webauthn/webauthn](https://github.com/go-webauthn/webauthn)
+- [`go.mod` de v0.17.4](https://raw.githubusercontent.com/go-webauthn/webauthn/v0.17.4/go.mod)
+- [`go.mod` de v0.18.2](https://raw.githubusercontent.com/go-webauthn/webauthn/v0.18.2/go.mod)
+- [API de v0.17.4](https://pkg.go.dev/github.com/go-webauthn/webauthn@v0.17.4/webauthn)
+- [Política y releases oficiales](https://github.com/go-webauthn/webauthn/releases)

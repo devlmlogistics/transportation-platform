@@ -8,6 +8,7 @@ Estado: planificación propuesta para revisión. No autoriza código productivo,
 - **[V]** La persistencia actual usa PostgreSQL 16, Goose, `pgx/v5`, `pgxpool`, RLS y `FORCE ROW LEVEL SECURITY`.
 - **[V]** `AdminHandler` ya define una frontera `PrincipalResolver`, pero `NewRouter` usa `ClosedAdminHandler`; no hay autenticación productiva ni sesiones.
 - **[V]** `WithAuthorizedTenantTx` y `AuthorizationRepository.Authorize` validan identidad, cuenta, memberships, alcance y permisos dentro de una transacción.
+- **[V]** El módulo local declara `go 1.25.0`; la revisión oficial de `go-webauthn/webauthn` muestra que `v0.17.4` declara `go 1.25.0` pero fija `toolchain go1.26.3`, mientras `v0.18.2` declara `go 1.26.0` y `toolchain go1.27.1`.
 - **[V]** La implementación heredada de Drayage usa `driver_code` para localizar conductores, un cookie token de navegador, aprobación de supervisor, challenges WebAuthn, fallback manual online y sesiones bearer.
 - **[V]** El heredado no modela `Person`, `UserAccount`, `CompanyMembership`, `OperationMembership` ni una autorización de instalación independiente.
 - **[V]** La plataforma no puede confiar en `driver_code`, una cookie de navegador, un user-agent ni una passkey sincronizada como prueba única de identidad física.
@@ -85,12 +86,13 @@ No se recomienda crear un IdP genérico propio ni un sistema de plugins de auten
 
 ### 1B.2-A — persistencia y frontera de sesión
 
-- **Objetivo:** crear el modelo de sesiones, challenges, credenciales y auditoría; no habilitar rutas productivas.
+- **Objetivo:** crear posteriormente sólo persistencia, repositorios y contratos internos de sesiones, challenges, credenciales y auditoría; no implementar login, WebAuthn, recovery, invitaciones ni habilitar rutas productivas.
 - **Dependencias:** `UserAccount`, `Person`, memberships, roles, RLS y auditoría de 1B.1.
-- **Migraciones propuestas:** 000005 `auth_core`, 000006 `device_authorization`, 000007 `auth_recovery_and_idempotency`.
-- **Módulos:** `internal/application/auth`, `internal/platform/postgres/auth`, `internal/httpapi/auth` cerrado por defecto.
-- **Pruebas:** SQL constraints, RLS, expiración, revocación, reutilización de challenges, hash de tokens, `pgxpool` A→B→A y harness destructivo seguro.
-- **Aceptación:** ninguna clave privada ni token en texto claro; las tablas tienen ownership/RLS/privilegios documentados; no se habilita `/api/v1/admin`.
+- **Migraciones propuestas:** 000005 `auth_core`, 000006 `device_authorization`, 000007 `auth_recovery_and_idempotency`, sólo después de una autorización separada; `000001`–`000004` permanecen inmutables.
+- **Contratos:** repositorios para token hash, sesión, epoch, challenge y auditoría; funciones SQL mínimas `resolve_auth_session` y `consume_auth_challenge`, sin consultas globales ni selección de identidad por payload.
+- **Dependencias prohibidas en A:** no agregar todavía la biblioteca WebAuthn, un proveedor de identidad, credenciales reales, secretos productivos ni un canal de invitaciones.
+- **Pruebas:** SQL constraints, RLS, expiración materializada, revocación, reutilización de challenges, hash de tokens, `pgxpool` A→B→A y harness destructivo seguro creado/verificado automáticamente.
+- **Aceptación:** ninguna clave privada ni token en texto claro; `tp_runtime` sigue sin `SUPERUSER`/`BYPASSRLS`; `tp_security_audit_writer` conserva su nombre y alcance existente; `ClosedAdminHandler` permanece activo; no se habilita `/api/v1/admin` ni otro endpoint de autenticación.
 
 ### 1B.2-B — autenticación online y acceso administrativo
 
@@ -114,16 +116,17 @@ No se propone una 1B.2-D offline: offline permanece bloqueado hasta una fase pos
 
 - **[D]** `db/migrations` sigue siendo la única fuente canónica y las nuevas migraciones son reversibles sólo en bases efímeras. En entornos con datos, se usará expand/contract y precheck.
 - **[D]** La numeración 000005+ pertenece a `platform`; no se reutiliza ni se copia la migración heredada `Consulta drayage/db/migrations/007_driver_device_auth.sql`.
-- **[D]** `tp_owner` conserva ownership; `tp_migrator` ejecuta Goose; `tp_runtime` no tiene DDL, `SUPERUSER` ni `BYPASSRLS`.
-- **[D]** Resolución inicial de sesión/challenge podrá usar funciones `SECURITY DEFINER` mínimas, con `search_path = pg_catalog, platform`, argumentos tipados y sin devolver filas de negocio globales.
-- **[P]** Confirmar si el backend de autenticación usará el mismo `tp_runtime` con funciones definidas o un rol runtime de autenticación separado con privilegios mínimos.
+- **[D]** `tp_owner` conserva ownership; `tp_migrator` ejecuta Goose; `tp_runtime` no tiene DDL, `SUPERUSER` ni `BYPASSRLS`; no se agrega un rol de runtime de autenticación en 1B.2-A.
+- **[D]** `platform.resolve_auth_session(bytea)` sólo acepta el token hash calculado por el servidor y devuelve una fila activa mínima; `platform.consume_auth_challenge(uuid,text,bytea,bytea)` bloquea, valida y consume un challenge una sola vez, devolviendo únicamente `SessionData` y el contexto mínimo de la ceremonia.
+- **[D]** Ambas funciones, si se implementan en una migración posterior, usarán `SECURITY DEFINER`, `search_path = pg_catalog, platform`, nombres calificados, `REVOKE ALL FROM PUBLIC` y `EXECUTE` exacto para `tp_runtime`; no consultarán por `user_account_id`, tenant, role o permission suministrados por el cliente.
+- **[V]** `tp_security_audit_writer` es el rol existente para `record_denied_attempt`; no se introduce `tp_security_writer`. Es `NOLOGIN`, `NOSUPERUSER`, `NOBYPASSRLS` y no recibe lectura global.
 
 ## 7. Revocación y recuperación
 
 - Suspender `UserAccount` o `Person` invalida nuevas sesiones y fuerza el rechazo del `Principal` en cada request.
 - Revocar `CompanyMembership` invalida el contexto de esa empresa; no elimina otras memberships.
 - Revocar `OperationMembership` invalida el contexto operacional y recursos de esa operación.
-- Revocar `AuthSession` sólo invalida esa sesión; “cerrar todos” incrementa un epoch de cuenta o revoca todas las filas.
+- Revocar `AuthSession` sólo invalida esa sesión; “cerrar todos” bloquea la cuenta, incrementa `UserAccount.session_epoch` y revoca las sesiones activas en la misma transacción.
 - Revocar `AuthenticatorCredential` impide nuevas ceremonias con esa credential, pero no reemplaza revocar sesiones o instalaciones.
 - Revocar `DeviceAuthorization` bloquea esa instalación; la passkey puede seguir autenticando online desde otra instalación autorizada.
 - **[D]** La recuperación nunca se satisface con `driver_code`, conocimiento de un OTP antiguo o una sesión vencida. Requiere canal independiente, expiración corta, un solo uso, step-up y auditoría.
@@ -133,7 +136,7 @@ No se propone una 1B.2-D offline: offline permanece bloqueado hasta una fase pos
 
 - **[D]** No abrir mutaciones HTTP hasta disponer de una tabla durable de claves idempotentes con `scope`, actor, request hash, estado, respuesta sanitizada, expiración y constraint único.
 - **[D]** Para cambios administrativos se requerirá `If-Match`/versión cuando exista sobrescritura de estado; revocaciones deben ser idempotentes por recurso y estado final.
-- **[D]** Challenges, invitaciones, recovery y enrollment requests serán de un solo uso y se consumirán con `SELECT ... FOR UPDATE` o equivalente.
+- **[D]** Challenges, invitaciones, recovery y enrollment requests serán de un solo uso y se consumirán con `SELECT ... FOR UPDATE` o equivalente; un challenge se consume antes de verificar la respuesta y un fallo exige emitir uno nuevo.
 - **[D]** Reemplazo de dispositivos usará lock por `UserAccount`/installation y constraint para evitar superar `max_devices`.
 - **[P]** Elegir TTL, retención de respuestas y si la misma clave idempotente puede reusarse después de un error transitorio.
 
@@ -154,7 +157,7 @@ Esto debe ser una condición de aceptación para 1B.2-A, no una convención manu
 
 - **[P]** Proveedor/canal de invitación y recuperación.
 - **[P]** RP ID, origins, dominios HTTPS y política de `SameSite` detrás de proxy.
-- **[P]** Biblioteca WebAuthn compatible con Go 1.25 o decisión de actualizar el toolchain.
+- **[P]** No hay todavía una versión que pueda confirmarse como compatible con el toolchain fijo Go 1.25: `v0.17.4` es el candidato mantenido más cercano, pero su `go.mod` fija `toolchain go1.26.3`; `v0.18.2` ya requiere Go 1.26/1.27. Resolver antes de 1B.2-C, no de 1B.2-A.
 - **[P]** Retención y protección de IP, user-agent, eventos de seguridad y datos personales.
 - **[D]** Navegadores reales con WebAuthn requieren pruebas separadas de `httptest`; no simular la ceremonia sólo con JSON.
 - **[D]** La plataforma no almacenará claves privadas, PIN, OTP en claro ni secretos de autenticadores.
@@ -168,6 +171,7 @@ La Fase 1B.2 no debe comenzar implementación hasta aprobar:
 - estados y revocación de credential/session/device/membership;
 - RP ID/origins y biblioteca WebAuthn;
 - migraciones 000005+ y políticas RLS/roles;
+- contratos mínimos de `SECURITY DEFINER`, incluyendo ausencia de consultas globales y alineación con `tp_security_audit_writer`;
 - harness destructivo efímero;
 - pruebas de aprobación independiente y passkeys sincronizadas;
 - qué endpoint, si alguno, reemplazará `ClosedAdminHandler` primero.
