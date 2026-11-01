@@ -27,6 +27,7 @@ type Harness struct {
 	ContainerID   string
 	Marker        string
 	RuntimeDSN    string
+	AuthDSN       string
 	MigratorDSN   string
 	AdminDSN      string
 }
@@ -82,6 +83,7 @@ func Start(ctx context.Context, repositoryRoot string) (*Harness, error) {
 	}
 	baseDSN := "postgres://%s@127.0.0.1:%s/%s?sslmode=disable"
 	harness.RuntimeDSN = fmt.Sprintf(baseDSN, "tp_runtime", port, databaseName)
+	harness.AuthDSN = fmt.Sprintf(baseDSN, "tp_auth_runtime", port, databaseName)
 	harness.MigratorDSN = fmt.Sprintf(baseDSN, "tp_migrator", port, databaseName)
 	harness.AdminDSN = fmt.Sprintf(baseDSN, "postgres", port, databaseName)
 
@@ -96,6 +98,7 @@ func Start(ctx context.Context, repositoryRoot string) (*Harness, error) {
 		"-v", "owner_role=tp_owner",
 		"-v", "migrator_role=tp_migrator",
 		"-v", "runtime_role=tp_runtime",
+		"-v", "auth_runtime_role=tp_auth_runtime",
 		"-v", "security_writer_role=tp_security_audit_writer",
 		"-v", "schema_name=platform", "-f", "-"); err != nil {
 		return nil, fmt.Errorf("bootstrap isolated roles: %w", err)

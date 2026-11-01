@@ -69,6 +69,14 @@ func TestPostgres16Foundation(t *testing.T) {
 	if err := runtimePool.Ping(ctx); err != nil {
 		t.Fatal(err)
 	}
+	authPool, err := pgxpool.New(ctx, harness.AuthDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer authPool.Close()
+	if err := authPool.Ping(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	fixture := seedFoundation(t, ctx, runtimePool)
 	t.Run("tenant_isolation", func(t *testing.T) { testTenantIsolation(t, ctx, runtimePool, fixture) })
@@ -80,7 +88,7 @@ func TestPostgres16Foundation(t *testing.T) {
 	t.Run("audit_and_privileges", func(t *testing.T) { testAuditAndPrivileges(t, ctx, runtimePool, adminDSN, fixture) })
 	t.Run("owner_force_rls", func(t *testing.T) { testOwnerForceRLS(t, ctx, migratorDSN) })
 	t.Run("pool_context_a_b_a", func(t *testing.T) { testPoolContextSequence(t, ctx, runtimePool, fixture) })
-	t.Run("auth_foundation", func(t *testing.T) { testAuthFoundation(t, ctx, runtimePool, adminDSN, fixture) })
+	t.Run("auth_foundation", func(t *testing.T) { testAuthFoundation(t, ctx, runtimePool, authPool, adminDSN, fixture) })
 
 	version, err := migrations.Version(ctx, migratorDB)
 	if err != nil || version != 5 {

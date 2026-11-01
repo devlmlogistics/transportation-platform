@@ -15,9 +15,9 @@ import (
 	"transportation-platform/internal/platform/tenancy"
 )
 
-func testAuthFoundation(t *testing.T, ctx context.Context, pool *pgxpool.Pool, adminDSN string, fixture foundationFixture) {
+func testAuthFoundation(t *testing.T, ctx context.Context, runtimePool, authPool *pgxpool.Pool, adminDSN string, fixture foundationFixture) {
 	t.Helper()
-	repository := NewAuthRepository(pool)
+	repository := newAuthRepository(authPool)
 	policy, err := auth.PolicyFor(auth.AdministrativeSession)
 	if err != nil {
 		t.Fatal(err)
@@ -45,7 +45,7 @@ func testAuthFoundation(t *testing.T, ctx context.Context, pool *pgxpool.Pool, a
 		if _, err := repository.ResolveSession(ctx, bytes.Repeat([]byte{0x22}, 32)); !errors.Is(err, pgx.ErrNoRows) {
 			t.Fatalf("expected unknown token to return no rows, got %v", err)
 		}
-		if err := repository.RevokeSession(ctx, fixture.UserAAdmin, session.ID, "test_revoke", time.Now().UTC()); err != nil {
+		if err := repository.RevokeSession(ctx, session.ID, tokenHash, "test_revoke"); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := repository.ResolveSession(ctx, tokenHash); !errors.Is(err, pgx.ErrNoRows) {
@@ -62,7 +62,7 @@ func testAuthFoundation(t *testing.T, ctx context.Context, pool *pgxpool.Pool, a
 		if _, err := repository.CreateSession(ctx, auth.CreateSessionRequest{ID: uuid.New(), UserAccountID: fixture.UserAAdmin, TokenHash: secondHash, Policy: policy}); err != nil {
 			t.Fatal(err)
 		}
-		if err := repository.RevokeAllSessions(ctx, fixture.UserAAdmin, "test_revoke_all", time.Now().UTC()); err != nil {
+		if err := repository.RevokeAllSessions(ctx, firstHash, "test_revoke_all"); err != nil {
 			t.Fatal(err)
 		}
 		for name, hash := range map[string][]byte{"first": firstHash, "second": secondHash} {
@@ -71,7 +71,7 @@ func testAuthFoundation(t *testing.T, ctx context.Context, pool *pgxpool.Pool, a
 			}
 		}
 		var epoch int64
-		withAccess(t, ctx, pool, tenancy.Platform(), func(tx pgx.Tx) error {
+		withAccess(t, ctx, runtimePool, tenancy.Platform(), func(tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT session_epoch FROM platform.user_account WHERE id = $1`, fixture.UserAAdmin).Scan(&epoch)
 		})
 		if epoch != 1 {
@@ -88,11 +88,23 @@ func testAuthFoundation(t *testing.T, ctx context.Context, pool *pgxpool.Pool, a
 	})
 
 	t.Run("expired_session_is_not_resolved", func(t *testing.T) {
-		expiredRepository := NewAuthRepository(pool)
-		expiredRepository.Clock = func() time.Time { return time.Now().UTC().Add(-2 * time.Hour) }
 		expiredHash := bytes.Repeat([]byte{0x41}, 32)
 		shortPolicy := auth.SessionPolicy{IdleTTL: time.Minute, AbsoluteTTL: 2 * time.Minute}
-		if _, err := expiredRepository.CreateSession(ctx, auth.CreateSessionRequest{ID: uuid.New(), UserAccountID: fixture.UserAAdmin, TokenHash: expiredHash, Policy: shortPolicy}); err != nil {
+		created, err := repository.CreateSession(ctx, auth.CreateSessionRequest{ID: uuid.New(), UserAccountID: fixture.UserAAdmin, TokenHash: expiredHash, Policy: shortPolicy})
+		if err != nil {
+			t.Fatal(err)
+		}
+		adminPool, err := pgxpool.New(ctx, adminDSN)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer adminPool.Close()
+		if _, err := adminPool.Exec(ctx, `
+			UPDATE platform.auth_session
+			SET idle_expires_at = created_at + interval '1 millisecond',
+			    absolute_expires_at = created_at + interval '1 hour'
+			WHERE id = $1
+		`, created.ID); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := repository.ResolveSession(ctx, expiredHash); !errors.Is(err, pgx.ErrNoRows) {
@@ -196,13 +208,120 @@ func testAuthFoundation(t *testing.T, ctx context.Context, pool *pgxpool.Pool, a
 
 	t.Run("runtime_cannot_select_global_auth_rows", func(t *testing.T) {
 		for _, table := range []string{"auth_session", "auth_challenge", "authenticator_credential", "password_credential", "recovery_request"} {
-			err := withAccessReturningError(ctx, pool, tenancy.Platform(), func(tx pgx.Tx) error {
+			err := withAccessReturningError(ctx, runtimePool, tenancy.Platform(), func(tx pgx.Tx) error {
 				var count int
 				return tx.QueryRow(ctx, "SELECT count(*) FROM platform."+table).Scan(&count)
 			})
 			if err == nil {
 				t.Fatalf("tp_runtime unexpectedly selected platform.%s", table)
 			}
+		}
+	})
+
+	t.Run("runtime_and_auth_role_minimum_privilege", func(t *testing.T) {
+		for roleName, rolePool := range map[string]*pgxpool.Pool{
+			"tp_runtime":      runtimePool,
+			"tp_auth_runtime": authPool,
+		} {
+			for _, table := range []string{
+				"auth_session", "auth_challenge", "authenticator_credential",
+				"password_credential", "recovery_request", "device_authorization",
+				"device_enrollment_request", "security_audit_event",
+			} {
+				var allowed bool
+				if err := rolePool.QueryRow(ctx, `
+					SELECT has_table_privilege(current_user, $1, 'SELECT')
+				`, "platform."+table).Scan(&allowed); err != nil {
+					t.Fatal(err)
+				}
+				if allowed {
+					t.Fatalf("%s unexpectedly has SELECT privilege on platform.%s", roleName, table)
+				}
+			}
+			for _, signature := range []string{
+				"platform.create_auth_session(uuid,uuid,bytea,bytea,bigint,bigint,uuid,uuid,uuid,uuid,bytea,text)",
+				"platform.revoke_auth_session(uuid,bytea,text)",
+				"platform.revoke_all_auth_sessions(bytea,text)",
+			} {
+				var allowed bool
+				if err := rolePool.QueryRow(ctx, `
+					SELECT has_function_privilege(current_user, $1, 'EXECUTE')
+				`, signature).Scan(&allowed); err != nil {
+					t.Fatal(err)
+				}
+				if roleName == "tp_runtime" && allowed {
+					t.Fatalf("tp_runtime unexpectedly has EXECUTE on %s", signature)
+				}
+				if roleName == "tp_auth_runtime" && !allowed {
+					t.Fatalf("tp_auth_runtime lacks EXECUTE on %s", signature)
+				}
+			}
+		}
+
+		expectDenied := func(roleName string, rolePool *pgxpool.Pool, statement string, args ...any) {
+			t.Helper()
+			err := withAccessReturningError(ctx, rolePool, tenancy.Platform(), func(tx pgx.Tx) error {
+				_, err := tx.Exec(ctx, statement, args...)
+				return err
+			})
+			if err == nil {
+				t.Fatalf("%s unexpectedly executed %s", roleName, statement)
+			}
+		}
+
+		for roleName, rolePool := range map[string]*pgxpool.Pool{
+			"tp_runtime":      runtimePool,
+			"tp_auth_runtime": authPool,
+		} {
+			expectDenied(roleName, rolePool, `
+				INSERT INTO platform.auth_session (
+					id, user_account_id, token_hash, status, created_at,
+					last_seen_at, idle_expires_at, absolute_expires_at, session_epoch
+				) VALUES ($1, $2, $3, 'ACTIVE', now(), now(),
+				          now() + interval '1 hour', now() + interval '2 hours', 0)
+			`, uuid.New(), fixture.UserAAdmin, bytes.Repeat([]byte{0x91}, 32))
+			expectDenied(roleName, rolePool, `UPDATE platform.device_authorization SET status = 'ACTIVE' WHERE false`)
+			expectDenied(roleName, rolePool, `UPDATE platform.device_enrollment_request SET status = 'APPROVED' WHERE false`)
+		}
+
+		expectDenied("tp_runtime", runtimePool, `
+			UPDATE platform.user_account
+			SET session_epoch = session_epoch + 1
+			WHERE id = $1
+		`, fixture.UserAAdmin)
+		expectDenied("tp_runtime", runtimePool, `
+			SELECT platform.revoke_auth_session($1, $2, 'unauthorized')
+		`, uuid.New(), bytes.Repeat([]byte{0x92}, 32))
+	})
+
+	t.Run("self_revocation_requires_matching_token_proof", func(t *testing.T) {
+		firstHash := bytes.Repeat([]byte{0xa1}, 32)
+		secondHash := bytes.Repeat([]byte{0xa2}, 32)
+		first, err := repository.CreateSession(ctx, auth.CreateSessionRequest{ID: uuid.New(), UserAccountID: fixture.UserAAdmin, TokenHash: firstHash, Policy: policy})
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := repository.CreateSession(ctx, auth.CreateSessionRequest{ID: uuid.New(), UserAccountID: fixture.UserAAdmin, TokenHash: secondHash, Policy: policy})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var changed bool
+		if err := authPool.QueryRow(ctx, `
+			SELECT platform.revoke_auth_session($1, $2, 'wrong-proof')
+		`, second.ID, firstHash).Scan(&changed); err != nil {
+			t.Fatal(err)
+		}
+		if changed {
+			t.Fatal("a token hash revoked a different session")
+		}
+		if err := repository.RevokeSession(ctx, first.ID, firstHash, "self-revoke"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repository.ResolveSession(ctx, firstHash); !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("self-revoked session still resolved: %v", err)
+		}
+		if _, err := repository.ResolveSession(ctx, secondHash); err != nil {
+			t.Fatalf("different session was affected by self-revocation: %v", err)
 		}
 	})
 
@@ -213,7 +332,7 @@ func testAuthFoundation(t *testing.T, ctx context.Context, pool *pgxpool.Pool, a
 		}
 		defer adminPool.Close()
 		sessionID := uuid.New()
-		callbackErr := withAccessReturningError(ctx, pool, tenancy.Platform(), func(tx pgx.Tx) error {
+		callbackErr := withAccessReturningError(ctx, adminPool, tenancy.Platform(), func(tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `
 				INSERT INTO platform.auth_session (
 					id, user_account_id, token_hash, status, created_at,

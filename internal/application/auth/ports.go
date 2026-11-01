@@ -114,8 +114,8 @@ type ResolvedSession struct {
 type SessionRepository interface {
 	CreateSession(context.Context, CreateSessionRequest) (SessionRecord, error)
 	ResolveSession(context.Context, []byte) (ResolvedSession, error)
-	RevokeSession(context.Context, uuid.UUID, uuid.UUID, string, time.Time) error
-	RevokeAllSessions(context.Context, uuid.UUID, string, time.Time) error
+	RevokeSession(context.Context, uuid.UUID, []byte, string) error
+	RevokeAllSessions(context.Context, []byte, string) error
 }
 
 type ChallengePurpose string

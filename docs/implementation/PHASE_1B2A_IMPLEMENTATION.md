@@ -110,3 +110,27 @@ go test ./internal/platform/postgres -run TestPostgres16Foundation -count=1
 ## 9. Criterios de cierre de 1B.2-A
 
 Se considera cerrado el alcance técnico cuando la rama contiene esta migración, los puertos/repositorios, el harness verificable, las pruebas de integración y los gates Go/Docker registrados; y cuando la revisión confirma que ningún endpoint de producción puede crear una identidad o sesión sin una frontera de autenticación real.
+
+## 10. Hardening posterior a la revisión de seguridad
+
+- **[V]** La revisión confirmó que la versión inicial concedía a `tp_runtime` DML sobre sesiones/challenges/auditoría y dispositivos, además de `EXECUTE` sobre las funciones de resolución y revocación. También permitía que las funciones de revocación recibieran un `user_account_id` arbitrario.
+- **[V]** La migración 000005 fue corregida directamente porque sólo había sido aplicada por el harness PostgreSQL efímero de esta rama y no estaba fusionada ni compartida con un entorno persistente. Si se detectara una aplicación persistente futura, la corrección equivalente deberá ser una migración nueva, nunca una reescritura.
+- **[V]** `tp_runtime` ahora tiene `REVOKE ALL` sobre `auth_session`, `auth_challenge`, `security_audit_event`, `device_authorization` y `device_enrollment_request`; no puede ejecutar las funciones de autenticación.
+- **[V]** Se agregó `tp_auth_runtime` como rol de infraestructura separado. Tiene únicamente `EXECUTE` sobre funciones estrechas de creación/resolución/consumo de autenticación, auditoría y autorrevocación; no tiene `SELECT`, `INSERT` ni `UPDATE` directo sobre tablas globales o de dispositivos.
+- **[V]** `revoke_auth_session` sólo acepta la combinación de sesión y hash del token de esa misma sesión. `revoke_all_auth_sessions` deriva la cuenta desde un token activo y nunca recibe un `user_account_id` del caller. La revocación administrativa de otra persona permanece bloqueada hasta diseñar una frontera autorizada separada.
+- **[V]** `user_account.session_epoch` tiene un trigger que rechaza cambios originados por `tp_runtime`; el incremento global sólo se realiza dentro de la función de revocación de la frontera de autenticación.
+- **[V]** La emisión y el consumo de challenges/sesiones pasan por funciones `SECURITY DEFINER`; el repositorio Go es deliberadamente no exportado y sólo puede construirse dentro del paquete con un pool destinado a `tp_auth_runtime`. No se conecta a HTTP.
+
+### Matriz de privilegios resultante
+
+| Operación | `tp_runtime` | `tp_auth_runtime` |
+|---|---:|---:|
+| Leer credenciales, sesiones, challenges o recovery | No | No directo; sólo resultado mínimo de funciones autorizadas |
+| Insertar/actualizar `auth_session` | No | No directo; función de creación o revocación |
+| Insertar/consumir `auth_challenge` | No | No directo; funciones de challenge |
+| Activar/revocar dispositivos | No | No; requiere futura frontera de administración de dispositivos |
+| Cambiar `session_epoch` | No; trigger lo rechaza | No directo; sólo revocación global por token activo |
+| Resolver una sesión | No | Sí, sólo por hash de token |
+| Registrar auditoría de autenticación | No directo | Sí, sólo función validada |
+
+- **[V]** Las pruebas negativas verifican ambos roles, acceso cruzado de sesión por hash, modificación de dispositivos, cambio de epoch, DML directo, lectura global y privilegios de función, preservando replay, concurrencia, auditoría, RLS y migraciones.
