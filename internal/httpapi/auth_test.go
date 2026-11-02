@@ -69,17 +69,31 @@ func TestAuthHandlerUsesCookiesAndCSRF(t *testing.T) {
 		t.Fatalf("login status = %d, body=%s", loginResponse.Code, loginResponse.Body.String())
 	}
 	cookies := loginResponse.Result().Cookies()
-	if len(cookies) != 2 || !cookies[0].HttpOnly || cookies[1].HttpOnly {
+	var sessionCookie, activeCSRFCookie, legacyCSRFCleanup *http.Cookie
+	for _, cookie := range cookies {
+		switch {
+		case cookie.Name == sessionCookieName && cookie.Path == "/api/v1":
+			sessionCookie = cookie
+		case cookie.Name == csrfCookieName && cookie.Path == "/" && cookie.MaxAge > 0:
+			activeCSRFCookie = cookie
+		case cookie.Name == csrfCookieName && cookie.Path == legacyCSRFCookiePath && cookie.MaxAge < 0:
+			legacyCSRFCleanup = cookie
+		}
+	}
+	if sessionCookie == nil || !sessionCookie.HttpOnly || activeCSRFCookie == nil || activeCSRFCookie.HttpOnly || legacyCSRFCleanup == nil {
 		t.Fatalf("unexpected authentication cookies: %+v", cookies)
 	}
-	if cookies[0].SameSite != http.SameSiteLaxMode || cookies[1].SameSite != http.SameSiteLaxMode {
+	if sessionCookie.SameSite != http.SameSiteLaxMode || activeCSRFCookie.SameSite != http.SameSiteLaxMode || legacyCSRFCleanup.SameSite != http.SameSiteLaxMode {
 		t.Fatal("authentication cookies did not use SameSite=Lax")
+	}
+	if activeCSRFCookie.Path != "/" || activeCSRFCookie.HttpOnly {
+		t.Fatalf("active csrf cookie path/httpOnly = %q/%v", activeCSRFCookie.Path, activeCSRFCookie.HttpOnly)
 	}
 
 	logout := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
 	logout.Header.Set("Origin", "http://localhost:5173")
-	logout.AddCookie(cookies[0])
-	logout.AddCookie(cookies[1])
+	logout.AddCookie(sessionCookie)
+	logout.AddCookie(activeCSRFCookie)
 	withoutCSRF := httptest.NewRecorder()
 	handler.ServeHTTP(withoutCSRF, logout)
 	if withoutCSRF.Code != http.StatusForbidden {
@@ -88,13 +102,28 @@ func TestAuthHandlerUsesCookiesAndCSRF(t *testing.T) {
 
 	logout = httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
 	logout.Header.Set("Origin", "http://localhost:5173")
-	logout.Header.Set(csrfHeaderName, cookies[1].Value)
-	logout.AddCookie(cookies[0])
-	logout.AddCookie(cookies[1])
+	logout.Header.Set(csrfHeaderName, activeCSRFCookie.Value)
+	logout.AddCookie(sessionCookie)
+	logout.AddCookie(activeCSRFCookie)
 	withCSRF := httptest.NewRecorder()
 	handler.ServeHTTP(withCSRF, logout)
 	if withCSRF.Code != http.StatusNoContent || !fake.logout {
 		t.Fatalf("logout with csrf status = %d logout=%v", withCSRF.Code, fake.logout)
+	}
+	logoutCookies := withCSRF.Result().Cookies()
+	var sessionCleanup, rootCSRFCleanup, legacyLogoutCSRFCleanup *http.Cookie
+	for _, cookie := range logoutCookies {
+		switch {
+		case cookie.Name == sessionCookieName && cookie.Path == "/api/v1":
+			sessionCleanup = cookie
+		case cookie.Name == csrfCookieName && cookie.Path == "/":
+			rootCSRFCleanup = cookie
+		case cookie.Name == csrfCookieName && cookie.Path == legacyCSRFCookiePath:
+			legacyLogoutCSRFCleanup = cookie
+		}
+	}
+	if sessionCleanup == nil || sessionCleanup.MaxAge >= 0 || rootCSRFCleanup == nil || rootCSRFCleanup.MaxAge >= 0 || legacyLogoutCSRFCleanup == nil || legacyLogoutCSRFCleanup.MaxAge >= 0 {
+		t.Fatalf("logout did not clear session and both csrf paths: %+v", logoutCookies)
 	}
 }
 
