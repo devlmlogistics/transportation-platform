@@ -122,6 +122,34 @@ func (r *OnlineAuthRepository) IssueAuthSession(ctx context.Context, grant auth.
 	return record, err
 }
 
+func (r *OnlineAuthRepository) IssueDriverActivationSession(ctx context.Context, grant auth.LoginGrant, request auth.CreateSessionRequest, auditID uuid.UUID) (auth.SessionRecord, error) {
+	if r == nil || r.authPool == nil || grant.ID == uuid.Nil || len(grant.GrantHash) != 32 || auditID == uuid.Nil {
+		return auth.SessionRecord{}, auth.ErrInvalidInput
+	}
+	if err := validateSessionRequest(request); err != nil {
+		return auth.SessionRecord{}, err
+	}
+	var record auth.SessionRecord
+	err := r.authPool.QueryRow(ctx, `
+		SELECT session_id, user_account_id, session_epoch, status,
+		       created_at, last_seen_at, idle_expires_at, absolute_expires_at,
+		       active_company_id, active_operation_id, context_version
+		FROM platform.issue_driver_activation_session_from_verified_login(
+			$1, $2, $3, $4, $5, $6, $7, $8
+		)
+	`, grant.GrantHash, request.ID, auditID, uuid.New(), request.TokenHash,
+		nullableBytes(request.CSRFSecretHash), nullableBytes(request.UserAgentHash), request.IPPrefix).Scan(
+		&record.ID, &record.UserAccountID, &record.SessionEpoch, &record.Status,
+		&record.CreatedAt, &record.LastSeenAt, &record.IdleExpiresAt,
+		&record.AbsoluteExpiresAt, &record.ActiveCompanyID,
+		&record.ActiveOperationID, &record.ContextVersion,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return auth.SessionRecord{}, auth.ErrInvalidSession
+	}
+	return record, err
+}
+
 func (r *OnlineAuthRepository) ResolveHTTPSession(ctx context.Context, tokenHash []byte) (auth.AuthenticatedSession, error) {
 	if r == nil || r.authPool == nil || len(tokenHash) != 32 {
 		return auth.AuthenticatedSession{}, auth.ErrInvalidSession
@@ -424,6 +452,151 @@ func (r *OnlineAuthRepository) RevokeDeviceAuthorization(ctx context.Context, to
 		return pgx.ErrNoRows
 	}
 	return err
+}
+
+func (r *OnlineAuthRepository) ListDriverLoginCredentials(ctx context.Context, identifier string, installationID uuid.UUID) ([]auth.DriverLoginCredential, error) {
+	if r == nil || r.authPool == nil || strings.TrimSpace(identifier) == "" || installationID == uuid.Nil {
+		return nil, auth.ErrInvalidInput
+	}
+	rows, err := r.authPool.Query(ctx, `
+		SELECT user_account_id, device_authorization_id, company_id, company_operation_id,
+		       installation_public_key, key_algorithm, credential_id, public_key,
+		       sign_count, transports, backup_eligible, backup_state, user_verified_last
+		FROM platform.list_driver_login_credentials($1, $2)
+	`, strings.ToLower(strings.TrimSpace(identifier)), installationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []auth.DriverLoginCredential
+	for rows.Next() {
+		var item auth.DriverLoginCredential
+		var opID *uuid.UUID
+		var backupState *string
+		if err := rows.Scan(&item.UserAccountID, &item.DeviceAuthorizationID, &item.CompanyID, &opID,
+			&item.InstallationPublicKey, &item.KeyAlgorithm, &item.Credential.CredentialID,
+			&item.Credential.PublicKey, &item.Credential.SignCount, &item.Credential.Transports,
+			&item.Credential.BackupEligible, &backupState, &item.Credential.UserVerifiedLast); err != nil {
+			return nil, err
+		}
+		item.CompanyOperationID = opID
+		item.Credential.BackupState = backupState
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (r *OnlineAuthRepository) ListDriverLoginCredentialsForChallenge(ctx context.Context, challengeID uuid.UUID) ([]auth.DriverLoginCredential, error) {
+	if r == nil || r.authPool == nil || challengeID == uuid.Nil {
+		return nil, auth.ErrInvalidInput
+	}
+	rows, err := r.authPool.Query(ctx, `
+		SELECT user_account_id, device_authorization_id, company_id, company_operation_id,
+		       installation_public_key, key_algorithm, credential_id, public_key,
+		       sign_count, transports, backup_eligible, backup_state, user_verified_last
+		FROM platform.list_driver_login_credentials_for_challenge($1)
+	`, challengeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []auth.DriverLoginCredential
+	for rows.Next() {
+		var item auth.DriverLoginCredential
+		var opID *uuid.UUID
+		var backupState *string
+		if err := rows.Scan(&item.UserAccountID, &item.DeviceAuthorizationID, &item.CompanyID, &opID,
+			&item.InstallationPublicKey, &item.KeyAlgorithm, &item.Credential.CredentialID,
+			&item.Credential.PublicKey, &item.Credential.SignCount, &item.Credential.Transports,
+			&item.Credential.BackupEligible, &backupState, &item.Credential.UserVerifiedLast); err != nil {
+			return nil, err
+		}
+		item.CompanyOperationID = opID
+		item.Credential.BackupState = backupState
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (r *OnlineAuthRepository) ListDriverAuthorizedContexts(ctx context.Context, tokenHash []byte) ([]auth.DriverAuthorizedContext, error) {
+	if r == nil || r.authPool == nil || len(tokenHash) != 32 {
+		return nil, auth.ErrInvalidInput
+	}
+	rows, err := r.authPool.Query(ctx, `
+		SELECT company_id, company_operation_id, device_authorization_id, company_name, operation_status
+		FROM platform.list_driver_authorized_contexts($1)
+	`, tokenHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []auth.DriverAuthorizedContext
+	for rows.Next() {
+		var item auth.DriverAuthorizedContext
+		if err := rows.Scan(&item.CompanyID, &item.CompanyOperationID, &item.DeviceAuthorizationID, &item.CompanyName, &item.OperationStatus); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (r *OnlineAuthRepository) BeginDriverLoginChallenge(ctx context.Context, request auth.DriverLoginChallengeRequest) error {
+	if r == nil || r.authPool == nil || request.ChallengeID == uuid.Nil || request.DeviceAuthorizationID == uuid.Nil || request.InstallationID == uuid.Nil || request.AuditID == uuid.Nil {
+		return auth.ErrInvalidInput
+	}
+	var id *uuid.UUID
+	err := r.authPool.QueryRow(ctx, `
+		SELECT platform.begin_driver_login_challenge($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+	`, strings.ToLower(strings.TrimSpace(request.Identifier)), request.InstallationID, request.ChallengeID,
+		request.DeviceAuthorizationID, request.ChallengeHash, request.SessionData, request.SessionDataFormat,
+		request.BindingHash, request.ExpiresAt.UTC(), request.AuditID).Scan(&id)
+	if err != nil {
+		return err
+	}
+	if id == nil || *id != request.ChallengeID {
+		return auth.ErrInvalidSession
+	}
+	return nil
+}
+
+func (r *OnlineAuthRepository) GetDriverLoginChallenge(ctx context.Context, id uuid.UUID) (auth.DriverLoginChallenge, error) {
+	if r == nil || r.authPool == nil || id == uuid.Nil {
+		return auth.DriverLoginChallenge{}, auth.ErrInvalidInput
+	}
+	var result auth.DriverLoginChallenge
+	result.ID = id
+	err := r.authPool.QueryRow(ctx, `
+		SELECT challenge_hash, session_data, session_data_format, binding_hash,
+		       user_account_id, device_authorization_id, installation_id, company_id, company_operation_id,
+		       installation_public_key, key_algorithm
+		FROM platform.get_driver_login_challenge($1)
+	`, id).Scan(&result.ChallengeHash, &result.SessionData, &result.SessionDataFormat,
+		&result.BindingHash, &result.UserAccountID, &result.DeviceAuthorizationID, &result.InstallationID,
+		&result.CompanyID, &result.CompanyOperationID, &result.InstallationPublicKey, &result.KeyAlgorithm)
+	return result, err
+}
+
+func (r *OnlineAuthRepository) CompleteDriverLogin(ctx context.Context, request auth.CompleteDriverLoginRequest) (auth.SessionRecord, error) {
+	if r == nil || r.authPool == nil || request.ChallengeID == uuid.Nil || request.SessionID == uuid.Nil || request.AuditID == uuid.Nil || request.LoginAuditID == uuid.Nil {
+		return auth.SessionRecord{}, auth.ErrInvalidInput
+	}
+	var record auth.SessionRecord
+	err := r.authPool.QueryRow(ctx, `
+		SELECT session_id, user_account_id, session_epoch, status,
+		       created_at, last_seen_at, idle_expires_at, absolute_expires_at,
+		       active_company_id, active_operation_id, context_version
+		FROM platform.complete_driver_login($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+	`, request.ChallengeID, request.ChallengeHash, request.BindingHash, request.CredentialKey,
+		request.SignCount, request.SessionID, request.TokenHash, request.CSRFSecretHash,
+		nullableBytes(request.UserAgentHash), request.IPPrefix, request.AuditID, request.LoginAuditID).Scan(
+		&record.ID, &record.UserAccountID, &record.SessionEpoch, &record.Status,
+		&record.CreatedAt, &record.LastSeenAt, &record.IdleExpiresAt, &record.AbsoluteExpiresAt,
+		&record.ActiveCompanyID, &record.ActiveOperationID, &record.ContextVersion)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return auth.SessionRecord{}, auth.ErrInvalidSession
+	}
+	return record, err
 }
 
 func (r *OnlineAuthRepository) changeDeviceRequest(ctx context.Context, function string, tokenHash []byte, requestID uuid.UUID, reason string) error {

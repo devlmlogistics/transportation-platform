@@ -77,6 +77,11 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 				}
 			}
 			dependencies.WebAuthn = webauthnService
+			driverService, err := applicationauth.NewDriverMobileService(repository, webauthnService.Engine)
+			if err != nil {
+				return err
+			}
+			dependencies.Driver = &applicationauth.DriverAuthService{Activation: authService, Mobile: driverService}
 		}
 		if cfg.AdminHTTPEnabled {
 			dependencies.Admin = admin.NewService(pools.Runtime)

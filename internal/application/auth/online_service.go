@@ -108,6 +108,64 @@ func (s *OnlineAuthService) Login(ctx context.Context, identifier, password, rem
 	return LoginResult{Session: record, Token: token, CSRFToken: csrfToken}, nil
 }
 
+// LoginDriver is the bounded activation login. It is intentionally separate
+// from the administrative login endpoint and issues only a short-lived
+// DRIVER activation session. That session can request device enrolment, but
+// it is not an operational device-authorized session.
+func (s *OnlineAuthService) LoginDriver(ctx context.Context, identifier, password, remoteAddr, userAgent string) (LoginResult, error) {
+	if s == nil || s.Store == nil || strings.TrimSpace(identifier) == "" || password == "" {
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	store, ok := s.Store.(DriverActivationStore)
+	if !ok {
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	normalized := strings.ToLower(strings.TrimSpace(identifier))
+	ipPrefix := privacyIPPrefix(remoteAddr)
+	preKey := digestKey("driver-login", normalized, ipPrefix)
+	allowed, err := s.Store.ConsumeRateLimit(ctx, preKey, "DRIVER_LOGIN_IDENTIFIER_IP", 10, 60)
+	if err != nil || !allowed {
+		_ = s.recordLoginFailure(ctx, "RATE_LIMITED")
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	credential, err := s.Store.ResolveLoginCredential(ctx, normalized)
+	if err != nil || credential.KDFName != "argon2id" {
+		_ = s.recordLoginFailure(ctx, "INVALID_CREDENTIALS")
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	valid, err := VerifyPassword(password, credential.PasswordHash)
+	if err != nil || !valid {
+		_ = s.recordLoginFailure(ctx, "INVALID_CREDENTIALS")
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	grantRaw, err := randomBytes(32)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	grant := LoginGrant{ID: uuid.New(), GrantHash: HashSessionToken(grantRaw), VerificationID: credential.VerificationID, VerificationNonceHash: HashSessionToken(credential.VerificationNonce)}
+	if err := s.Store.RecordVerifiedPasswordLogin(ctx, grant, 120); err != nil {
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	token, err := randomBytes(32)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	csrfToken, err := randomBytes(32)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	policy, _ := PolicyFor(DriverSession)
+	record, err := store.IssueDriverActivationSession(ctx, grant, CreateSessionRequest{
+		ID: uuid.New(), UserAccountID: credential.UserAccountID,
+		TokenHash: HashSessionToken(token), CSRFSecretHash: HashSessionToken(csrfToken),
+		Policy: policy, UserAgentHash: digestBytes(userAgent), IPPrefix: ipPrefix,
+	}, uuid.New())
+	if err != nil {
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	return LoginResult{Session: record, Token: token, CSRFToken: csrfToken}, nil
+}
+
 func (s *OnlineAuthService) ResolveSession(ctx context.Context, token []byte) (AuthenticatedSession, error) {
 	if len(token) != 32 {
 		return AuthenticatedSession{}, ErrSessionNotFound

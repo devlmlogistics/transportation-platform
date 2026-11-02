@@ -1,0 +1,74 @@
+# Fase 1B.2-D — acceso móvil de conductores
+
+Estado de esta rama: [D] implementación para revisión; no se habilita ningún endpoint sin `AUTH_ONLINE_ENABLED=true` y `WEBAUTHN_ENABLED=true`. No se ejecutó bootstrap ni se modificó una base DEV persistente.
+
+## Alcance implementado
+
+- [V] Se reutilizan `Person`, `UserAccount`, `DriverProfile`, memberships, `AuthenticatorCredential`, `DeviceEnrollmentRequest`, `DeviceAuthorization` y `AuthSession`.
+- [D] Se agregó la migración `000012_driver_mobile_auth.sql`; las migraciones anteriores permanecen inmutables.
+- [D] Se agregó una sesión DRIVER de activación corta, emitida sólo después de consumir un grant de verificación de contraseña. Esta sesión no tiene empresa, operación ni autorización de dispositivo y sólo permite continuar el flujo de activación.
+- [D] Se agregó login recurrente WebAuthn para una instalación previamente autorizada. La sesión final se crea exclusivamente en `complete_driver_login`, derivando cuenta, empresa, operación, credencial y dispositivo desde el challenge.
+- [D] Se agregó una prueba independiente de posesión de instalación con ECDSA P-256. El navegador mantiene la clave privada no exportable sólo en memoria durante esta versión.
+- [D] Se añadió `DriverAuthHandler` bajo `/api/v1/driver/auth/` y una pantalla React mínima. No se agregaron formularios operativos, GPS, Service Worker, IndexedDB ni modo offline.
+
+## Flujo de activación
+
+1. El conductor inicia `/api/v1/driver/auth/activation/login` con su identidad ya registrada y contraseña. La respuesta es genérica y el grant de verificación se consume una sola vez.
+2. El frontend genera una clave ECDSA P-256 por instalación en memoria y envía sólo la clave pública a la solicitud existente `/api/v1/auth/webauthn/device-enrollment-requests`.
+3. La función existente valida la sesión de activación, `DriverProfile`, membresía empresarial y, si corresponde, membresía operacional. El código de correlación sólo sirve para seguimiento y no autentica.
+4. Un supervisor autorizado aprueba la solicitud existente. La aprobación repite membresía, alcance, rol, permiso, vigencia y aislamiento de empresa/operación.
+5. El conductor completa el registro WebAuthn con `registration/options` y `registration/finish`, vinculando el challenge al `DeviceEnrollmentRequest` aprobado. La autorización `DeviceAuthorization` se crea atómicamente al consumir la solicitud.
+
+Si la primera sesión de activación expira, el conductor debe iniciar nuevamente el flujo. No se crean cuentas ni autorizaciones por coincidencia de nombres, teléfono, documento, UUID o código de correlación.
+
+## Login recurrente
+
+`POST /api/v1/driver/auth/webauthn/options` recibe un identificador y `installation_id` únicamente como localizadores del flujo. La función SQL sólo devuelve opciones si existe un conductor activo, una autorización ACTIVE y vigente para esa instalación y al menos una credencial activa. La respuesta pública de error no enumera cuentas.
+
+`POST /api/v1/driver/auth/webauthn/finish` verifica en Go la respuesta WebAuthn con `go-webauthn/webauthn v0.13.0`, exige User Verification, valida la firma ECDSA de instalación y sólo después llama a `complete_driver_login`. La función SQL bloquea challenge, cuenta y autorización, revalida estados/memberships/epoch y consume el challenge antes de insertar la sesión.
+
+La sesión final contiene:
+
+- `session_policy = DRIVER`;
+- empresa y operación derivadas de `DeviceAuthorization`;
+- `device_authorization_id` y `authenticator_credential_id` derivados del challenge;
+- 12 horas de expiración absoluta y 60 minutos de inactividad;
+- renovación de inactividad acotada por el absoluto;
+- auditoría de challenge y login.
+
+Una sesión DRIVER no puede cambiar de empresa u operación mediante `/api/v1/auth/context`; el SQL devuelve el contexto actual sólo si coincide. Su política de servidor es de 12 horas absolutas y 60 minutos de inactividad. Las rutas administrativas rechazan explícitamente sesiones DRIVER, aunque la persona tuviera otros roles, y no se consideran autorizadas por compartir una identidad.
+
+## Posesión y limitaciones
+
+La clave pública de instalación usa `ECDSA_P256_SHA256`. El navegador firma `SHA-256("tp-driver-possession\\0" || challenge_hash || installation_id)` y Go verifica la firma antes de la función SQL. La clave privada Web Crypto se genera como no exportable y no se escribe en `localStorage`; al recargar o reinstalar la PWA se pierde en esta versión y debe repetirse la activación o incorporarse posteriormente un almacenamiento seguro aprobado.
+
+Esto no es atestación de hardware. Una passkey sincronizada tampoco prueba que el teléfono físico sea el único dispositivo. La asociación es una autorización de instalación revocable más una prueba criptográfica independiente; el riesgo residual de clonación/exportación de la instalación queda documentado y no se presenta como garantía de hardware.
+
+## Endpoints
+
+| Endpoint | Propósito | Estado |
+|---|---|---|
+| `POST /api/v1/driver/auth/activation/login` | Sesión DRIVER limitada para iniciar activación | cerrado por configuración |
+| `POST /api/v1/auth/webauthn/device-enrollment-requests` | Solicitud de instalación existente | requiere sesión, CSRF y Origin |
+| `POST /api/v1/auth/webauthn/device-enrollment-requests/{id}/approve` | Aprobación de supervisor existente | requiere permiso y alcance |
+| `POST /api/v1/auth/webauthn/registration/options` | Opciones de registro existente | requiere sesión/challenge aprobado |
+| `POST /api/v1/auth/webauthn/registration/finish` | Registro de passkey existente | verifica criptografía en Go |
+| `POST /api/v1/driver/auth/webauthn/options` | Opciones de login DRIVER | rate limiting por identificador/instalación |
+| `POST /api/v1/driver/auth/webauthn/finish` | Login DRIVER WebAuthn + posesión | consume challenge una vez |
+| `GET /api/v1/driver/auth/me` | Sesión DRIVER actual | no devuelve tokens |
+| `GET /api/v1/driver/auth/contexts` | Contextos vigentes derivados de la autorización del dispositivo | sólo sesión DRIVER |
+| `POST /api/v1/driver/auth/logout` | Revoca la sesión actual | CSRF/Origin |
+
+Todos los mutating endpoints existentes conservan cookies HttpOnly, CSRF, SameSite=Lax, `Cache-Control: no-store` y Origin permitido. Los tokens no se guardan en `localStorage`.
+
+## PIN de supervisor y operación offline
+
+- [P] El PIN de supervisor por jornada no se implementó. Requiere decisión de factor, scope, vencimiento, rate limiting, revocación y auditoría.
+- [V] Esta fase no crea sesiones offline, leases, formularios, fotografías, GPS, IndexedDB ni sincronización tardía.
+
+## Pruebas y límites actuales
+
+- [V] Se agregan contratos de repositorio, rate limiting por identificador/instalación y una prueba criptográfica completa en el harness PostgreSQL 16 efímero: assertion WebAuthn válida, posesión ECDSA, TTL de sesión, consumo único y rechazo de ejecución desde `tp_runtime`.
+- [P] Debe ampliarse en una iteración posterior la cobertura de ciclo de vida para autorización revocada, membresía revocada, sesión expirada y aislamiento A/B con respuestas WebAuthn completas.
+- [V] La suite validada en esta rama incluye `go test ./...`, `go vet ./...`, `pnpm --dir web typecheck`, `pnpm --dir web test -- --run`, `pnpm --dir web build`, `docker compose config --quiet` y `docker build`.
+- [P] Antes de cualquier Goose UP en DEV se debe verificar usuario `tp_migrator`, base `transportation_platform_dev`, esquema, versión y ausencia de operaciones destructivas. Esta rama no hace bootstrap ni crea usuarios reales.

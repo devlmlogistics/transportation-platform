@@ -303,7 +303,7 @@ func (s *WebAuthnService) persistChallenge(ctx context.Context, token []byte, se
 	binding := ceremonyBinding(sessionID, purpose)
 	if err := s.Store.BeginWebAuthnChallenge(ctx, HashSessionToken(token), WebAuthnChallengeRequest{
 		ID: id, Purpose: purpose, ChallengeHash: hashBytes(raw), SessionData: data,
-		SessionDataFormat: "webauthn.v1", BindingHash: binding, ExpiresAt: s.Now().Add(5 * time.Minute),
+		SessionDataFormat: "webauthn.v1", BindingHash: binding, ExpiresAt: s.Now().Add(4*time.Minute + 30*time.Second),
 		DeviceRequestID: deviceRequest, AuditID: uuid.New(),
 	}); err != nil {
 		return uuid.Nil, ErrWebAuthnRejected

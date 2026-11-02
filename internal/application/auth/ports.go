@@ -76,7 +76,7 @@ func PolicyFor(kind SessionKind) (SessionPolicy, error) {
 	case AdministrativeSession:
 		return SessionPolicy{IdleTTL: 30 * time.Minute, AbsoluteTTL: 8 * time.Hour}, nil
 	case DriverSession:
-		return SessionPolicy{IdleTTL: 2 * time.Hour, AbsoluteTTL: 12 * time.Hour}, nil
+		return SessionPolicy{IdleTTL: 60 * time.Minute, AbsoluteTTL: 12 * time.Hour}, nil
 	default:
 		return SessionPolicy{}, ErrInvalidInput
 	}
@@ -130,11 +130,12 @@ type SessionRepository interface {
 type ChallengePurpose string
 
 const (
-	LoginChallenge            ChallengePurpose = "LOGIN"
-	RegistrationChallenge     ChallengePurpose = "REGISTRATION"
-	StepUpChallenge           ChallengePurpose = "STEP_UP"
-	RecoveryChallenge         ChallengePurpose = "RECOVERY"
-	DeviceEnrollmentChallenge ChallengePurpose = "DEVICE_ENROLLMENT"
+	LoginChallenge              ChallengePurpose = "LOGIN"
+	DriverLoginChallengePurpose ChallengePurpose = "DRIVER_LOGIN"
+	RegistrationChallenge       ChallengePurpose = "REGISTRATION"
+	StepUpChallenge             ChallengePurpose = "STEP_UP"
+	RecoveryChallenge           ChallengePurpose = "RECOVERY"
+	DeviceEnrollmentChallenge   ChallengePurpose = "DEVICE_ENROLLMENT"
 )
 
 type CreateChallengeRequest struct {
@@ -277,6 +278,82 @@ type WebAuthnStore interface {
 	RevokeDeviceAuthorization(context.Context, []byte, uuid.UUID, string) error
 }
 
+// DriverMobileStore is the narrow pre-authentication boundary for recurring
+// driver login. It never accepts a user/account id from HTTP; the SQL
+// functions derive the account and device scope from the identifier,
+// installation and single-use challenge.
+type DriverMobileStore interface {
+	ConsumeRateLimit(context.Context, []byte, string, int, int) (bool, error)
+	ListDriverLoginCredentials(context.Context, string, uuid.UUID) ([]DriverLoginCredential, error)
+	ListDriverLoginCredentialsForChallenge(context.Context, uuid.UUID) ([]DriverLoginCredential, error)
+	ListDriverAuthorizedContexts(context.Context, []byte) ([]DriverAuthorizedContext, error)
+	BeginDriverLoginChallenge(context.Context, DriverLoginChallengeRequest) error
+	GetDriverLoginChallenge(context.Context, uuid.UUID) (DriverLoginChallenge, error)
+	CompleteDriverLogin(context.Context, CompleteDriverLoginRequest) (SessionRecord, error)
+}
+
+type DriverAuthorizedContext struct {
+	CompanyID             uuid.UUID  `json:"company_id"`
+	CompanyOperationID    *uuid.UUID `json:"company_operation_id"`
+	DeviceAuthorizationID uuid.UUID  `json:"device_authorization_id"`
+	CompanyName           *string    `json:"company_name"`
+	OperationStatus       *string    `json:"operation_status"`
+}
+
+type DriverLoginCredential struct {
+	UserAccountID         uuid.UUID
+	DeviceAuthorizationID uuid.UUID
+	InstallationID        uuid.UUID
+	CompanyID             uuid.UUID
+	CompanyOperationID    *uuid.UUID
+	InstallationPublicKey []byte
+	KeyAlgorithm          string
+	Credential            AuthenticatorCredentialRecord
+}
+
+type DriverLoginChallengeRequest struct {
+	Identifier            string
+	InstallationID        uuid.UUID
+	ChallengeID           uuid.UUID
+	DeviceAuthorizationID uuid.UUID
+	ChallengeHash         []byte
+	SessionData           []byte
+	SessionDataFormat     string
+	BindingHash           []byte
+	ExpiresAt             time.Time
+	AuditID               uuid.UUID
+}
+
+type DriverLoginChallenge struct {
+	ID                    uuid.UUID
+	ChallengeHash         []byte
+	SessionData           []byte
+	SessionDataFormat     string
+	BindingHash           []byte
+	UserAccountID         uuid.UUID
+	DeviceAuthorizationID uuid.UUID
+	InstallationID        uuid.UUID
+	CompanyID             uuid.UUID
+	CompanyOperationID    *uuid.UUID
+	InstallationPublicKey []byte
+	KeyAlgorithm          string
+}
+
+type CompleteDriverLoginRequest struct {
+	ChallengeID    uuid.UUID
+	ChallengeHash  []byte
+	BindingHash    []byte
+	CredentialKey  []byte
+	SignCount      uint32
+	SessionID      uuid.UUID
+	TokenHash      []byte
+	CSRFSecretHash []byte
+	UserAgentHash  []byte
+	IPPrefix       string
+	AuditID        uuid.UUID
+	LoginAuditID   uuid.UUID
+}
+
 type WebAuthnChallengeRequest struct {
 	ID                uuid.UUID
 	Purpose           ChallengePurpose
@@ -355,4 +432,9 @@ type OnlineAuthStore interface {
 	PrepareBootstrapRequest(context.Context, uuid.UUID, []byte, []byte, string, string, string, json.RawMessage, int) error
 	CompleteBootstrapRequest(context.Context, []byte, []byte, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID) (uuid.UUID, uuid.UUID, error)
 	RecordLoginFailure(context.Context, uuid.UUID, string) error
+}
+
+type DriverActivationStore interface {
+	OnlineAuthStore
+	IssueDriverActivationSession(context.Context, LoginGrant, CreateSessionRequest, uuid.UUID) (SessionRecord, error)
 }

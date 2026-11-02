@@ -1,3 +1,12 @@
+import { useState } from "react";
+import {
+  createDriverInstallation,
+  loginDriverWithPassword,
+  loginDriverWithPasskey,
+  requestDriverActivation,
+  type DriverInstallation,
+} from "./webauthn";
+
 type ModuleCardProps = {
   name: string;
   description: string;
@@ -39,8 +48,50 @@ function ModuleCard({ name, description, status, accent }: ModuleCardProps) {
     </article>
   );
 }
-
 export default function App() {
+  const [identifier, setIdentifier] = useState("");
+  const [password, setPassword] = useState("");
+  const [companyID, setCompanyID] = useState("");
+  const [operationID, setOperationID] = useState("");
+  const [installation, setInstallation] = useState<DriverInstallation>();
+  const [status, setStatus] = useState("Listo para comenzar.");
+
+  const prepareInstallation = async () => {
+    try {
+      setInstallation(await createDriverInstallation());
+      setStatus("Instalación preparada en memoria. No se almacena una clave en localStorage.");
+    } catch {
+      setStatus("No fue posible preparar la instalación en este navegador.");
+    }
+  };
+
+  const activate = async () => {
+    if (!installation || !companyID) {
+      setStatus("Prepara la instalación e indica la empresa.");
+      return;
+    }
+    try {
+      await loginDriverWithPassword(identifier, password);
+      const request = await requestDriverActivation(companyID, operationID || undefined, installation);
+      setStatus(`Solicitud creada: ${String(request.correlation_code ?? "pendiente")}. Requiere aprobación del supervisor.`);
+    } catch {
+      setStatus("La activación fue rechazada. La respuesta no revela si el conductor existe.");
+    }
+  };
+
+  const recurringLogin = async () => {
+    if (!installation) {
+      setStatus("Prepara primero la instalación en este navegador.");
+      return;
+    }
+    try {
+      await loginDriverWithPasskey(identifier, installation);
+      setStatus("Sesión DRIVER creada con WebAuthn y prueba de posesión de instalación.");
+    } catch {
+      setStatus("El ingreso móvil fue rechazado o la autorización del dispositivo ya no está vigente.");
+    }
+  };
+
   return (
     <main className="min-h-screen bg-slate-950 px-5 py-8 text-slate-950 sm:px-8 sm:py-12">
       <div className="mx-auto max-w-6xl">
@@ -53,12 +104,10 @@ export default function App() {
               <h1 className="mt-3 max-w-3xl text-4xl font-black tracking-tight text-slate-950 sm:text-5xl">
                 Fundación técnica Fase 1A
               </h1>
-              <p className="mt-5 max-w-2xl text-base leading-7 text-slate-600">
-                Monolito modular Go + React preparado para evolucionar hacia una plataforma multiempresa.
-              </p>
+              <p className="mt-5 max-w-2xl text-base leading-7 text-slate-600">Acceso móvil de conductores de Fase 1B.2-D.</p>
             </div>
             <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm font-semibold leading-6 text-amber-900">
-              Esta pantalla es una base técnica. No hay autenticación, datos operativos ni sesiones reales.
+              No hay formularios operativos, GPS ni modo offline en esta fase.
             </div>
           </div>
         </header>
@@ -79,6 +128,26 @@ export default function App() {
             <p className="mt-2 text-xl font-black">PostgreSQL externo</p>
             <p className="mt-1 text-sm text-slate-300">Sin conexión en esta fase</p>
           </div>
+        </section>
+
+        <section className="mt-6 rounded-3xl bg-white p-6 shadow-2xl shadow-slate-950/20 sm:p-8" aria-label="Acceso móvil de conductor">
+          <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-500">Acceso móvil</p>
+          <h2 className="mt-2 text-2xl font-black text-slate-950">Activar o ingresar con passkey</h2>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
+            La primera activación usa la identidad ya registrada y crea una solicitud limitada. Un supervisor debe aprobarla antes del registro de passkey.
+          </p>
+          <div className="mt-6 grid gap-4 md:grid-cols-2">
+            <label className="text-sm font-semibold text-slate-700">Identificador<input className="mt-2 w-full rounded-xl border border-slate-300 p-3" value={identifier} onChange={(event) => setIdentifier(event.target.value)} autoComplete="username" /></label>
+            <label className="text-sm font-semibold text-slate-700">Contraseña de activación<input className="mt-2 w-full rounded-xl border border-slate-300 p-3" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" /></label>
+            <label className="text-sm font-semibold text-slate-700">Empresa<input className="mt-2 w-full rounded-xl border border-slate-300 p-3" value={companyID} onChange={(event) => setCompanyID(event.target.value)} placeholder="UUID autorizado" /></label>
+            <label className="text-sm font-semibold text-slate-700">Operación opcional<input className="mt-2 w-full rounded-xl border border-slate-300 p-3" value={operationID} onChange={(event) => setOperationID(event.target.value)} placeholder="UUID autorizado" /></label>
+          </div>
+          <div className="mt-5 flex flex-wrap gap-3">
+            <button className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-bold text-white" onClick={() => void prepareInstallation()}>Preparar instalación</button>
+            <button className="rounded-xl bg-teal-700 px-4 py-3 text-sm font-bold text-white" onClick={() => void activate()}>Solicitar activación</button>
+            <button className="rounded-xl bg-violet-700 px-4 py-3 text-sm font-bold text-white" onClick={() => void recurringLogin()}>Ingresar con passkey</button>
+          </div>
+          <p className="mt-4 rounded-xl bg-slate-100 p-4 text-sm text-slate-700" role="status">{status}</p>
         </section>
 
         <section className="mt-6 rounded-3xl bg-white p-6 sm:p-8">

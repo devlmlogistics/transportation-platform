@@ -75,3 +75,68 @@ export async function completeStepUp(): Promise<void> {
   if (!(credential instanceof PublicKeyCredential)) throw new Error("No passkey was returned");
   await requestJSON("/api/v1/auth/webauthn/step-up/finish", { challenge_id: String(started.challenge_id), credential: credentialPayload(credential) as unknown as JSONValue });
 }
+
+export type DriverInstallation = {
+  id: string;
+  publicKey: CryptoKey;
+  privateKey: CryptoKey;
+  publicKeyEncoded: string;
+};
+
+export async function createDriverInstallation(): Promise<DriverInstallation> {
+  const id = crypto.randomUUID();
+  const pair = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"])) as CryptoKeyPair;
+  const exported = await crypto.subtle.exportKey("raw", pair.publicKey);
+  return { id, publicKey: pair.publicKey, privateKey: pair.privateKey, publicKeyEncoded: encode(exported) };
+}
+
+export async function requestDriverActivation(companyID: string, operationID: string | undefined, installation: DriverInstallation): Promise<JSONValue> {
+  return requestJSON("/api/v1/auth/webauthn/device-enrollment-requests", {
+    company_id: companyID,
+    ...(operationID ? { company_operation_id: operationID } : {}),
+    installation_id: installation.id,
+    installation_public_key: installation.publicKeyEncoded,
+    key_algorithm: "ECDSA_P256_SHA256",
+  });
+}
+
+export async function loginDriverWithPassword(identifier: string, password: string): Promise<void> {
+  const response = await fetch("/api/v1/driver/auth/activation/login", {
+    method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ identifier, password }),
+  });
+  if (!response.ok) throw new Error("Driver activation was rejected");
+}
+
+export async function loginDriverWithPasskey(identifier: string, installation: DriverInstallation): Promise<void> {
+  if (!window.PublicKeyCredential) throw new Error("This browser does not support passkeys");
+  const started = await requestJSON("/api/v1/driver/auth/webauthn/options", { identifier, installation_id: installation.id });
+  const options = started.options as JSONValue;
+  const rawChallenge = decode(String(options.challenge));
+  const publicKey = {
+    ...options,
+    challenge: rawChallenge,
+    ...(Array.isArray(options.allowCredentials)
+      ? { allowCredentials: (options.allowCredentials as JSONValue[]).map((item) => ({ ...item, id: decode(String(item.id)) })) }
+      : {}),
+  } as PublicKeyCredentialRequestOptions;
+  const credential = await navigator.credentials.get({ publicKey });
+  if (!(credential instanceof PublicKeyCredential)) throw new Error("No passkey was returned");
+  const challengeHash = await crypto.subtle.digest("SHA-256", rawChallenge);
+  const proofMessage = new Uint8Array(new TextEncoder().encode("tp-driver-possession\0").length + challengeHash.byteLength + 16);
+  proofMessage.set(new TextEncoder().encode("tp-driver-possession\0"), 0);
+  proofMessage.set(new Uint8Array(challengeHash), new TextEncoder().encode("tp-driver-possession\0").length);
+  proofMessage.set(decodeUUID(installation.id), new TextEncoder().encode("tp-driver-possession\0").length + challengeHash.byteLength);
+  const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, installation.privateKey, proofMessage);
+  await requestJSON("/api/v1/driver/auth/webauthn/finish", {
+    challenge_id: String(started.challenge_id), credential: credentialPayload(credential) as unknown as JSONValue,
+    possession_signature: encode(signature),
+  });
+}
+
+const decodeUUID = (value: string): Uint8Array => {
+  const hex = value.replaceAll("-", "");
+  const result = new Uint8Array(16);
+  for (let index = 0; index < result.length; index += 1) result[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  return result;
+};

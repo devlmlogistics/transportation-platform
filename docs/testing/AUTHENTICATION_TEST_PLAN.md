@@ -246,3 +246,21 @@ Para 1B.2-A, la aceptación adicional es: `ClosedAdminHandler` continúa activo,
 ## 12. Riesgos y decisiones pendientes
 
 Bloquean la conversión del plan en implementación: proveedor/canal inicial, KDF, TTLs, RP ID/origins, compatibilidad de biblioteca WebAuthn con Go 1.25, passkeys sincronizadas, autoridad de recovery, política de revocación global, retención, idempotency key, alcance de auditoría y primer endpoint que se habilitará. El registro está en `docs/design/OPEN_QUESTIONS.md`.
+
+## 13. Fase 1B.2-D — pruebas móviles DRIVER
+
+**[D]** La suite debe ejecutarse en PostgreSQL 16 efímero y cubrir:
+
+- activación con `DriverProfile` y memberships vigentes;
+- solicitud limitada sin usar el código de correlación como credencial;
+- aprobación de supervisor con empresa/operación correctas y rechazo cruzado A/B;
+- registro WebAuthn ligado a solicitud APPROVED;
+- login recurrente con credencial activa, autorización activa y firma ECDSA de instalación válida;
+- firma inválida, instalación distinta, challenge consumido, challenge vencido, credencial revocada y dispositivo revocado;
+- membresía empresarial/operacional suspendida o vencida después del enrolamiento;
+- sesión DRIVER con TTL absoluto/idle, epoch obsoleto y revocación concurrente;
+- imposibilidad de usar sesión DRIVER para administración o cambiar empresa/operación;
+- `tp_runtime`/`tp_auth_runtime` sin DML directo ni acceso SQL arbitrario a credenciales/challenges;
+- reuso de conexiones `pgxpool` sin contexto residual.
+
+**[P]** La prueba criptográfica de login recurrente debe conservar una respuesta WebAuthn válida generada por la biblioteca/harness, no un mock que salte `FinishLogin`. La prueba manual de Chrome es complementaria y no reemplaza las pruebas PostgreSQL.

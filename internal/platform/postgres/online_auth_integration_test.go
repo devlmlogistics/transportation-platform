@@ -250,6 +250,10 @@ func testOnlineAuth(t *testing.T, ctx context.Context, runtimePool, authPool *pg
 			t.Fatal("runtime role created an arbitrary WebAuthn challenge")
 		}
 	})
+
+	t.Run("driver_mobile_webauthn_session_is_device_scoped", func(t *testing.T) {
+		testDriverMobileAuth(t, ctx, repository, webauthnService, runtimePool, adminPool, fixture)
+	})
 }
 
 func TestPostgres16OnlineBootstrap(t *testing.T) {

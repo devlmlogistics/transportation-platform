@@ -60,6 +60,7 @@ type Principal struct {
 	CSRFSecretHash      []byte
 	AuthenticationLevel string
 	StepUpExpiresAt     *time.Time
+	SessionPolicy       string
 }
 
 type AuthorizationRequest struct {
