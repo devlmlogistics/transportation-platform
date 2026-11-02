@@ -17,14 +17,16 @@ var (
 )
 
 type Principal struct {
-	UserAccountID     string
-	PersonID          string
-	SessionID         string
-	SessionEpoch      int64
-	ContextVersion    int64
-	ActiveCompanyID   string
-	ActiveOperationID string
-	CSRFSecretHash    []byte
+	UserAccountID       string
+	PersonID            string
+	SessionID           string
+	SessionEpoch        int64
+	ContextVersion      int64
+	ActiveCompanyID     string
+	ActiveOperationID   string
+	CSRFSecretHash      []byte
+	AuthenticationLevel string
+	StepUpExpiresAt     *time.Time
 }
 
 type AuthenticateRequest struct {
@@ -194,20 +196,123 @@ type LoginCredential struct {
 }
 
 type AuthenticatedSession struct {
+	ID                  uuid.UUID
+	UserAccountID       uuid.UUID
+	PersonID            uuid.UUID
+	SessionEpoch        int64
+	ContextVersion      int64
+	ActiveCompanyID     *uuid.UUID
+	ActiveOperationID   *uuid.UUID
+	SessionPolicy       SessionKind
+	Status              string
+	CreatedAt           time.Time
+	LastSeenAt          time.Time
+	IdleExpiresAt       time.Time
+	AbsoluteExpiresAt   time.Time
+	CSRFSecretHash      []byte
+	AuthenticationLevel string
+	StepUpExpiresAt     *time.Time
+	StepUpCredentialID  *uuid.UUID
+}
+
+type AuthenticatorCredentialRecord struct {
+	ID               uuid.UUID
+	CredentialID     []byte
+	PublicKey        []byte
+	SignCount        uint32
+	Transports       []string
+	DisplayName      string
+	Status           string
+	BackupEligible   bool
+	BackupState      *string
+	UserVerifiedLast bool
+	CreatedAt        time.Time
+	LastUsedAt       *time.Time
+	RevokedAt        *time.Time
+}
+
+type WebAuthnChallenge struct {
 	ID                uuid.UUID
+	ChallengeHash     []byte
+	SessionData       []byte
+	SessionDataFormat string
+	BindingHash       []byte
 	UserAccountID     uuid.UUID
-	PersonID          uuid.UUID
-	SessionEpoch      int64
-	ContextVersion    int64
-	ActiveCompanyID   *uuid.UUID
-	ActiveOperationID *uuid.UUID
-	SessionPolicy     SessionKind
-	Status            string
-	CreatedAt         time.Time
-	LastSeenAt        time.Time
-	IdleExpiresAt     time.Time
-	AbsoluteExpiresAt time.Time
-	CSRFSecretHash    []byte
+	DeviceRequestID   *uuid.UUID
+}
+
+type DeviceEnrollmentRequest struct {
+	ID                 uuid.UUID
+	CorrelationCode    string
+	CompanyID          uuid.UUID
+	CompanyOperationID *uuid.UUID
+	InstallationID     uuid.UUID
+	Status             string
+	ExpiresAt          time.Time
+}
+
+type DeviceEnrollmentRequestInput struct {
+	ID                    uuid.UUID
+	CorrelationCode       string
+	CompanyID             uuid.UUID
+	CompanyOperationID    *uuid.UUID
+	InstallationID        uuid.UUID
+	InstallationPublicKey []byte
+	KeyAlgorithm          string
+	BindingHash           []byte
+	ExpiresAt             time.Time
+	AuditID               uuid.UUID
+}
+
+type WebAuthnStore interface {
+	BeginWebAuthnChallenge(context.Context, []byte, WebAuthnChallengeRequest) error
+	GetWebAuthnChallenge(context.Context, []byte, uuid.UUID, ChallengePurpose) (WebAuthnChallenge, error)
+	CompleteWebAuthnRegistration(context.Context, []byte, CompleteRegistrationRequest) (uuid.UUID, *uuid.UUID, error)
+	CompleteWebAuthnStepUp(context.Context, []byte, CompleteStepUpRequest) (time.Time, error)
+	ListAuthenticatorCredentials(context.Context, []byte) ([]AuthenticatorCredentialRecord, error)
+	RevokeOwnAuthenticator(context.Context, []byte, uuid.UUID, string) error
+	CreateDeviceEnrollmentRequest(context.Context, []byte, DeviceEnrollmentRequestInput) (DeviceEnrollmentRequest, error)
+	ApproveDeviceEnrollmentRequest(context.Context, []byte, uuid.UUID, string) error
+	RejectDeviceEnrollmentRequest(context.Context, []byte, uuid.UUID, string) error
+	RevokeDeviceAuthorization(context.Context, []byte, uuid.UUID, string) error
+}
+
+type WebAuthnChallengeRequest struct {
+	ID                uuid.UUID
+	Purpose           ChallengePurpose
+	ChallengeHash     []byte
+	SessionData       []byte
+	SessionDataFormat string
+	BindingHash       []byte
+	ExpiresAt         time.Time
+	DeviceRequestID   *uuid.UUID
+	AuditID           uuid.UUID
+}
+
+type CompleteRegistrationRequest struct {
+	ChallengeID           uuid.UUID
+	ChallengeHash         []byte
+	BindingHash           []byte
+	CredentialID          uuid.UUID
+	CredentialKey         []byte
+	PublicKey             []byte
+	SignCount             uint32
+	Transports            []string
+	BackupEligible        bool
+	BackupState           string
+	UserVerified          bool
+	DisplayName           string
+	Metadata              json.RawMessage
+	DeviceAuthorizationID uuid.UUID
+	AuditID               uuid.UUID
+}
+
+type CompleteStepUpRequest struct {
+	ChallengeID   uuid.UUID
+	ChallengeHash []byte
+	BindingHash   []byte
+	CredentialKey []byte
+	AuditID       uuid.UUID
 }
 
 type SessionSummary struct {

@@ -66,7 +66,10 @@ Se ejecutó únicamente Goose UP desde `db/migrations`, usando `tp_migrator` y l
 ```
 
 - **[V]** Goose terminó en la versión 7 después de aplicar únicamente `000007_auth_boundary_hardening.sql` pendiente por TCP local como `tp_migrator`; no se ejecutó bootstrap ni se creó ningún administrador real.
+- **[V]** En Fase 1B.2-C se verificó la misma base por TCP como `tp_migrator`, se comprobó `platform`/`tp_owner` y se aplicaron sólo `000008_webauthn_stepup_devices.sql` y posteriormente `000009_device_membership_boundary.sql` con Goose UP. DEV quedó en versión 9.
+- **[V]** La validación posterior confirmó RLS/FORCE RLS en sesiones, challenges, credenciales y autorizaciones de dispositivo; `tp_runtime` no puede ejecutar las funciones WebAuthn ni tiene DML directo, y `tp_auth_runtime` tampoco tiene DML directo.
 - **[V]** La migración fue aplicada sólo después de que el administrador provisionó `tp_bootstrap_runtime`; no se usó `postgres` ni otro superusuario.
+- **[V]** 000009 confirmó límites de membresía en aprobación, rechazo y revocación de dispositivos; roles vigentes sin membresía vigente ya no autorizan esas operaciones.
 - **[V]** La fuente canónica continúa siendo `db/migrations`.
 - **[V]** No se modificaron las migraciones aprobadas.
 - **[D]** En cambios futuros sólo se ejecutará `goose up` explícito. Una migración ya aplicada no se edita; las correcciones requieren una nueva versión.

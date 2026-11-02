@@ -15,9 +15,11 @@ import (
 )
 
 const (
-	sessionCookieName = "tp_session"
-	csrfCookieName    = "tp_csrf"
-	csrfHeaderName    = "X-CSRF-Token"
+	sessionCookieName    = "tp_session"
+	csrfCookieName       = "tp_csrf"
+	csrfCookiePath       = "/"
+	legacyCSRFCookiePath = "/api/v1"
+	csrfHeaderName       = "X-CSRF-Token"
 )
 
 type OnlineAuthHTTPService interface {
@@ -277,12 +279,18 @@ func (h *AuthHandler) setCookies(w http.ResponseWriter, token, csrf []byte) {
 	secureToken := base64.RawURLEncoding.EncodeToString(token)
 	secureCSRF := base64.RawURLEncoding.EncodeToString(csrf)
 	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: secureToken, Path: "/api/v1", HttpOnly: true, Secure: h.CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: 8 * 60 * 60})
-	http.SetCookie(w, &http.Cookie{Name: csrfCookieName, Value: secureCSRF, Path: "/api/v1", HttpOnly: false, Secure: h.CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: 8 * 60 * 60})
+	h.expireCSRFCookie(w, legacyCSRFCookiePath)
+	http.SetCookie(w, &http.Cookie{Name: csrfCookieName, Value: secureCSRF, Path: csrfCookiePath, HttpOnly: false, Secure: h.CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: 8 * 60 * 60})
 }
 
 func (h *AuthHandler) clearCookies(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/api/v1", HttpOnly: true, Secure: h.CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: -1})
-	http.SetCookie(w, &http.Cookie{Name: csrfCookieName, Value: "", Path: "/api/v1", HttpOnly: false, Secure: h.CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: -1})
+	h.expireCSRFCookie(w, legacyCSRFCookiePath)
+	h.expireCSRFCookie(w, csrfCookiePath)
+}
+
+func (h *AuthHandler) expireCSRFCookie(w http.ResponseWriter, path string) {
+	http.SetCookie(w, &http.Cookie{Name: csrfCookieName, Value: "", Path: path, HttpOnly: false, Secure: h.CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: -1})
 }
 
 func protectAdministrativeMutations(next http.Handler, authHandler *AuthHandler) http.Handler {
@@ -316,15 +324,17 @@ func (r SessionPrincipalResolver) Resolve(ctx context.Context, request *http.Req
 		return postgres.Principal{}, err
 	}
 	return postgres.Principal{
-		UserAccountID:     session.UserAccountID,
-		PersonID:          session.PersonID,
-		Active:            true,
-		SessionID:         session.ID,
-		SessionEpoch:      session.SessionEpoch,
-		ContextVersion:    session.ContextVersion,
-		ActiveCompanyID:   session.ActiveCompanyID,
-		ActiveOperationID: session.ActiveOperationID,
-		CSRFSecretHash:    session.CSRFSecretHash,
+		UserAccountID:       session.UserAccountID,
+		PersonID:            session.PersonID,
+		Active:              true,
+		SessionID:           session.ID,
+		SessionEpoch:        session.SessionEpoch,
+		ContextVersion:      session.ContextVersion,
+		ActiveCompanyID:     session.ActiveCompanyID,
+		ActiveOperationID:   session.ActiveOperationID,
+		CSRFSecretHash:      session.CSRFSecretHash,
+		AuthenticationLevel: session.AuthenticationLevel,
+		StepUpExpiresAt:     session.StepUpExpiresAt,
 	}, nil
 }
 

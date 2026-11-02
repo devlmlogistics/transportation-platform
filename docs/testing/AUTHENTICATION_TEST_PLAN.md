@@ -2,6 +2,14 @@
 
 Estado: plan y evidencia de pruebas de Fase 1B.2-B. Las pruebas destructivas usan únicamente el harness PostgreSQL 16 efímero.
 
+## Fase 1B.2-C — casos adicionales
+
+- **[D]** Registrar challenge con propósito, hash, binding y `auth_session.id`; repetir, expirar o usar desde otra sesión debe devolver rechazo sin mutar credential/sesión.
+- **[D]** Una respuesta con Origin/RP ID/firma incorrectos, UV ausente, credential revocada o cuenta distinta nunca llama a la finalización SQL.
+- **[D]** Step-up válido dura 10 minutos o hasta el TTL absoluto; el resolver degrada el nivel vencido a `PASSWORD`.
+- **[D]** La autorización de dispositivo exige request aprobado; la aprobación exige sesión, membership, permiso exacto y scope exacto; supervisor de A no opera B.
+- **[P]** La ceremonia real debe usar Virtual Authenticator o mecanismo estándar equivalente; no se acepta un mock que devuelva siempre éxito.
+
 ## Convención de evidencia
 
 - **[V] Verificado:** comportamiento o restricción ya observado.
@@ -158,6 +166,9 @@ Para las versiones nuevas propuestas:
 - timeout/cancelación no deja transacciones abiertas ni contextos contaminados;
 - dos consumos concurrentes del mismo challenge/request: exactamente uno gana;
 - dos aprobaciones/revocaciones concurrentes: transición válida única, segundo resultado seguro/idempotente;
+- aprobación, rechazo y revocación con membresía empresarial revocada, membresía operacional revocada, operación cruzada, rol caducado y sesión revocada: siempre denegados;
+- `tp_auth_runtime` con SQL directo y token inexistente: no puede administrar solicitudes ni autorizaciones;
+- revocación concurrente de la misma autorización: exactamente una llamada obtiene la transición exitosa;
 - revocación concurrente con login: nunca produce una sesión válida después del punto de revocación definido;
 - fallo de auditoría atómica revierte la mutación exitosa;
 - denegación persistible sobrevive al rollback del intento solicitado y no autoriza la operación.

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -46,6 +47,49 @@ func testOnlineAuth(t *testing.T, ctx context.Context, runtimePool, authPool *pg
 	if err != nil {
 		t.Fatal(err)
 	}
+	webauthnService, err := applicationauth.NewWebAuthnService(repository, applicationauth.WebAuthnConfig{
+		RPID: "localhost", RPDisplayName: "Transportation Platform", RPOrigins: []string{"http://localhost:8080"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("webauthn_challenge_read_matches_sql_return_contract", func(t *testing.T) {
+		login, err := service.Login(ctx, identifier, "correct horse battery staple", "192.0.2.20:443", "test-agent")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = service.Logout(ctx, login.Token, login.Session.ID) })
+		request := applicationauth.WebAuthnChallengeRequest{
+			ID:                uuid.New(),
+			Purpose:           applicationauth.RegistrationChallenge,
+			ChallengeHash:     makeHash(0xa1),
+			SessionData:       []byte(`{"challenge":"synthetic"}`),
+			SessionDataFormat: "webauthn.v1",
+			BindingHash:       makeHash(0xa2),
+			ExpiresAt:         time.Now().UTC().Add(5 * time.Minute),
+			AuditID:           uuid.New(),
+		}
+		if err := repository.BeginWebAuthnChallenge(ctx, applicationauth.HashSessionToken(login.Token), request); err != nil {
+			t.Fatal(err)
+		}
+		challenge, err := repository.GetWebAuthnChallenge(ctx, applicationauth.HashSessionToken(login.Token), request.ID, applicationauth.RegistrationChallenge)
+		if err != nil {
+			t.Fatalf("read WebAuthn challenge: %v", err)
+		}
+		if challenge.ID != request.ID || string(challenge.SessionData) != string(request.SessionData) || challenge.DeviceRequestID != nil {
+			t.Fatalf("unexpected challenge: %+v", challenge)
+		}
+	})
+	t.Run("webauthn_registration_full_flow", func(t *testing.T) {
+		testWebAuthnRegistration(t, ctx, repository, service, adminPool)
+	})
+	t.Run("webauthn_credential_revocation", func(t *testing.T) {
+		testWebAuthnCredentialRevocation(t, ctx, repository, authPool, adminPool, fixture)
+	})
+	t.Run("webauthn_negative_uv_and_signature_assertions", func(t *testing.T) {
+		testWebAuthnNegativeAssertions(t, ctx, service, webauthnService, repository, adminPool, fixture)
+	})
 
 	t.Run("valid_login_resolves_and_replays_no_secret", func(t *testing.T) {
 		result, err := service.Login(ctx, identifier, "correct horse battery staple", "192.0.2.10:443", "test-agent")
@@ -181,6 +225,29 @@ func testOnlineAuth(t *testing.T, ctx context.Context, runtimePool, authPool *pg
 		}
 		if err := service.Logout(ctx, result.Token, result.Session.ID); err != nil {
 			t.Fatal(err)
+		}
+	})
+
+	t.Run("webauthn_sql_boundary_denies_arbitrary_elevation", func(t *testing.T) {
+		var runtimeCanExecute bool
+		if err := adminPool.QueryRow(ctx, `SELECT has_function_privilege('tp_runtime', $1, 'EXECUTE')`,
+			"platform.complete_webauthn_step_up(bytea,uuid,bytea,bytea,bytea,uuid)").Scan(&runtimeCanExecute); err != nil {
+			t.Fatal(err)
+		}
+		if runtimeCanExecute {
+			t.Fatal("tp_runtime can execute WebAuthn step-up boundary")
+		}
+		var elevated bool
+		if err := authPool.QueryRow(ctx, `SELECT platform.complete_webauthn_step_up($1,$2,$3,$4,$5,$6) IS NOT NULL`,
+			makeHash(0x91), uuid.New(), makeHash(0x92), makeHash(0x93), makeHash(0x94), uuid.New()).Scan(&elevated); err != nil {
+			t.Fatal(err)
+		}
+		if elevated {
+			t.Fatal("authentication role elevated a session without a live session/challenge")
+		}
+		if _, err := runtimePool.Exec(ctx, `SELECT platform.begin_webauthn_challenge($1,$2,'STEP_UP',$3,$4,'webauthn.v1',$5,clock_timestamp()+interval '5 minutes',NULL,$6)`,
+			makeHash(0x95), uuid.New(), makeHash(0x96), []byte("session-data"), makeHash(0x97), uuid.New()); err == nil {
+			t.Fatal("runtime role created an arbitrary WebAuthn challenge")
 		}
 	})
 }

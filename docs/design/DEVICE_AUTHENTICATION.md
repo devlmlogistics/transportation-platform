@@ -1,7 +1,15 @@
 # Transportation Platform — Autenticación y autorización de dispositivos
 
-Estado: diseño conceptual aprobado; detalles de implementación pendientes para Fase 1A.  
+Estado: diseño conceptual aprobado con fundamento persistente implementado aditivamente en Fase 1B.2-C; offline sigue bloqueado.
 Este documento describe el flujo real del proyecto original y la adaptación recomendada. No modifica el código original, PostgreSQL, Docker ni servicios existentes.
+
+## Evidencia 1B.2-C
+
+- **[V]** `device_enrollment_request` conserva request, instalación, clave pública, empresa/operación y expiración; su función de creación deriva el actor de una sesión vigente.
+- **[V]** La aprobación/rechazo exige sesión vigente, membership, permiso y scope exactos; el actor no se recibe desde JSON.
+- **[V]** `DeviceAuthorization` admite `SUSPENDED` además de sus estados históricos; revocar una autorización revoca sesiones ligadas y conserva auditoría.
+- **[D]** El registro WebAuthn sólo activa una autorización cuando existe request aprobado y vigente; una credencial administrativa no crea autorización física.
+- **[P]** Falta el flujo inicial de identificación de driver/fallback presencial y la política final de reemplazo/máximo de dispositivos.
 
 ## Convención de evidencia
 

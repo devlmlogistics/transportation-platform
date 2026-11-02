@@ -1,18 +1,18 @@
 # Transportation Platform — WebAuthn y autorización de dispositivos
 
-Estado: diseño propuesto para Fase 1B.2-C. El código heredado fue inspeccionado sólo en lectura; no se copia ni modifica.
+Estado: diseño implementado parcialmente en Fase 1B.2-C. El código heredado fue inspeccionado sólo en lectura; no se copia ni modifica.
 
 ## 0. Compatibilidad de biblioteca y límite de decisión
 
-**[V]** La revisión de fuentes oficiales encontró:
+**[V]** La revisión de fuentes oficiales y la compilación con Go 1.25.0 encontró:
 
-- `github.com/go-webauthn/webauthn@v0.17.4`, publicado en mayo de 2026, declara `go 1.25.0` pero su `go.mod` fija `toolchain go1.26.3`;
+- `github.com/go-webauthn/webauthn@v0.13.0` declara `go 1.23.0` y `toolchain go1.24.3`, y compila con el Go 1.25.0 efectivo;
 - `v0.18.2` declara `go 1.26.0` y `toolchain go1.27.1`;
 - la política oficial actual del repositorio marca Go 1.25 como soporte no intencional.
 
-**[P]** No se puede confirmar todavía una versión que cumpla simultáneamente “mantenida” y toolchain fijo Go 1.25. `v0.17.4` queda como candidato concreto para una prueba aislada, no como dependencia aprobada. Fase 1B.2-A no agrega la biblioteca, no ejecuta ceremonias y no cambia el toolchain. La adopción requiere build reproducible con Go 1.25; si falla, debe aprobarse cambiar el toolchain o seleccionar otra implementación mantenida.
+**[D]** Se fija `v0.13.0` como versión compatible con Go 1.25 para esta fase. Las versiones posteriores requieren toolchains más nuevos o cambios mayores; su actualización queda pendiente de una revisión explícita. La biblioteca se usa sólo a través de un adaptador de aplicación y se verifica su build reproducible.
 
-El adaptador futuro será `WebAuthnService`; no se expondrán directamente APIs de la biblioteca desde handlers. La documentación oficial de `v0.17.4` expone `BeginRegistration`/`FinishRegistration`, `BeginLogin`/`FinishLogin` y exige conservar `SessionData` server-side entre ambos pasos.
+El adaptador `WebAuthnService` no expone directamente APIs de la biblioteca desde handlers. La documentación oficial de `v0.13.0` expone `BeginRegistration`/`FinishRegistration`, `BeginLogin`/`FinishLogin` y exige conservar `SessionData` server-side entre ambos pasos.
 
 ## 1. Qué se conserva del sistema heredado
 
@@ -135,7 +135,7 @@ El backend genera options sólo para un request aprobado, vigente, no consumido 
 
 1. `ChallengeService` crea `AuthChallenge` con `purpose`, `UserAccount`, RP ID/origin, binding opaco, `expires_at`, hash del challenge y `SessionData` íntegro serializado.
 2. Sólo las options se entregan al navegador. El navegador no puede editar `SessionData`, cuenta, purpose, RP ID, origin ni binding.
-3. La respuesta retorna el challenge dentro de la ceremonia; el servicio llama a `consume_auth_challenge` con ID opaco, purpose, hash calculado y binding. La función bloquea con `FOR UPDATE`, exige estado pendiente y vigencia de servidor, y cambia a `CONSUMED` antes de la verificación.
+3. La respuesta retorna el challenge dentro de la ceremonia; la frontera 000008 bloquea el challenge ligado a `session_id`, exige estado pendiente y vigencia, y lo consume en la transacción de finalización.
 4. El adaptador entrega el `SessionData` recuperado y la respuesta a `FinishRegistration`/`FinishLogin` o a la variante `Validate*` de la versión fijada. Verifica challenge, origin, RP ID, user verification, credential y firma.
 5. Sólo después de éxito se actualizan `AuthenticatorCredential` y sus flags/counter, se crea `AuthSession` y, en registro aprobado, se activa `DeviceAuthorization` con su propia transacción/auditoría.
 6. Un challenge inválido, expirado, consumido, de otro propósito, de otra cuenta o con binding distinto no revela la causa y no puede volver a utilizarse; el cliente debe iniciar una ceremonia nueva.
@@ -234,7 +234,7 @@ Las pruebas del adaptador deben fijar explícitamente la versión de biblioteca 
 ## 12. Fuentes técnicas consultadas
 
 - [Repositorio oficial go-webauthn/webauthn](https://github.com/go-webauthn/webauthn)
-- [`go.mod` de v0.17.4](https://raw.githubusercontent.com/go-webauthn/webauthn/v0.17.4/go.mod)
+- [`go.mod` de v0.13.0](https://raw.githubusercontent.com/go-webauthn/webauthn/v0.13.0/go.mod)
 - [`go.mod` de v0.18.2](https://raw.githubusercontent.com/go-webauthn/webauthn/v0.18.2/go.mod)
-- [API de v0.17.4](https://pkg.go.dev/github.com/go-webauthn/webauthn@v0.17.4/webauthn)
+- [API de v0.13.0](https://pkg.go.dev/github.com/go-webauthn/webauthn@v0.13.0/webauthn)
 - [Política y releases oficiales](https://github.com/go-webauthn/webauthn/releases)
