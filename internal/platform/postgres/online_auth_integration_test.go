@@ -75,6 +75,9 @@ func testOnlineAuth(t *testing.T, ctx context.Context, runtimePool, authPool *pg
 			t.Fatalf("unexpected challenge: %+v", challenge)
 		}
 	})
+	t.Run("webauthn_registration_full_flow", func(t *testing.T) {
+		testWebAuthnRegistration(t, ctx, repository, service, adminPool)
+	})
 
 	t.Run("valid_login_resolves_and_replays_no_secret", func(t *testing.T) {
 		result, err := service.Login(ctx, identifier, "correct horse battery staple", "192.0.2.10:443", "test-agent")

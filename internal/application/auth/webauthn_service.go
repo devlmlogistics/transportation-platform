@@ -1,12 +1,14 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	webauthn "github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var (
@@ -23,9 +26,10 @@ var (
 )
 
 type WebAuthnService struct {
-	Store  WebAuthnStore
-	Engine *webauthn.WebAuthn
-	Now    func() time.Time
+	Store      WebAuthnStore
+	Engine     *webauthn.WebAuthn
+	Now        func() time.Time
+	Diagnostic func(stage, errorType string)
 }
 
 type WebAuthnConfig struct {
@@ -83,22 +87,46 @@ func (s *WebAuthnService) BeginRegistration(ctx context.Context, token []byte, s
 
 func (s *WebAuthnService) FinishRegistration(ctx context.Context, token []byte, session AuthenticatedSession, challengeID uuid.UUID, request *http.Request, displayName string) error {
 	if !s.canRegister(session) || len(token) != 32 || request == nil {
+		s.reportDiagnostic("registration.session_policy", ErrStepUpRequired)
 		return ErrStepUpRequired
+	}
+	if request.Body == nil {
+		s.reportDiagnostic("registration.response_read", ErrWebAuthnRejected)
+		return ErrWebAuthnRejected
 	}
 	challenge, err := s.Store.GetWebAuthnChallenge(ctx, HashSessionToken(token), challengeID, RegistrationChallenge)
 	if err != nil {
+		s.reportDiagnostic("registration.challenge_load", err)
 		return ErrWebAuthnRejected
 	}
 	var ceremony webauthn.SessionData
 	if err := json.Unmarshal(challenge.SessionData, &ceremony); err != nil {
+		s.reportDiagnostic("registration.session_data_decode", err)
 		return ErrWebAuthnRejected
 	}
 	credentials, err := s.Store.ListAuthenticatorCredentials(ctx, HashSessionToken(token))
 	if err != nil {
+		s.reportDiagnostic("registration.credentials_load", err)
 		return ErrWebAuthnRejected
 	}
+	payload, err := io.ReadAll(request.Body)
+	if err != nil {
+		s.reportDiagnostic("registration.response_read", err)
+		return ErrWebAuthnRejected
+	}
+	if _, err := protocol.ParseCredentialCreationResponseBytes(payload); err != nil {
+		s.reportDiagnostic("registration.response_parse", err)
+		return ErrWebAuthnRejected
+	}
+	request.Body = io.NopCloser(bytes.NewReader(payload))
+	request.ContentLength = int64(len(payload))
 	credential, err := s.Engine.FinishRegistration(webAuthnUserForSession(session, credentials, true), ceremony, request)
-	if err != nil || credential == nil || !credential.Flags.UserVerified {
+	if err != nil {
+		s.reportDiagnostic("registration.finish_registration", err)
+		return ErrWebAuthnRejected
+	}
+	if credential == nil || !credential.Flags.UserVerified {
+		s.reportDiagnostic("registration.finish_registration", ErrWebAuthnRejected)
 		return ErrWebAuthnRejected
 	}
 	metadata, _ := json.Marshal(map[string]any{"attestation_type": credential.AttestationType, "aaguid": credential.Authenticator.AAGUID})
@@ -115,7 +143,27 @@ func (s *WebAuthnService) FinishRegistration(ctx context.Context, token []byte, 
 		UserVerified: credential.Flags.UserVerified, DisplayName: displayName, Metadata: metadata,
 		AuditID: uuid.New(),
 	})
+	if err != nil {
+		s.reportDiagnostic("registration.credential_persist", err)
+	}
 	return err
+}
+
+func (s *WebAuthnService) reportDiagnostic(stage string, err error) {
+	if s == nil || s.Diagnostic == nil || err == nil {
+		return
+	}
+	s.Diagnostic(stage, WebAuthnErrorType(err))
+}
+
+// WebAuthnErrorType returns only a safe error class for development diagnostics.
+// It never includes error details, request data, tokens, or WebAuthn payloads.
+func WebAuthnErrorType(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return "postgres." + pgErr.Code
+	}
+	return fmt.Sprintf("%T", err)
 }
 
 func (s *WebAuthnService) BeginStepUp(ctx context.Context, token []byte, session AuthenticatedSession) (uuid.UUID, *protocol.CredentialAssertion, error) {

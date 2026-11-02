@@ -71,6 +71,11 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 			if err != nil {
 				return err
 			}
+			if cfg.AppEnv == "development" {
+				webauthnService.Diagnostic = func(stage, errorType string) {
+					logger.Warn("webauthn_stage_failed", "stage", stage, "error_type", errorType)
+				}
+			}
 			dependencies.WebAuthn = webauthnService
 		}
 		if cfg.AdminHTTPEnabled {
