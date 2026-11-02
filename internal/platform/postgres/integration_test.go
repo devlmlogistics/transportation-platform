@@ -90,10 +90,13 @@ func TestPostgres16Foundation(t *testing.T) {
 	t.Run("pool_context_a_b_a", func(t *testing.T) { testPoolContextSequence(t, ctx, runtimePool, fixture) })
 	t.Run("auth_foundation", func(t *testing.T) { testAuthFoundation(t, ctx, runtimePool, authPool, adminDSN, fixture) })
 	t.Run("online_authentication", func(t *testing.T) { testOnlineAuth(t, ctx, runtimePool, authPool, adminDSN, fixture) })
+	t.Run("device_authorization_boundaries", func(t *testing.T) {
+		testDeviceAuthorizationBoundaries(t, ctx, authPool, adminDSN, fixture)
+	})
 
 	version, err := migrations.Version(ctx, migratorDB)
-	if err != nil || version != 8 {
-		t.Fatalf("expected migration version 8 after integration suite, version=%d err=%v", version, err)
+	if err != nil || version != 9 {
+		t.Fatalf("expected migration version 9 after integration suite, version=%d err=%v", version, err)
 	}
 }
 
@@ -110,8 +113,8 @@ func prepareSchema(t *testing.T, ctx context.Context, db *sql.DB, adminDSN strin
 		t.Fatalf("migrations up: %v", err)
 	}
 	version, err := migrations.Version(ctx, db)
-	if err != nil || version != 8 {
-		t.Fatalf("expected version 8 after up, version=%d err=%v", version, err)
+	if err != nil || version != 9 {
+		t.Fatalf("expected version 9 after up, version=%d err=%v", version, err)
 	}
 	if err := migrations.DownTo(ctx, db, directory, 0); err != nil {
 		t.Fatalf("migrations down: %v", err)

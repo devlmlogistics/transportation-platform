@@ -166,6 +166,9 @@ Para las versiones nuevas propuestas:
 - timeout/cancelación no deja transacciones abiertas ni contextos contaminados;
 - dos consumos concurrentes del mismo challenge/request: exactamente uno gana;
 - dos aprobaciones/revocaciones concurrentes: transición válida única, segundo resultado seguro/idempotente;
+- aprobación, rechazo y revocación con membresía empresarial revocada, membresía operacional revocada, operación cruzada, rol caducado y sesión revocada: siempre denegados;
+- `tp_auth_runtime` con SQL directo y token inexistente: no puede administrar solicitudes ni autorizaciones;
+- revocación concurrente de la misma autorización: exactamente una llamada obtiene la transición exitosa;
 - revocación concurrente con login: nunca produce una sesión válida después del punto de revocación definido;
 - fallo de auditoría atómica revierte la mutación exitosa;
 - denegación persistible sobrevive al rollback del intento solicitado y no autoriza la operación.

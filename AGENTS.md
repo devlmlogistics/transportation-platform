@@ -13,7 +13,7 @@ Este repositorio contiene sólo la fundación de Transportation Platform. Los pr
 - No modificar los proyectos originales.
 - Fase 1B.1-A sólo puede usar un PostgreSQL 16 nuevo, efímero o un contenedor dedicado al proyecto, con datos sintéticos.
 - Fase 1B.2-A sólo implementa persistencia y contratos internos; Fase 1B.2-B agrega login administrativo, sesiones opacas, CSRF, bootstrap e invitaciones bajo configuración explícita y fail-closed. Fase 1B.2-C agrega WebAuthn/step-up y el fundamento de dispositivos bajo flag explícito; recovery, offline y operaciones siguen bloqueados.
-- Las migraciones `000001`–`000007` son inmutables. El diseño/implementación de WebAuthn y dispositivos de esta fase es `000008` y permanece en `db/migrations` como fuente canónica.
+- Las migraciones `000001`–`000008` son inmutables. El diseño/implementación de WebAuthn y dispositivos de esta fase permanece en `db/migrations`; las correcciones posteriores se agregan como migraciones nuevas, actualmente `000009`.
 - `tp_runtime` no recibe acceso directo a tablas de autenticación ni puede emitir sesiones; sólo registra un grant derivado de una verificación efímera mediante una función estrecha. La emisión y resolución usan `tp_auth_runtime`, sin DML directo sobre tablas y sin permisos de dispositivos; bootstrap usa además `tp_bootstrap_runtime`, separado del servidor HTTP.
 - En 1B.2-B `create_auth_session` y el escritor genérico de auditoría permanecen cerrados para `tp_runtime` y `tp_auth_runtime`; la emisión requiere el grant de un solo uso producido por la frontera de verificación.
 - Las migraciones se ejecutan sólo de forma explícita con Goose en el entorno aislado; Go no las ejecuta al iniciar.
