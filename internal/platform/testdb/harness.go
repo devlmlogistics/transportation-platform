@@ -28,6 +28,7 @@ type Harness struct {
 	Marker        string
 	RuntimeDSN    string
 	AuthDSN       string
+	DriverAuthDSN string
 	BootstrapDSN  string
 	MigratorDSN   string
 	AdminDSN      string
@@ -85,6 +86,7 @@ func Start(ctx context.Context, repositoryRoot string) (*Harness, error) {
 	baseDSN := "postgres://%s@127.0.0.1:%s/%s?sslmode=disable"
 	harness.RuntimeDSN = fmt.Sprintf(baseDSN, "tp_runtime", port, databaseName)
 	harness.AuthDSN = fmt.Sprintf(baseDSN, "tp_auth_runtime", port, databaseName)
+	harness.DriverAuthDSN = fmt.Sprintf(baseDSN, "tp_driver_auth_runtime", port, databaseName)
 	harness.BootstrapDSN = fmt.Sprintf(baseDSN, "tp_bootstrap_runtime", port, databaseName)
 	harness.MigratorDSN = fmt.Sprintf(baseDSN, "tp_migrator", port, databaseName)
 	harness.AdminDSN = fmt.Sprintf(baseDSN, "postgres", port, databaseName)
@@ -101,6 +103,7 @@ func Start(ctx context.Context, repositoryRoot string) (*Harness, error) {
 		"-v", "migrator_role=tp_migrator",
 		"-v", "runtime_role=tp_runtime",
 		"-v", "auth_runtime_role=tp_auth_runtime",
+		"-v", "driver_auth_runtime_role=tp_driver_auth_runtime",
 		"-v", "bootstrap_runtime_role=tp_bootstrap_runtime",
 		"-v", "security_writer_role=tp_security_audit_writer",
 		"-v", "schema_name=platform", "-f", "-"); err != nil {

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import {
-  createDriverInstallation,
+  getOrCreateDriverInstallation,
   loginDriverWithPassword,
   loginDriverWithPasskey,
   requestDriverActivation,
@@ -58,8 +58,9 @@ export default function App() {
 
   const prepareInstallation = async () => {
     try {
-      setInstallation(await createDriverInstallation());
-      setStatus("Instalación preparada en memoria. No se almacena una clave en localStorage.");
+      const existing = await getOrCreateDriverInstallation();
+      setInstallation(existing);
+      setStatus("Instalación preparada o recuperada desde IndexedDB. Los tokens de sesión no se almacenan allí.");
     } catch {
       setStatus("No fue posible preparar la instalación en este navegador.");
     }

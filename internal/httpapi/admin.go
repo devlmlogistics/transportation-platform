@@ -63,7 +63,7 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, "authentication_required", "Authentication is required.")
 		return
 	}
-	if principal.SessionPolicy == "DRIVER" {
+	if principal.SessionPolicy == "DRIVER" || principal.SessionPolicy == "DRIVER_ACTIVATION" {
 		writeError(w, r, http.StatusForbidden, "administrative_session_required", "An administrative session is required.")
 		return
 	}

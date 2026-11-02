@@ -261,6 +261,9 @@ Bloquean la conversión del plan en implementación: proveedor/canal inicial, KD
 - sesión DRIVER con TTL absoluto/idle, epoch obsoleto y revocación concurrente;
 - imposibilidad de usar sesión DRIVER para administración o cambiar empresa/operación;
 - `tp_runtime`/`tp_auth_runtime` sin DML directo ni acceso SQL arbitrario a credenciales/challenges;
+- `tp_auth_runtime` sin EXECUTE sobre `complete_driver_login`; sólo `tp_driver_auth_runtime` puede alcanzar esa frontera;
+- la sesión `DRIVER_ACTIVATION` sólo puede solicitar enrolamiento aprobado y no puede cambiar contexto, usar step-up, listar/revocar sesiones ni acceder a administración;
+- persistencia y recuperación del `CryptoKey` no exportable en IndexedDB sin almacenar tokens;
 - reuso de conexiones `pgxpool` sin contexto residual.
 
 **[P]** La prueba criptográfica de login recurrente debe conservar una respuesta WebAuthn válida generada por la biblioteca/harness, no un mock que salte `FinishLogin`. La prueba manual de Chrome es complementaria y no reemplaza las pruebas PostgreSQL.

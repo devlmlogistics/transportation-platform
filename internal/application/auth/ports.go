@@ -62,8 +62,9 @@ type DeviceAuthorizer interface {
 type SessionKind string
 
 const (
-	AdministrativeSession SessionKind = "ADMINISTRATIVE"
-	DriverSession         SessionKind = "DRIVER"
+	AdministrativeSession   SessionKind = "ADMINISTRATIVE"
+	DriverSession           SessionKind = "DRIVER"
+	DriverActivationSession SessionKind = "DRIVER_ACTIVATION"
 )
 
 type SessionPolicy struct {
@@ -77,6 +78,8 @@ func PolicyFor(kind SessionKind) (SessionPolicy, error) {
 		return SessionPolicy{IdleTTL: 30 * time.Minute, AbsoluteTTL: 8 * time.Hour}, nil
 	case DriverSession:
 		return SessionPolicy{IdleTTL: 60 * time.Minute, AbsoluteTTL: 12 * time.Hour}, nil
+	case DriverActivationSession:
+		return SessionPolicy{IdleTTL: 15 * time.Minute, AbsoluteTTL: time.Hour}, nil
 	default:
 		return SessionPolicy{}, ErrInvalidInput
 	}

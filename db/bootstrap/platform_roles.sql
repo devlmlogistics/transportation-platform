@@ -16,6 +16,10 @@
 \else
 \set auth_runtime_role tp_auth_runtime
 \endif
+\if :{?driver_auth_runtime_role}
+\else
+\set driver_auth_runtime_role tp_driver_auth_runtime
+\endif
 \if :{?bootstrap_runtime_role}
 \else
 \set bootstrap_runtime_role tp_bootstrap_runtime
@@ -43,6 +47,10 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'runtime_role')\gexec
 SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT NOCREATEDB NOCREATEROLE', :'auth_runtime_role')
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'auth_runtime_role')\gexec
 
+-- The final DRIVER-session issuance boundary has a separate runtime role.
+SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT NOCREATEDB NOCREATEROLE', :'driver_auth_runtime_role')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'driver_auth_runtime_role')\gexec
+
 SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT NOCREATEDB NOCREATEROLE', :'bootstrap_runtime_role')
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'bootstrap_runtime_role')\gexec
 
@@ -54,11 +62,12 @@ SELECT format('GRANT %I TO %I', :'security_writer_role', :'migrator_role')\gexec
 SELECT format('CREATE SCHEMA IF NOT EXISTS %I AUTHORIZATION %I', :'schema_name', :'owner_role')\gexec
 SELECT format('GRANT USAGE ON SCHEMA %I TO %I', :'schema_name', :'runtime_role')\gexec
 SELECT format('GRANT USAGE ON SCHEMA %I TO %I', :'schema_name', :'auth_runtime_role')\gexec
+SELECT format('GRANT USAGE ON SCHEMA %I TO %I', :'schema_name', :'driver_auth_runtime_role')\gexec
 SELECT format('GRANT USAGE ON SCHEMA %I TO %I', :'schema_name', :'bootstrap_runtime_role')\gexec
 SELECT format('GRANT USAGE ON SCHEMA %I TO %I', :'schema_name', :'security_writer_role')\gexec
 
 -- Verificación explícita: runtime nunca puede ser superusuario o BYPASSRLS.
 SELECT rolname, rolsuper, rolbypassrls, rolinherit, rolcanlogin
 FROM pg_roles
-WHERE rolname IN (:'owner_role', :'migrator_role', :'runtime_role', :'auth_runtime_role', :'bootstrap_runtime_role', :'security_writer_role')
+WHERE rolname IN (:'owner_role', :'migrator_role', :'runtime_role', :'auth_runtime_role', :'driver_auth_runtime_role', :'bootstrap_runtime_role', :'security_writer_role')
 ORDER BY rolname;

@@ -154,7 +154,7 @@ func (s *OnlineAuthService) LoginDriver(ctx context.Context, identifier, passwor
 	if err != nil {
 		return LoginResult{}, err
 	}
-	policy, _ := PolicyFor(DriverSession)
+	policy, _ := PolicyFor(DriverActivationSession)
 	record, err := store.IssueDriverActivationSession(ctx, grant, CreateSessionRequest{
 		ID: uuid.New(), UserAccountID: credential.UserAccountID,
 		TokenHash: HashSessionToken(token), CSRFSecretHash: HashSessionToken(csrfToken),

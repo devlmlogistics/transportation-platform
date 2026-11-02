@@ -275,8 +275,12 @@ func (h *WebAuthnHandler) stepUpFinish(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *WebAuthnHandler) credentials(w http.ResponseWriter, r *http.Request) {
-	token, _, ok := h.Security.session(w, r)
+	token, session, ok := h.Security.session(w, r)
 	if !ok {
+		return
+	}
+	if session.SessionPolicy == applicationauth.DriverActivationSession {
+		writeError(w, r, http.StatusForbidden, "activation_session_limited", "This session is limited to device enrollment.")
 		return
 	}
 	credentials, err := h.Service.ListCredentials(r.Context(), token)
@@ -294,8 +298,12 @@ func (h *WebAuthnHandler) credentials(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *WebAuthnHandler) revokeCredential(w http.ResponseWriter, r *http.Request) {
-	token, _, ok := h.Security.requireMutationSession(w, r)
+	token, session, ok := h.Security.requireMutationSession(w, r)
 	if !ok {
+		return
+	}
+	if session.SessionPolicy == applicationauth.DriverActivationSession {
+		writeError(w, r, http.StatusForbidden, "activation_session_limited", "This session is limited to device enrollment.")
 		return
 	}
 	var input struct {

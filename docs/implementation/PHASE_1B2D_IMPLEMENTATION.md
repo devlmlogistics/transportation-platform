@@ -5,16 +5,17 @@ Estado de esta rama: [D] implementación para revisión; no se habilita ningún 
 ## Alcance implementado
 
 - [V] Se reutilizan `Person`, `UserAccount`, `DriverProfile`, memberships, `AuthenticatorCredential`, `DeviceEnrollmentRequest`, `DeviceAuthorization` y `AuthSession`.
-- [D] Se agregó la migración `000012_driver_mobile_auth.sql`; las migraciones anteriores permanecen inmutables.
-- [D] Se agregó una sesión DRIVER de activación corta, emitida sólo después de consumir un grant de verificación de contraseña. Esta sesión no tiene empresa, operación ni autorización de dispositivo y sólo permite continuar el flujo de activación.
+- [V] Se agregó la migración `000012_driver_mobile_auth.sql`; las migraciones anteriores permanecen inmutables.
+- [V] La migración correctiva `000013_driver_auth_boundary.sql` separa la emisión final en `tp_driver_auth_runtime` y conserva `tp_auth_runtime` sin EXECUTE sobre `complete_driver_login`.
+- [V] Se agregó una sesión `DRIVER_ACTIVATION` de 15 minutos idle/1 hora absoluta, emitida sólo después de consumir un grant de verificación de contraseña. Esta sesión no tiene empresa, operación ni autorización de dispositivo y sólo permite solicitar y completar el enrolamiento aprobado.
 - [D] Se agregó login recurrente WebAuthn para una instalación previamente autorizada. La sesión final se crea exclusivamente en `complete_driver_login`, derivando cuenta, empresa, operación, credencial y dispositivo desde el challenge.
-- [D] Se agregó una prueba independiente de posesión de instalación con ECDSA P-256. El navegador mantiene la clave privada no exportable sólo en memoria durante esta versión.
-- [D] Se añadió `DriverAuthHandler` bajo `/api/v1/driver/auth/` y una pantalla React mínima. No se agregaron formularios operativos, GPS, Service Worker, IndexedDB ni modo offline.
+- [V] Se agregó una prueba independiente de posesión de instalación con ECDSA P-256. El navegador persiste el objeto `CryptoKey` no exportable y su identificador en IndexedDB; nunca persiste tokens de sesión.
+- [D] Se añadió `DriverAuthHandler` bajo `/api/v1/driver/auth/` y una pantalla React mínima. No se agregaron formularios operativos, GPS, Service Worker ni modo offline.
 
 ## Flujo de activación
 
 1. El conductor inicia `/api/v1/driver/auth/activation/login` con su identidad ya registrada y contraseña. La respuesta es genérica y el grant de verificación se consume una sola vez.
-2. El frontend genera una clave ECDSA P-256 por instalación en memoria y envía sólo la clave pública a la solicitud existente `/api/v1/auth/webauthn/device-enrollment-requests`.
+2. El frontend recupera o genera una clave ECDSA P-256 por instalación en IndexedDB y envía sólo la clave pública a la solicitud existente `/api/v1/auth/webauthn/device-enrollment-requests`.
 3. La función existente valida la sesión de activación, `DriverProfile`, membresía empresarial y, si corresponde, membresía operacional. El código de correlación sólo sirve para seguimiento y no autentica.
 4. Un supervisor autorizado aprueba la solicitud existente. La aprobación repite membresía, alcance, rol, permiso, vigencia y aislamiento de empresa/operación.
 5. El conductor completa el registro WebAuthn con `registration/options` y `registration/finish`, vinculando el challenge al `DeviceEnrollmentRequest` aprobado. La autorización `DeviceAuthorization` se crea atómicamente al consumir la solicitud.
@@ -36,11 +37,13 @@ La sesión final contiene:
 - renovación de inactividad acotada por el absoluto;
 - auditoría de challenge y login.
 
-Una sesión DRIVER no puede cambiar de empresa u operación mediante `/api/v1/auth/context`; el SQL devuelve el contexto actual sólo si coincide. Su política de servidor es de 12 horas absolutas y 60 minutos de inactividad. Las rutas administrativas rechazan explícitamente sesiones DRIVER, aunque la persona tuviera otros roles, y no se consideran autorizadas por compartir una identidad.
+Una sesión DRIVER no puede cambiar de empresa u operación mediante `/api/v1/auth/context`; el SQL devuelve el contexto actual sólo si coincide. Su política de servidor es de 12 horas absolutas y 60 minutos de inactividad. Las sesiones `DRIVER_ACTIVATION` no pueden cambiar contexto, listar/revocar sesiones, usar step-up ni administrar; las rutas administrativas rechazan ambas políticas DRIVER aunque la persona tuviera otros roles.
+
+La emisión de la sesión operativa cruza una frontera adicional: `tp_auth_runtime` puede crear/leer challenges, pero no puede ejecutar `complete_driver_login`. Sólo el pool `tp_driver_auth_runtime`, reservado al componente Go que ya verificó WebAuthn UV y la firma ECDSA, tiene EXECUTE. PostgreSQL no puede demostrar por sí mismo que el proceso hizo la verificación criptográfica; el aislamiento de rol reduce la superficie a ese proceso y queda como riesgo residual si éste se compromete.
 
 ## Posesión y limitaciones
 
-La clave pública de instalación usa `ECDSA_P256_SHA256`. El navegador firma `SHA-256("tp-driver-possession\\0" || challenge_hash || installation_id)` y Go verifica la firma antes de la función SQL. La clave privada Web Crypto se genera como no exportable y no se escribe en `localStorage`; al recargar o reinstalar la PWA se pierde en esta versión y debe repetirse la activación o incorporarse posteriormente un almacenamiento seguro aprobado.
+La clave pública de instalación usa `ECDSA_P256_SHA256`. El navegador firma `SHA-256("tp-driver-possession\\0" || challenge_hash || installation_id)` y Go verifica la firma antes de la función SQL. La clave privada Web Crypto se genera como no exportable y se guarda mediante structured clone en IndexedDB. Al cerrar/reabrir o recargar se recupera el mismo `installation_id`; eliminar los datos del sitio, limpiar IndexedDB o cambiar de teléfono elimina la clave local y requiere una nueva activación y aprobación. IndexedDB no es atestación ni garantía de hardware.
 
 Esto no es atestación de hardware. Una passkey sincronizada tampoco prueba que el teléfono físico sea el único dispositivo. La asociación es una autorización de instalación revocable más una prueba criptográfica independiente; el riesgo residual de clonación/exportación de la instalación queda documentado y no se presenta como garantía de hardware.
 
@@ -64,11 +67,13 @@ Todos los mutating endpoints existentes conservan cookies HttpOnly, CSRF, SameSi
 ## PIN de supervisor y operación offline
 
 - [P] El PIN de supervisor por jornada no se implementó. Requiere decisión de factor, scope, vencimiento, rate limiting, revocación y auditoría.
-- [V] Esta fase no crea sesiones offline, leases, formularios, fotografías, GPS, IndexedDB ni sincronización tardía.
+- [V] Esta fase no crea sesiones offline, leases, formularios, fotografías, GPS ni sincronización tardía. IndexedDB sólo contiene la CryptoKey de instalación y su identificador; no contiene sesiones ni tokens.
 
 ## Pruebas y límites actuales
 
-- [V] Se agregan contratos de repositorio, rate limiting por identificador/instalación y una prueba criptográfica completa en el harness PostgreSQL 16 efímero: assertion WebAuthn válida, posesión ECDSA, TTL de sesión, consumo único y rechazo de ejecución desde `tp_runtime`.
-- [P] Debe ampliarse en una iteración posterior la cobertura de ciclo de vida para autorización revocada, membresía revocada, sesión expirada y aislamiento A/B con respuestas WebAuthn completas.
+- [V] Se agregan contratos de repositorio, rate limiting por identificador/instalación y una prueba criptográfica completa en el harness PostgreSQL 16 efímero: assertion WebAuthn válida, posesión ECDSA, TTL de sesión, consumo único, activación/enrolamiento/aprobación y rechazo de emisión desde `tp_runtime` y `tp_auth_runtime`.
+- [V] El harness verifica políticas de activación, membresías, revocación, expiración, credencial revocada, firma de instalación inválida, challenge reutilizado, aislamiento de roles y resolución de la sesión operativa.
 - [V] La suite validada en esta rama incluye `go test ./...`, `go vet ./...`, `pnpm --dir web typecheck`, `pnpm --dir web test -- --run`, `pnpm --dir web build`, `docker compose config --quiet` y `docker build`.
 - [P] Antes de cualquier Goose UP en DEV se debe verificar usuario `tp_migrator`, base `transportation_platform_dev`, esquema, versión y ausencia de operaciones destructivas. Esta rama no hace bootstrap ni crea usuarios reales.
+
+La migración `000013` requiere que un administrador provisiona `tp_driver_auth_runtime` antes de Goose UP. El script `db/bootstrap/platform_roles.sql` lo crea sin credenciales y concede sólo USAGE de esquema; la contraseña debe inyectarse fuera del repositorio.

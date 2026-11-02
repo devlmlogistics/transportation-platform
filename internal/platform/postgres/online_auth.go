@@ -17,19 +17,21 @@ import (
 
 // OnlineAuthRepository is intentionally split by privilege. Methods that
 // record the result of application-level password verification use
-// tp_runtime; methods that consume grants or resolve authentication state use
-// tp_auth_runtime. Neither pool is a migration or superuser pool.
+// tp_runtime; ordinary authentication state uses tp_auth_runtime; the final
+// DRIVER session issuance boundary uses tp_driver_auth_runtime. Neither pool
+// is a migration or superuser pool.
 type OnlineAuthRepository struct {
-	runtimePool   *pgxpool.Pool
-	authPool      *pgxpool.Pool
-	bootstrapPool *pgxpool.Pool
+	runtimePool    *pgxpool.Pool
+	authPool       *pgxpool.Pool
+	driverAuthPool *pgxpool.Pool
+	bootstrapPool  *pgxpool.Pool
 }
 
-func NewOnlineAuthRepository(runtimePool, authPool *pgxpool.Pool) (*OnlineAuthRepository, error) {
-	if runtimePool == nil || authPool == nil {
-		return nil, errors.New("runtime and authentication pools are required")
+func NewOnlineAuthRepository(runtimePool, authPool, driverAuthPool *pgxpool.Pool) (*OnlineAuthRepository, error) {
+	if runtimePool == nil || authPool == nil || driverAuthPool == nil {
+		return nil, errors.New("runtime, authentication and driver-auth pools are required")
 	}
-	return &OnlineAuthRepository{runtimePool: runtimePool, authPool: authPool}, nil
+	return &OnlineAuthRepository{runtimePool: runtimePool, authPool: authPool, driverAuthPool: driverAuthPool}, nil
 }
 
 // NewBootstrapAuthRepository is used only by the explicit bootstrap command.
@@ -578,11 +580,11 @@ func (r *OnlineAuthRepository) GetDriverLoginChallenge(ctx context.Context, id u
 }
 
 func (r *OnlineAuthRepository) CompleteDriverLogin(ctx context.Context, request auth.CompleteDriverLoginRequest) (auth.SessionRecord, error) {
-	if r == nil || r.authPool == nil || request.ChallengeID == uuid.Nil || request.SessionID == uuid.Nil || request.AuditID == uuid.Nil || request.LoginAuditID == uuid.Nil {
+	if r == nil || r.driverAuthPool == nil || request.ChallengeID == uuid.Nil || request.SessionID == uuid.Nil || request.AuditID == uuid.Nil || request.LoginAuditID == uuid.Nil {
 		return auth.SessionRecord{}, auth.ErrInvalidInput
 	}
 	var record auth.SessionRecord
-	err := r.authPool.QueryRow(ctx, `
+	err := r.driverAuthPool.QueryRow(ctx, `
 		SELECT session_id, user_account_id, session_epoch, status,
 		       created_at, last_seen_at, idle_expires_at, absolute_expires_at,
 		       active_company_id, active_operation_id, context_version

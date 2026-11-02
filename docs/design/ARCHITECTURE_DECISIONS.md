@@ -214,10 +214,10 @@ La especificación operativa está en DEVICE_AUTHENTICATION.md. La planificació
 
 **Estado:** [D] implementado para revisión en Fase 1B.2-D.
 
-**Decisión:** la activación inicial puede usar una sesión DRIVER temporal y sin contexto para crear una `DeviceEnrollmentRequest`. El login recurrente requiere WebAuthn con User Verification, una `DeviceAuthorization` ACTIVE y una firma independiente de la clave pública de instalación. `complete_driver_login` deriva la cuenta, empresa, operación, credencial y dispositivo desde el challenge y emite una sesión DRIVER de 12 horas absolutas/60 minutos idle.
+**Decisión:** la activación inicial usa una política `DRIVER_ACTIVATION` temporal y sin contexto para crear una `DeviceEnrollmentRequest`; no es una sesión operativa. El login recurrente requiere WebAuthn con User Verification, una `DeviceAuthorization` ACTIVE y una firma independiente de la clave pública de instalación. `complete_driver_login` deriva la cuenta, empresa, operación, credencial y dispositivo desde el challenge y emite una sesión DRIVER de 12 horas absolutas/60 minutos idle. La emisión SQL sólo está concedida al rol `tp_driver_auth_runtime`; `tp_auth_runtime` no puede invocarla.
 
 **Razón:** permite reutilizar la identidad única y el patrón de aprobación existente sin aceptar `user_account_id`, `company_id`, roles o códigos de correlación como prueba de identidad. Un rol o membership revocado no queda sustituido por la mera existencia de una autorización histórica.
 
-**Límites:** la clave de instalación en Web Crypto no es atestación de hardware y en esta versión se mantiene sólo en memoria; una reinstalación requiere repetir el flujo. No se implementan PIN de supervisor, offline, formularios ni GPS.
+**Límites:** la clave de instalación en Web Crypto se persiste como CryptoKey no exportable en IndexedDB, pero no es atestación de hardware; borrar datos del sitio o cambiar de teléfono requiere repetir el flujo. No se implementan PIN de supervisor, offline, formularios ni GPS.
 
 **Consecuencia:** una sesión DRIVER no puede cambiar de contexto a otra empresa/operación ni acceder a rutas administrativas sólo por compartir la misma persona.

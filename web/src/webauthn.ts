@@ -83,11 +83,64 @@ export type DriverInstallation = {
   publicKeyEncoded: string;
 };
 
+const driverInstallationDBName = "transportation-platform-driver-auth";
+const driverInstallationStoreName = "installations";
+
+type StoredDriverInstallation = DriverInstallation & { createdAt: number };
+
+const openDriverInstallationDB = (): Promise<IDBDatabase> => {
+  if (typeof indexedDB === "undefined") throw new Error("IndexedDB is unavailable");
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(driverInstallationDBName, 1);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(driverInstallationStoreName)) {
+        request.result.createObjectStore(driverInstallationStoreName, { keyPath: "id" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("IndexedDB could not be opened"));
+  });
+};
+
+const persistDriverInstallation = async (installation: DriverInstallation): Promise<void> => {
+  const database = await openDriverInstallationDB();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(driverInstallationStoreName, "readwrite");
+    transaction.objectStore(driverInstallationStoreName).put({ ...installation, createdAt: Date.now() } satisfies StoredDriverInstallation);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error("Installation could not be persisted"));
+  });
+  database.close();
+};
+
+export async function loadDriverInstallation(id?: string): Promise<DriverInstallation | undefined> {
+  const database = await openDriverInstallationDB();
+  const stored = await new Promise<StoredDriverInstallation | StoredDriverInstallation[] | undefined>((resolve, reject) => {
+    const transaction = database.transaction(driverInstallationStoreName, "readonly");
+    const request = id
+      ? transaction.objectStore(driverInstallationStoreName).get(id)
+      : transaction.objectStore(driverInstallationStoreName).getAll();
+    request.onsuccess = () => resolve(request.result as StoredDriverInstallation | StoredDriverInstallation[] | undefined);
+    request.onerror = () => reject(request.error ?? new Error("Installation could not be loaded"));
+  });
+  database.close();
+  if (Array.isArray(stored)) {
+    return stored.sort((left, right) => right.createdAt - left.createdAt)[0];
+  }
+  return stored;
+}
+
+export async function getOrCreateDriverInstallation(): Promise<DriverInstallation> {
+  return (await loadDriverInstallation()) ?? createDriverInstallation();
+}
+
 export async function createDriverInstallation(): Promise<DriverInstallation> {
   const id = crypto.randomUUID();
   const pair = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"])) as CryptoKeyPair;
   const exported = await crypto.subtle.exportKey("raw", pair.publicKey);
-  return { id, publicKey: pair.publicKey, privateKey: pair.privateKey, publicKeyEncoded: encode(exported) };
+  const installation = { id, publicKey: pair.publicKey, privateKey: pair.privateKey, publicKeyEncoded: encode(exported) };
+  await persistDriverInstallation(installation);
+  return installation;
 }
 
 export async function requestDriverActivation(companyID: string, operationID: string | undefined, installation: DriverInstallation): Promise<JSONValue> {

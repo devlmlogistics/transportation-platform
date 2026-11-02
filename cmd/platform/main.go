@@ -55,7 +55,7 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 			return err
 		}
 		defer pools.Close()
-		repository, err := postgres.NewOnlineAuthRepository(pools.Runtime, pools.Auth)
+		repository, err := postgres.NewOnlineAuthRepository(pools.Runtime, pools.Auth, pools.DriverAuth)
 		if err != nil {
 			return err
 		}

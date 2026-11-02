@@ -69,7 +69,7 @@ func NewWebAuthnService(store WebAuthnStore, cfg WebAuthnConfig) (*WebAuthnServi
 }
 
 func (s *WebAuthnService) BeginRegistration(ctx context.Context, token []byte, session AuthenticatedSession, displayName string, deviceRequestID *uuid.UUID) (uuid.UUID, *protocol.CredentialCreation, error) {
-	if !s.canRegister(session) || len(token) != 32 {
+	if !s.canRegister(session) || len(token) != 32 || (session.SessionPolicy == DriverActivationSession && deviceRequestID == nil) {
 		return uuid.Nil, nil, ErrStepUpRequired
 	}
 	credentials, err := s.Store.ListAuthenticatorCredentials(ctx, HashSessionToken(token))
@@ -167,7 +167,7 @@ func WebAuthnErrorType(err error) string {
 }
 
 func (s *WebAuthnService) BeginStepUp(ctx context.Context, token []byte, session AuthenticatedSession) (uuid.UUID, *protocol.CredentialAssertion, error) {
-	if len(token) != 32 || session.ID == uuid.Nil {
+	if len(token) != 32 || session.ID == uuid.Nil || session.SessionPolicy == DriverActivationSession {
 		s.reportDiagnostic("step_up.begin.session_policy", ErrWebAuthnRejected)
 		return uuid.Nil, nil, ErrWebAuthnRejected
 	}
@@ -246,7 +246,7 @@ func (s *WebAuthnService) RevokeCredential(ctx context.Context, token []byte, cr
 }
 
 func (s *WebAuthnService) CreateDeviceEnrollmentRequest(ctx context.Context, token []byte, session AuthenticatedSession, companyID uuid.UUID, operationID *uuid.UUID, installationID uuid.UUID, installationPublicKey []byte, keyAlgorithm string) (DeviceEnrollmentRequest, error) {
-	if len(token) != 32 || session.ID == uuid.Nil || companyID == uuid.Nil || installationID == uuid.Nil || len(installationPublicKey) < 16 || strings.TrimSpace(keyAlgorithm) == "" {
+	if len(token) != 32 || session.ID == uuid.Nil || session.SessionPolicy != DriverActivationSession || companyID == uuid.Nil || installationID == uuid.Nil || len(installationPublicKey) < 16 || strings.TrimSpace(keyAlgorithm) == "" {
 		return DeviceEnrollmentRequest{}, ErrWebAuthnRejected
 	}
 	correlation := uuid.NewString()

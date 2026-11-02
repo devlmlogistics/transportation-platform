@@ -15,7 +15,7 @@ import (
 	"transportation-platform/internal/platform/testdb"
 )
 
-func testOnlineAuth(t *testing.T, ctx context.Context, runtimePool, authPool *pgxpool.Pool, adminDSN string, fixture foundationFixture) {
+func testOnlineAuth(t *testing.T, ctx context.Context, runtimePool, authPool, driverAuthPool *pgxpool.Pool, adminDSN string, fixture foundationFixture) {
 	t.Helper()
 	adminPool, err := pgxpool.New(ctx, adminDSN)
 	if err != nil {
@@ -39,7 +39,7 @@ func testOnlineAuth(t *testing.T, ctx context.Context, runtimePool, authPool *pg
 	`, uuid.New(), fixture.UserGlobal, hash, parameters); err != nil {
 		t.Fatal(err)
 	}
-	repository, err := NewOnlineAuthRepository(runtimePool, authPool)
+	repository, err := NewOnlineAuthRepository(runtimePool, authPool, driverAuthPool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func testOnlineAuth(t *testing.T, ctx context.Context, runtimePool, authPool *pg
 	})
 
 	t.Run("driver_mobile_webauthn_session_is_device_scoped", func(t *testing.T) {
-		testDriverMobileAuth(t, ctx, repository, webauthnService, runtimePool, adminPool, fixture)
+		testDriverMobileAuth(t, ctx, repository, webauthnService, runtimePool, authPool, driverAuthPool, adminPool, fixture)
 	})
 }
 

@@ -11,8 +11,9 @@ import (
 )
 
 type OnlinePools struct {
-	Runtime *pgxpool.Pool
-	Auth    *pgxpool.Pool
+	Runtime    *pgxpool.Pool
+	Auth       *pgxpool.Pool
+	DriverAuth *pgxpool.Pool
 }
 
 func (p *OnlinePools) Close() {
@@ -21,6 +22,9 @@ func (p *OnlinePools) Close() {
 	}
 	if p.Auth != nil {
 		p.Auth.Close()
+	}
+	if p.DriverAuth != nil {
+		p.DriverAuth.Close()
 	}
 	if p.Runtime != nil {
 		p.Runtime.Close()
@@ -31,10 +35,10 @@ func OpenOnlinePools(ctx context.Context, database config.DatabaseConfig) (*Onli
 	if database.Host == "" || database.Port == "" || database.Name == "" {
 		return nil, errors.New("database host, port and name are required")
 	}
-	if database.RuntimeUser != "tp_runtime" || database.AuthUser != "tp_auth_runtime" {
-		return nil, errors.New("online pools require tp_runtime and tp_auth_runtime")
+	if database.RuntimeUser != "tp_runtime" || database.AuthUser != "tp_auth_runtime" || database.DriverAuthUser != "tp_driver_auth_runtime" {
+		return nil, errors.New("online pools require tp_runtime, tp_auth_runtime and tp_driver_auth_runtime")
 	}
-	if database.RuntimePassword == "" || database.AuthPassword == "" {
+	if database.RuntimePassword == "" || database.AuthPassword == "" || database.DriverAuthPassword == "" {
 		return nil, errors.New("online pool credentials are required")
 	}
 	runtime, err := openPool(ctx, database, database.RuntimeUser, database.RuntimePassword)
@@ -46,7 +50,13 @@ func OpenOnlinePools(ctx context.Context, database config.DatabaseConfig) (*Onli
 		runtime.Close()
 		return nil, fmt.Errorf("open authentication pool: %w", err)
 	}
-	return &OnlinePools{Runtime: runtime, Auth: authPool}, nil
+	driverAuthPool, err := openPool(ctx, database, database.DriverAuthUser, database.DriverAuthPassword)
+	if err != nil {
+		runtime.Close()
+		authPool.Close()
+		return nil, fmt.Errorf("open driver authentication pool: %w", err)
+	}
+	return &OnlinePools{Runtime: runtime, Auth: authPool, DriverAuth: driverAuthPool}, nil
 }
 
 // OpenBootstrapPool is intentionally separate from OpenOnlinePools. The

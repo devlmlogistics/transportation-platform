@@ -144,8 +144,12 @@ func (h *AuthHandler) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandler) sessions(w http.ResponseWriter, r *http.Request) {
-	token, _, ok := h.session(w, r)
+	token, session, ok := h.session(w, r)
 	if !ok {
+		return
+	}
+	if session.SessionPolicy == applicationauth.DriverActivationSession {
+		writeError(w, r, http.StatusForbidden, "activation_session_limited", "This session is limited to device enrollment.")
 		return
 	}
 	result, err := h.Service.ListSessions(r.Context(), token)
@@ -157,8 +161,12 @@ func (h *AuthHandler) sessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandler) revokeAll(w http.ResponseWriter, r *http.Request) {
-	token, _, ok := h.requireMutationSession(w, r)
+	token, session, ok := h.requireMutationSession(w, r)
 	if !ok {
+		return
+	}
+	if session.SessionPolicy == applicationauth.DriverActivationSession {
+		writeError(w, r, http.StatusForbidden, "activation_session_limited", "This session is limited to device enrollment.")
 		return
 	}
 	if err := h.Service.RevokeAll(r.Context(), token); err != nil {
@@ -170,8 +178,12 @@ func (h *AuthHandler) revokeAll(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandler) context(w http.ResponseWriter, r *http.Request) {
-	token, _, ok := h.requireMutationSession(w, r)
+	token, session, ok := h.requireMutationSession(w, r)
 	if !ok {
+		return
+	}
+	if session.SessionPolicy == applicationauth.DriverActivationSession {
+		writeError(w, r, http.StatusForbidden, "activation_session_limited", "This session is limited to device enrollment.")
 		return
 	}
 	var input struct {
