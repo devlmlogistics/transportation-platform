@@ -54,6 +54,19 @@ Estado: implementación en `feature/phase-1b2c-webauthn-devices`; no fusionada y
 - **[D]** El proceso Go que llama a `complete_webauthn_registration`/`complete_webauthn_step_up` es la frontera que afirma que la biblioteca verificó la respuesta. PostgreSQL no implementa criptografía WebAuthn. Un proceso que suplante simultáneamente al servicio y posea el pool `tp_auth_runtime` podría invocar la función con un challenge pendiente; el riesgo se reduce con pool separado, ausencia de headers de identidad, TTL/consumo único y despliegue del servicio en un proceso aislado.
 - **[P]** Una frontera adicional con rol dedicado o verificador externo/HSM queda para una revisión de producción; no se crea un rol nuevo en esta fase.
 
+## Pruebas criptográficas negativas WebAuthn
+
+- **[V]** `webauthn_negative_assertions_integration_test.go` genera una clave ECDSA P-256 nueva por ejecución, almacena únicamente la clave pública COSE en el harness y conserva la privada sólo en memoria de la prueba.
+- **[V]** La firma se calcula sobre `authenticatorData || SHA-256(clientDataJSON)`. Los flags `UP` y `UV` se fijan antes de construir `authenticatorData` y antes de firmar; no se modifica el flag después de generar la firma.
+- **[V]** El flujo recorre `BeginStepUp`, persistencia y lectura del challenge, reconstrucción de `SessionData`, parseo, `FinishLogin` de go-webauthn v0.13.0, validación de UV, finalización SQL y lectura del estado de sesión.
+- **[V]** Caso A: una assertion válida con `UP=true` y `UV=true` eleva una sesión `PASSWORD` a `WEBAUTHN_STEP_UP` con expiración limitada.
+- **[V]** Caso B: una assertion criptográficamente válida con `UP=true` y `UV=false` es rechazada; la sesión conserva nivel `PASSWORD` y no recibe `step_up_expires_at`.
+- **[V]** Caso C: una assertion con `UV=true` y firma alterada es rechazada sin elevar la sesión.
+- **[V]** Caso D: reenviar una assertion/challenge consumidos es rechazado y no renueva la expiración del step-up.
+- **[V]** Caso E: una assertion válida de una credencial revocada es rechazada porque la credencial no entra en el conjunto activo del usuario.
+- **[V]** La suite usa el PostgreSQL 16 efímero y roles del harness; no modifica `transportation_platform_dev` ni `transportation_platform_webauthn_manual`.
+- **[D]** Los diagnósticos de desarrollo del servicio sólo registran etapa y tipo de error; no registran claves, tokens, cookies, challenges ni payloads WebAuthn.
+
 ## Rutas
 
 Sólo cuando el flag explícito está activo:
@@ -80,7 +93,7 @@ Las rutas no aceptan `X-User-ID`, `X-Person-ID`, `X-Tenant-ID`, niveles de auten
 ## Criterios de aceptación
 
 - **[V]** Go compila con Go 1.25, y las pruebas unitarias de servicio/HTTP pasan.
-- **[V]** PostgreSQL 16 efímero ejecuta Goose 000001–000009 `up/down/up` y preserva RLS/FORCE RLS/privilegios.
+- **[V]** PostgreSQL 16 efímero ejecuta Goose 000001–000011 `up/down/up` y preserva RLS/FORCE RLS/privilegios.
 - **[D]** Deben pasar pruebas de challenge, UV, cuenta/credencial, step-up, memberships, scope A/B, revocación y concurrencia antes de solicitar merge.
 - **[V]** DEV persistente recibió únicamente `goose up` de 000009 después de validar esta suite; no se ejecutó bootstrap real ni prueba destructiva en DEV.
 
@@ -93,7 +106,7 @@ Las rutas no aceptan `X-User-ID`, `X-Person-ID`, `X-Tenant-ID`, niveles de auten
 
 ## Evidencia de corrección 000009
 
-- **[V]** `go test ./...` y `go vet ./...` pasan con PostgreSQL 16 efímero y migraciones 000001–000009 `up/down/up`.
+- **[V]** `go test ./...` y `go vet ./...` pasan con PostgreSQL 16 efímero y migraciones 000001–000011 `up/down/up`.
 - **[V]** Las pruebas cubren membresía empresarial revocada, membresía operacional revocada, empresa/operación cruzada, rol caducado, sesión revocada, SQL directo no autorizado y revocación concurrente de una autorización.
 - **[V]** Typecheck, pruebas y build React, `docker compose config --quiet` y `docker build` pasan.
 - **[V]** DEV quedó en `platform.goose_db_version = 9`; sólo se utilizó `tp_migrator` y no se ejecutaron DOWN, TRUNCATE, DROP, bootstrap ni creación de administradores reales.

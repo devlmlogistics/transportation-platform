@@ -168,48 +168,67 @@ func WebAuthnErrorType(err error) string {
 
 func (s *WebAuthnService) BeginStepUp(ctx context.Context, token []byte, session AuthenticatedSession) (uuid.UUID, *protocol.CredentialAssertion, error) {
 	if len(token) != 32 || session.ID == uuid.Nil {
+		s.reportDiagnostic("step_up.begin.session_policy", ErrWebAuthnRejected)
 		return uuid.Nil, nil, ErrWebAuthnRejected
 	}
 	credentials, err := s.Store.ListAuthenticatorCredentials(ctx, HashSessionToken(token))
 	if err != nil {
+		s.reportDiagnostic("step_up.begin.credentials_load", err)
 		return uuid.Nil, nil, ErrWebAuthnRejected
 	}
 	user := webAuthnUserForSession(session, credentials, false)
 	if len(user.credentials) == 0 {
+		s.reportDiagnostic("step_up.begin.no_active_credentials", ErrWebAuthnRejected)
 		return uuid.Nil, nil, ErrWebAuthnRejected
 	}
 	assertion, ceremony, err := s.Engine.BeginLogin(user, webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
+		s.reportDiagnostic("step_up.begin.login_options", err)
 		return uuid.Nil, nil, ErrWebAuthnRejected
 	}
 	id, err := s.persistChallenge(ctx, token, session.ID, StepUpChallenge, ceremony, nil)
+	if err != nil {
+		s.reportDiagnostic("step_up.begin.challenge_persist", err)
+	}
 	return id, assertion, err
 }
 
 func (s *WebAuthnService) FinishStepUp(ctx context.Context, token []byte, session AuthenticatedSession, challengeID uuid.UUID, request *http.Request) (time.Time, error) {
 	if len(token) != 32 || session.ID == uuid.Nil || request == nil {
+		s.reportDiagnostic("step_up.session_policy", ErrWebAuthnRejected)
 		return time.Time{}, ErrWebAuthnRejected
 	}
 	challenge, err := s.Store.GetWebAuthnChallenge(ctx, HashSessionToken(token), challengeID, StepUpChallenge)
 	if err != nil {
+		s.reportDiagnostic("step_up.challenge_load", err)
 		return time.Time{}, ErrWebAuthnRejected
 	}
 	var ceremony webauthn.SessionData
 	if err := json.Unmarshal(challenge.SessionData, &ceremony); err != nil {
+		s.reportDiagnostic("step_up.session_data_decode", err)
 		return time.Time{}, ErrWebAuthnRejected
 	}
 	credentials, err := s.Store.ListAuthenticatorCredentials(ctx, HashSessionToken(token))
 	if err != nil {
+		s.reportDiagnostic("step_up.credentials_load", err)
 		return time.Time{}, ErrWebAuthnRejected
 	}
 	credential, err := s.Engine.FinishLogin(webAuthnUserForSession(session, credentials, false), ceremony, request)
 	if err != nil || credential == nil || !credential.Flags.UserVerified {
+		if err == nil {
+			err = ErrWebAuthnRejected
+		}
+		s.reportDiagnostic("step_up.finish_login", err)
 		return time.Time{}, ErrWebAuthnRejected
 	}
-	return s.Store.CompleteWebAuthnStepUp(ctx, HashSessionToken(token), CompleteStepUpRequest{
+	expires, err := s.Store.CompleteWebAuthnStepUp(ctx, HashSessionToken(token), CompleteStepUpRequest{
 		ChallengeID: challengeID, ChallengeHash: challenge.ChallengeHash,
 		BindingHash: ceremonyBinding(session.ID, StepUpChallenge), CredentialKey: credential.ID, AuditID: uuid.New(),
 	})
+	if err != nil {
+		s.reportDiagnostic("step_up.persistence", err)
+	}
+	return expires, err
 }
 
 func (s *WebAuthnService) ListCredentials(ctx context.Context, token []byte) ([]AuthenticatorCredentialRecord, error) {

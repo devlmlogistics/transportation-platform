@@ -47,6 +47,12 @@ func testOnlineAuth(t *testing.T, ctx context.Context, runtimePool, authPool *pg
 	if err != nil {
 		t.Fatal(err)
 	}
+	webauthnService, err := applicationauth.NewWebAuthnService(repository, applicationauth.WebAuthnConfig{
+		RPID: "localhost", RPDisplayName: "Transportation Platform", RPOrigins: []string{"http://localhost:8080"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	t.Run("webauthn_challenge_read_matches_sql_return_contract", func(t *testing.T) {
 		login, err := service.Login(ctx, identifier, "correct horse battery staple", "192.0.2.20:443", "test-agent")
@@ -80,6 +86,9 @@ func testOnlineAuth(t *testing.T, ctx context.Context, runtimePool, authPool *pg
 	})
 	t.Run("webauthn_credential_revocation", func(t *testing.T) {
 		testWebAuthnCredentialRevocation(t, ctx, repository, authPool, adminPool, fixture)
+	})
+	t.Run("webauthn_negative_uv_and_signature_assertions", func(t *testing.T) {
+		testWebAuthnNegativeAssertions(t, ctx, service, webauthnService, repository, adminPool, fixture)
 	})
 
 	t.Run("valid_login_resolves_and_replays_no_secret", func(t *testing.T) {

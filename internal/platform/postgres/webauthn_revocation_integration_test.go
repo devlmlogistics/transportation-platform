@@ -22,7 +22,7 @@ func testWebAuthnCredentialRevocation(t *testing.T, ctx context.Context, reposit
 	}
 	rawToken := bytes.Repeat([]byte{0xd1}, 32)
 	if _, err := createSyntheticSession(ctx, adminPool, applicationauth.CreateSessionRequest{
-		ID: uuid.New(), UserAccountID: fixture.UserAAdmin, TokenHash: HashSessionToken(rawToken), Policy: policy,
+		ID: uuid.New(), UserAccountID: fixture.UserBAdmin, TokenHash: HashSessionToken(rawToken), Policy: policy,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func testWebAuthnCredentialRevocation(t *testing.T, ctx context.Context, reposit
 			INSERT INTO platform.authenticator_credential (
 				id, user_account_id, credential_id, public_key, status, metadata
 			) VALUES ($1, $2, $3, $4, 'ACTIVE', '{}'::jsonb)
-		`, credential.id, fixture.UserAAdmin, credential.key, []byte{0x04, 0x01}); err != nil {
+		`, credential.id, fixture.UserBAdmin, credential.key, []byte{0x04, 0x01}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -60,7 +60,7 @@ func testWebAuthnCredentialRevocation(t *testing.T, ctx context.Context, reposit
 
 	postRevokeToken := bytes.Repeat([]byte{0xd9}, 32)
 	if _, err := createSyntheticSession(ctx, adminPool, applicationauth.CreateSessionRequest{
-		ID: uuid.New(), UserAccountID: fixture.UserAAdmin, TokenHash: HashSessionToken(postRevokeToken), Policy: policy,
+		ID: uuid.New(), UserAccountID: fixture.UserBAdmin, TokenHash: HashSessionToken(postRevokeToken), Policy: policy,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func testWebAuthnCredentialRevocation(t *testing.T, ctx context.Context, reposit
 		SessionData: []byte(`{"challenge":"synthetic"}`), SessionDataFormat: "webauthn.v1",
 		BindingHash: bindingHash, ExpiresAt: time.Now().UTC().Add(5 * time.Minute), AuditID: uuid.New(),
 	}); err != nil {
-		t.Fatal(err)
+		t.Fatalf("begin challenge after revocation: %v", err)
 	}
 	var stepUpExpiry *time.Time
 	if err := authPool.QueryRow(ctx, `
@@ -96,7 +96,7 @@ func testWebAuthnCredentialRevocation(t *testing.T, ctx context.Context, reposit
 
 	concurrentToken := bytes.Repeat([]byte{0xd6}, 32)
 	if _, err := createSyntheticSession(ctx, adminPool, applicationauth.CreateSessionRequest{
-		ID: uuid.New(), UserAccountID: fixture.UserBAdmin, TokenHash: HashSessionToken(concurrentToken), Policy: policy,
+		ID: uuid.New(), UserAccountID: fixture.UserShared, TokenHash: HashSessionToken(concurrentToken), Policy: policy,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func testWebAuthnCredentialRevocation(t *testing.T, ctx context.Context, reposit
 			INSERT INTO platform.authenticator_credential (
 				id, user_account_id, credential_id, public_key, status, metadata
 			) VALUES ($1, $2, $3, $4, 'ACTIVE', '{}'::jsonb)
-		`, concurrentIDs[i], fixture.UserBAdmin, concurrentKeys[i], []byte{0x04, byte(i + 2)}); err != nil {
+		`, concurrentIDs[i], fixture.UserShared, concurrentKeys[i], []byte{0x04, byte(i + 2)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -140,7 +140,7 @@ func testWebAuthnCredentialRevocation(t *testing.T, ctx context.Context, reposit
 	if err := adminPool.QueryRow(ctx, `
 		SELECT count(*) FROM platform.authenticator_credential
 		 WHERE user_account_id = $1 AND status = 'ACTIVE'
-	`, fixture.UserBAdmin).Scan(&activeCount); err != nil {
+	`, fixture.UserShared).Scan(&activeCount); err != nil {
 		t.Fatal(err)
 	}
 	if activeCount != 1 {
