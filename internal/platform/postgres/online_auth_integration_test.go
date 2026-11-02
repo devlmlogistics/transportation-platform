@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -46,6 +47,34 @@ func testOnlineAuth(t *testing.T, ctx context.Context, runtimePool, authPool *pg
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	t.Run("webauthn_challenge_read_matches_sql_return_contract", func(t *testing.T) {
+		login, err := service.Login(ctx, identifier, "correct horse battery staple", "192.0.2.20:443", "test-agent")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = service.Logout(ctx, login.Token, login.Session.ID) })
+		request := applicationauth.WebAuthnChallengeRequest{
+			ID:                uuid.New(),
+			Purpose:           applicationauth.RegistrationChallenge,
+			ChallengeHash:     makeHash(0xa1),
+			SessionData:       []byte(`{"challenge":"synthetic"}`),
+			SessionDataFormat: "webauthn.v1",
+			BindingHash:       makeHash(0xa2),
+			ExpiresAt:         time.Now().UTC().Add(5 * time.Minute),
+			AuditID:           uuid.New(),
+		}
+		if err := repository.BeginWebAuthnChallenge(ctx, applicationauth.HashSessionToken(login.Token), request); err != nil {
+			t.Fatal(err)
+		}
+		challenge, err := repository.GetWebAuthnChallenge(ctx, applicationauth.HashSessionToken(login.Token), request.ID, applicationauth.RegistrationChallenge)
+		if err != nil {
+			t.Fatalf("read WebAuthn challenge: %v", err)
+		}
+		if challenge.ID != request.ID || string(challenge.SessionData) != string(request.SessionData) || challenge.DeviceRequestID != nil {
+			t.Fatalf("unexpected challenge: %+v", challenge)
+		}
+	})
 
 	t.Run("valid_login_resolves_and_replays_no_secret", func(t *testing.T) {
 		result, err := service.Login(ctx, identifier, "correct horse battery staple", "192.0.2.10:443", "test-agent")

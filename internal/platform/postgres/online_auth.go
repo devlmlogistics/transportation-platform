@@ -313,7 +313,7 @@ func (r *OnlineAuthRepository) GetWebAuthnChallenge(ctx context.Context, tokenHa
 	result.ID = id
 	var deviceID *uuid.UUID
 	err := r.authPool.QueryRow(ctx, `
-		SELECT challenge_hash,session_data,session_data_format,binding_hash,user_account_id,device_enrollment_request_id
+		SELECT challenge_hash,session_data,session_data_format,binding_hash,user_account_id,device_request_id
 		FROM platform.get_webauthn_challenge($1,$2,$3)
 	`, tokenHash, id, string(purpose)).Scan(&result.ChallengeHash, &result.SessionData,
 		&result.SessionDataFormat, &result.BindingHash, &result.UserAccountID, &deviceID)
