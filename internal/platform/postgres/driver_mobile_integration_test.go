@@ -90,6 +90,7 @@ func testDriverMobileAuth(t *testing.T, ctx context.Context, repository *OnlineA
 	if err != nil || resolvedActivation.SessionPolicy != applicationauth.DriverActivationSession || resolvedActivation.ActiveCompanyID != nil {
 		t.Fatalf("activation session did not resolve as limited: session=%+v err=%v", resolvedActivation, err)
 	}
+	assertSessionIdleWindow(t, resolvedActivation.LastSeenAt, resolvedActivation.IdleExpiresAt, 15*time.Minute)
 	var activationPolicy string
 	var activationDeviceID *uuid.UUID
 	if err := adminPool.QueryRow(ctx, `SELECT session_policy, device_authorization_id FROM platform.auth_session WHERE id = $1`, activation.Session.ID).Scan(&activationPolicy, &activationDeviceID); err != nil {
@@ -108,6 +109,38 @@ func testDriverMobileAuth(t *testing.T, ctx context.Context, repository *OnlineA
 		fixture.CompanyA, &fixture.OperationA, activationInstallationID, activationPublicKey, "ECDSA_P256_SHA256")
 	if err != nil {
 		t.Fatalf("activation session could not request enrollment: %v", err)
+	}
+	expectEnrollmentRejected := func(label string, companyID uuid.UUID, operationID *uuid.UUID) {
+		t.Helper()
+		if _, err := webauthnService.CreateDeviceEnrollmentRequest(ctx, activation.Token, resolvedActivation,
+			companyID, operationID, uuid.New(), activationPublicKey, "ECDSA_P256_SHA256"); err == nil {
+			t.Fatalf("%s enrollment was accepted", label)
+		}
+	}
+	expectEnrollmentRejected("other company operation", fixture.CompanyA, &fixture.OperationB)
+	expectEnrollmentRejected("other company", fixture.CompanyB, &fixture.OperationB)
+	if _, err := adminPool.Exec(ctx, `
+		UPDATE platform.operation_membership
+		   SET valid_from = clock_timestamp() + interval '1 hour', valid_until = NULL
+		 WHERE company_id = $1 AND company_operation_id = $2 AND person_id = $3
+	`, fixture.CompanyA, fixture.OperationA, fixture.PersonADriver); err != nil {
+		t.Fatal(err)
+	}
+	expectEnrollmentRejected("future operation membership", fixture.CompanyA, &fixture.OperationA)
+	if _, err := adminPool.Exec(ctx, `
+		UPDATE platform.operation_membership
+		   SET valid_from = clock_timestamp() - interval '2 hours', valid_until = clock_timestamp() - interval '1 second'
+		 WHERE company_id = $1 AND company_operation_id = $2 AND person_id = $3
+	`, fixture.CompanyA, fixture.OperationA, fixture.PersonADriver); err != nil {
+		t.Fatal(err)
+	}
+	expectEnrollmentRejected("expired operation membership", fixture.CompanyA, &fixture.OperationA)
+	if _, err := adminPool.Exec(ctx, `
+		UPDATE platform.operation_membership
+		   SET valid_from = clock_timestamp() - interval '1 hour', valid_until = NULL
+		 WHERE company_id = $1 AND company_operation_id = $2 AND person_id = $3
+	`, fixture.CompanyA, fixture.OperationA, fixture.PersonADriver); err != nil {
+		t.Fatal(err)
 	}
 	supervisorToken := makeHash(0xC1)
 	supervisorPolicy, err := applicationauth.PolicyFor(applicationauth.AdministrativeSession)
@@ -180,6 +213,7 @@ func testDriverMobileAuth(t *testing.T, ctx context.Context, repository *OnlineA
 	if err != nil || resolved.SessionPolicy != applicationauth.DriverSession || resolved.ActiveCompanyID == nil || *resolved.ActiveCompanyID != fixture.CompanyA {
 		t.Fatalf("driver session did not resolve through the online boundary: session=%+v err=%v", resolved, err)
 	}
+	assertSessionIdleWindow(t, resolved.LastSeenAt, resolved.IdleExpiresAt, time.Hour)
 	if contexts, err := repository.ListDriverAuthorizedContexts(ctx, applicationauth.HashSessionToken(result.Token)); err != nil || len(contexts) != 1 || contexts[0].CompanyID != fixture.CompanyA {
 		t.Fatalf("company A context was not isolated: contexts=%+v err=%v", contexts, err)
 	}
@@ -205,6 +239,33 @@ func testDriverMobileAuth(t *testing.T, ctx context.Context, repository *OnlineA
 		t.Fatal("operation membership revocation did not invalidate DRIVER resolution")
 	}
 	if _, err := adminPool.Exec(ctx, `UPDATE platform.operation_membership SET status = 'ACTIVE' WHERE company_id = $1 AND company_operation_id = $2 AND person_id = $3`, fixture.CompanyA, fixture.OperationA, fixture.PersonADriver); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminPool.Exec(ctx, `
+		UPDATE platform.operation_membership
+		   SET valid_from = clock_timestamp() + interval '1 hour', valid_until = NULL
+		 WHERE company_id = $1 AND company_operation_id = $2 AND person_id = $3
+	`, fixture.CompanyA, fixture.OperationA, fixture.PersonADriver); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.ResolveHTTPSession(ctx, applicationauth.HashSessionToken(result.Token)); err == nil {
+		t.Fatal("future operation membership did not invalidate DRIVER resolution")
+	}
+	if _, err := adminPool.Exec(ctx, `
+		UPDATE platform.operation_membership
+		   SET valid_from = clock_timestamp() - interval '2 hours', valid_until = clock_timestamp() - interval '1 second'
+		 WHERE company_id = $1 AND company_operation_id = $2 AND person_id = $3
+	`, fixture.CompanyA, fixture.OperationA, fixture.PersonADriver); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.ResolveHTTPSession(ctx, applicationauth.HashSessionToken(result.Token)); err == nil {
+		t.Fatal("expired operation membership did not invalidate DRIVER resolution")
+	}
+	if _, err := adminPool.Exec(ctx, `
+		UPDATE platform.operation_membership
+		   SET valid_from = clock_timestamp() - interval '1 hour', valid_until = NULL
+		 WHERE company_id = $1 AND company_operation_id = $2 AND person_id = $3
+	`, fixture.CompanyA, fixture.OperationA, fixture.PersonADriver); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := adminPool.Exec(ctx, `UPDATE platform.authenticator_credential SET status = 'REVOKED', revoked_at = clock_timestamp() WHERE id = $1`, credential.RecordID); err != nil {
@@ -251,6 +312,14 @@ func testDriverMobileAuth(t *testing.T, ctx context.Context, repository *OnlineA
 	}
 	if _, err := driverService.FinishLogin(ctx, challengeID, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(credentialPayload)), proof, "test-driver", "192.0.2.55:443"); err == nil {
 		t.Fatal("driver login challenge replay was accepted")
+	}
+}
+
+func assertSessionIdleWindow(t *testing.T, lastSeenAt, idleExpiresAt time.Time, expected time.Duration) {
+	t.Helper()
+	remaining := idleExpiresAt.Sub(lastSeenAt)
+	if remaining < expected-5*time.Second || remaining > expected+5*time.Second {
+		t.Fatalf("unexpected idle timeout: got=%s expected=%s", remaining, expected)
 	}
 }
 

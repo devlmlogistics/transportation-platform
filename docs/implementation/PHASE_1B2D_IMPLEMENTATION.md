@@ -7,6 +7,7 @@ Estado de esta rama: [D] implementación para revisión; no se habilita ningún 
 - [V] Se reutilizan `Person`, `UserAccount`, `DriverProfile`, memberships, `AuthenticatorCredential`, `DeviceEnrollmentRequest`, `DeviceAuthorization` y `AuthSession`.
 - [V] Se agregó la migración `000012_driver_mobile_auth.sql`; las migraciones anteriores permanecen inmutables.
 - [V] La migración correctiva `000013_driver_auth_boundary.sql` separa la emisión final en `tp_driver_auth_runtime` y conserva `tp_auth_runtime` sin EXECUTE sobre `complete_driver_login`.
+- [V] La comprobación no destructiva de `transportation_platform_dev` confirmó `current_user=tp_migrator` y no encontró las versiones Goose 12 ni 13; por ello esta corrección se aplica directamente en `000013` y no se crea `000014`. Si 000013 se aplica en un entorno persistente antes de este commit, la misma lógica deberá publicarse como migración posterior.
 - [V] Se agregó una sesión `DRIVER_ACTIVATION` de 15 minutos idle/1 hora absoluta, emitida sólo después de consumir un grant de verificación de contraseña. Esta sesión no tiene empresa, operación ni autorización de dispositivo y sólo permite solicitar y completar el enrolamiento aprobado.
 - [D] Se agregó login recurrente WebAuthn para una instalación previamente autorizada. La sesión final se crea exclusivamente en `complete_driver_login`, derivando cuenta, empresa, operación, credencial y dispositivo desde el challenge.
 - [V] Se agregó una prueba independiente de posesión de instalación con ECDSA P-256. El navegador persiste el objeto `CryptoKey` no exportable y su identificador en IndexedDB; nunca persiste tokens de sesión.
@@ -45,6 +46,11 @@ La emisión de la sesión operativa cruza una frontera adicional: `tp_auth_runti
 
 La clave pública de instalación usa `ECDSA_P256_SHA256`. El navegador firma `SHA-256("tp-driver-possession\\0" || challenge_hash || installation_id)` y Go verifica la firma antes de la función SQL. La clave privada Web Crypto se genera como no exportable y se guarda mediante structured clone en IndexedDB. Al cerrar/reabrir o recargar se recupera el mismo `installation_id`; eliminar los datos del sitio, limpiar IndexedDB o cambiar de teléfono elimina la clave local y requiere una nueva activación y aprobación. IndexedDB no es atestación ni garantía de hardware.
 
+Archivos para revisión de seguridad:
+
+- [V] Configuración y uso de `tp_driver_auth_runtime`: `internal/config/config.go`, `internal/platform/postgres/online_pools.go`, `internal/platform/postgres/online_auth.go`, `internal/platform/testdb/harness.go` y `cmd/platform/main.go`.
+- [V] Persistencia de `CryptoKey` en IndexedDB: `web/src/webauthn.ts`; integración de recuperación en la interfaz: `web/src/App.tsx`.
+
 Esto no es atestación de hardware. Una passkey sincronizada tampoco prueba que el teléfono físico sea el único dispositivo. La asociación es una autorización de instalación revocable más una prueba criptográfica independiente; el riesgo residual de clonación/exportación de la instalación queda documentado y no se presenta como garantía de hardware.
 
 ## Endpoints
@@ -72,7 +78,7 @@ Todos los mutating endpoints existentes conservan cookies HttpOnly, CSRF, SameSi
 ## Pruebas y límites actuales
 
 - [V] Se agregan contratos de repositorio, rate limiting por identificador/instalación y una prueba criptográfica completa en el harness PostgreSQL 16 efímero: assertion WebAuthn válida, posesión ECDSA, TTL de sesión, consumo único, activación/enrolamiento/aprobación y rechazo de emisión desde `tp_runtime` y `tp_auth_runtime`.
-- [V] El harness verifica políticas de activación, membresías, revocación, expiración, credencial revocada, firma de instalación inválida, challenge reutilizado, aislamiento de roles y resolución de la sesión operativa.
+- [V] El harness verifica políticas de activación, membresías y ventanas temporales, revocación, expiración por inactividad/absoluta, credencial revocada, firma de instalación inválida, challenge reutilizado, aislamiento de roles y resolución de la sesión operativa.
 - [V] La suite validada en esta rama incluye `go test ./...`, `go vet ./...`, `pnpm --dir web typecheck`, `pnpm --dir web test -- --run`, `pnpm --dir web build`, `docker compose config --quiet` y `docker build`.
 - [P] Antes de cualquier Goose UP en DEV se debe verificar usuario `tp_migrator`, base `transportation_platform_dev`, esquema, versión y ausencia de operaciones destructivas. Esta rama no hace bootstrap ni crea usuarios reales.
 

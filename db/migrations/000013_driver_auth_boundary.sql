@@ -184,7 +184,10 @@ BEGIN
         JOIN platform.company_operation co ON co.id = om.company_operation_id
                                            AND co.company_id = om.company_id
         WHERE om.company_id = p_company_id AND om.company_operation_id = p_company_operation_id
-          AND om.person_id = v_person AND om.status = 'ACTIVE' AND co.status = 'ACTIVE'
+          AND om.person_id = v_person AND om.status = 'ACTIVE'
+          AND om.valid_from <= v_now
+          AND (om.valid_until IS NULL OR om.valid_until > v_now)
+          AND co.status = 'ACTIVE'
     ) THEN RETURN; END IF;
     INSERT INTO platform.device_enrollment_request(
         id, correlation_code, user_account_id, company_id, company_operation_id,
@@ -301,29 +304,31 @@ BEGIN
            OR session_row.active_operation_id IS NOT NULL
            OR session_row.authentication_level <> 'PASSWORD' THEN RETURN; END IF;
         v_idle_seconds := 900;
-    ELSIF session_row.session_policy = 'DRIVER' AND NOT EXISTS (
-        SELECT 1 FROM platform.device_authorization da
-        JOIN platform.company c ON c.id = da.company_id
-        WHERE da.id = session_row.device_authorization_id
-          AND da.user_account_id = session_row.user_account_id
-          AND da.status = 'ACTIVE' AND (da.expires_at IS NULL OR da.expires_at > v_now)
-          AND c.status = 'ACTIVE'
-          AND EXISTS (
-              SELECT 1 FROM platform.company_membership cm
-              WHERE cm.company_id = da.company_id
-                AND cm.person_id = (SELECT ua2.person_id FROM platform.user_account ua2 WHERE ua2.id = session_row.user_account_id)
-                AND cm.status = 'ACTIVE' AND cm.valid_from <= v_now
-                AND (cm.valid_until IS NULL OR cm.valid_until > v_now)
-          )
-          AND (da.company_operation_id IS NULL OR EXISTS (
-              SELECT 1 FROM platform.operation_membership om
-              JOIN platform.company_operation co ON co.company_id = om.company_id AND co.id = om.company_operation_id
-              WHERE om.company_id = da.company_id AND om.company_operation_id = da.company_operation_id
-                AND om.person_id = (SELECT ua3.person_id FROM platform.user_account ua3 WHERE ua3.id = session_row.user_account_id)
-                AND om.status = 'ACTIVE' AND om.valid_from <= v_now
-                AND (om.valid_until IS NULL OR om.valid_until > v_now) AND co.status = 'ACTIVE'
-          ))
-    ) THEN RETURN;
+    ELSIF session_row.session_policy = 'DRIVER' THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM platform.device_authorization da
+            JOIN platform.company c ON c.id = da.company_id
+            WHERE da.id = session_row.device_authorization_id
+              AND da.user_account_id = session_row.user_account_id
+              AND da.status = 'ACTIVE' AND (da.expires_at IS NULL OR da.expires_at > v_now)
+              AND c.status = 'ACTIVE'
+              AND EXISTS (
+                  SELECT 1 FROM platform.company_membership cm
+                  WHERE cm.company_id = da.company_id
+                    AND cm.person_id = (SELECT ua2.person_id FROM platform.user_account ua2 WHERE ua2.id = session_row.user_account_id)
+                    AND cm.status = 'ACTIVE' AND cm.valid_from <= v_now
+                    AND (cm.valid_until IS NULL OR cm.valid_until > v_now)
+              )
+              AND (da.company_operation_id IS NULL OR EXISTS (
+                  SELECT 1 FROM platform.operation_membership om
+                  JOIN platform.company_operation co ON co.company_id = om.company_id AND co.id = om.company_operation_id
+                  WHERE om.company_id = da.company_id AND om.company_operation_id = da.company_operation_id
+                    AND om.person_id = (SELECT ua3.person_id FROM platform.user_account ua3 WHERE ua3.id = session_row.user_account_id)
+                    AND om.status = 'ACTIVE' AND om.valid_from <= v_now
+                    AND (om.valid_until IS NULL OR om.valid_until > v_now) AND co.status = 'ACTIVE'
+              ))
+        ) THEN RETURN; END IF;
+        v_idle_seconds := 3600;
     ELSE
         v_idle_seconds := 1800;
     END IF;
