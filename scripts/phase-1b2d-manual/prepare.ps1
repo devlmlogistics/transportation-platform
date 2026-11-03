@@ -18,10 +18,77 @@ function Require-Secret([string]$Name) {
     return $value
 }
 
-function Assert-DockerSuccess([string]$Operation) {
+function Assert-NativeSuccess([string]$Operation) {
     if ($LASTEXITCODE -ne 0) {
         throw "$Operation failed."
     }
+}
+
+function Get-JsonPropertyValue($Object, [string]$Name) {
+    if ($null -eq $Object) {
+        return $null
+    }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $null
+    }
+    return $property.Value
+}
+
+function Get-VerifiedVolume() {
+    $raw = (docker volume inspect --format '{{json .}}' $Volume | Out-String).Trim()
+    Assert-NativeSuccess "Inspect isolated volume"
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        throw "Isolated volume $Volume was not found after creation."
+    }
+    $spec = $raw | ConvertFrom-Json
+    $label = [string](Get-JsonPropertyValue $spec.Labels $ManualLabel.Split('=')[0])
+    if ($label -ne "phase-1b2d") {
+        throw "Existing volume $Volume is not owned by this manual-test procedure."
+    }
+    return $spec
+}
+
+function Get-VerifiedContainer() {
+    $raw = (docker inspect --format '{{json .}}' $Container | Out-String).Trim()
+    Assert-NativeSuccess "Inspect isolated container"
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        throw "Isolated container $Container was not found."
+    }
+    $spec = $raw | ConvertFrom-Json
+    $label = [string](Get-JsonPropertyValue $spec.Config.Labels $ManualLabel.Split('=')[0])
+    if ($label -ne "phase-1b2d") {
+        throw "Existing container $Container is not owned by this manual-test procedure."
+    }
+    if ([string]$spec.Config.Image -ne "postgres:16.8-alpine3.21") {
+        throw "Container $Container does not use the expected PostgreSQL image."
+    }
+    if (@($spec.Config.Env) -notcontains "POSTGRES_DB=$Database" -or
+        @($spec.Config.Env) -notcontains "POSTGRES_USER=postgres") {
+        throw "Container $Container does not target the expected manual database."
+    }
+
+    $mountMatches = @($spec.Mounts | Where-Object {
+        $_.Type -eq "volume" -and
+        $_.Name -eq $Volume -and
+        $_.Destination -eq "/var/lib/postgresql/data"
+    })
+    if ($mountMatches.Count -ne 1) {
+        throw "Container $Container is not attached to the expected isolated volume."
+    }
+
+    $portProperty = @($spec.HostConfig.PortBindings.PSObject.Properties |
+        Where-Object { $_.Name -eq "5432/tcp" })
+    $portMatches = @()
+    if ($portProperty.Count -eq 1) {
+        $portMatches = @($portProperty[0].Value | Where-Object {
+            $_.HostIp -eq "127.0.0.1" -and $_.HostPort -eq [string]$HostPort
+        })
+    }
+    if ($portMatches.Count -ne 1) {
+        throw "Container $Container does not expose PostgreSQL only on 127.0.0.1:$HostPort."
+    }
+    return $spec
 }
 
 function SqlQuote([string]$Value) {
@@ -38,38 +105,31 @@ $bootstrapPassword = Require-Secret "PHASE_1B2D_BOOTSTRAP_PASSWORD"
 Push-Location $RepoRoot
 try {
     docker version --format "{{.Server.Version}}" | Out-Null
-    Assert-DockerSuccess "Docker daemon check"
+    Assert-NativeSuccess "Docker daemon check"
 
     $volumeNames = @(docker volume ls --format "{{.Name}}" --filter "name=^$Volume$")
+    Assert-NativeSuccess "List isolated volumes"
     if ($volumeNames -notcontains $Volume) {
         docker volume create --label $ManualLabel $Volume | Out-Null
-        Assert-DockerSuccess "Create isolated volume"
-    } else {
-        $volumeLabel = docker volume inspect --format '{{ index .Labels "transportation-platform.manual" }}' $Volume
-        Assert-DockerSuccess "Inspect isolated volume"
-        if ($volumeLabel -ne "phase-1b2d") {
-            throw "Existing volume $Volume is not owned by this manual-test procedure."
-        }
+        Assert-NativeSuccess "Create isolated volume"
     }
+    Get-VerifiedVolume | Out-Null
 
     $containerNames = @(docker ps -a --format "{{.Names}}" --filter "name=^/$Container$")
+    Assert-NativeSuccess "List isolated containers"
     if ($containerNames -contains $Container) {
-        $containerLabel = docker inspect --format '{{ index .Config.Labels "transportation-platform.manual" }}' $Container
-        Assert-DockerSuccess "Inspect isolated container"
-        if ($containerLabel -ne "phase-1b2d") {
-            throw "Existing container $Container is not owned by this manual-test procedure."
-        }
-        $running = docker inspect --format '{{.State.Running}}' $Container
-        if ($running -ne "true") {
+        $containerSpec = Get-VerifiedContainer
+        if (-not [bool]$containerSpec.State.Running) {
             docker start $Container | Out-Null
-            Assert-DockerSuccess "Start isolated container"
+            Assert-NativeSuccess "Start isolated container"
         }
     } else {
         docker run --name $Container --label $ManualLabel --restart no `
             -e "POSTGRES_DB=$Database" -e "POSTGRES_USER=postgres" -e "POSTGRES_PASSWORD=$postgresPassword" `
             -p "127.0.0.1:${HostPort}:5432" -v "${Volume}:/var/lib/postgresql/data" `
             -d postgres:16.8-alpine3.21 | Out-Null
-        Assert-DockerSuccess "Create isolated PostgreSQL container"
+        Assert-NativeSuccess "Create isolated PostgreSQL container"
+        Get-VerifiedContainer | Out-Null
     }
 
     $ready = $false
@@ -91,7 +151,7 @@ try {
             -v runtime_role=tp_runtime -v auth_runtime_role=tp_auth_runtime `
             -v driver_auth_runtime_role=tp_driver_auth_runtime -v bootstrap_runtime_role=tp_bootstrap_runtime `
             -v security_writer_role=tp_security_audit_writer -v schema_name=platform -f -
-    Assert-DockerSuccess "Bootstrap isolated PostgreSQL roles"
+    Assert-NativeSuccess "Bootstrap isolated PostgreSQL roles"
 
     $passwordSQL = @"
 ALTER ROLE tp_migrator PASSWORD $(SqlQuote $migratorPassword);
@@ -100,15 +160,15 @@ ALTER ROLE tp_auth_runtime PASSWORD $(SqlQuote $authPassword);
 ALTER ROLE tp_driver_auth_runtime PASSWORD $(SqlQuote $driverAuthPassword);
 ALTER ROLE tp_bootstrap_runtime PASSWORD $(SqlQuote $bootstrapPassword);
 "@
-    docker exec -e "PGPASSWORD=$postgresPassword" $Container psql -X -q -v ON_ERROR_STOP=1 `
-        -U postgres -d $Database -c $passwordSQL | Out-Null
-    Assert-DockerSuccess "Set isolated role passwords"
+    $passwordSQL | docker exec -i -e "PGPASSWORD=$postgresPassword" $Container psql -X -q -v ON_ERROR_STOP=1 `
+        -U postgres -d $Database -f -
+    Assert-NativeSuccess "Set isolated role passwords"
 
-    $env:PHASE_1B2D_MIGRATOR_DSN = "postgres://tp_migrator:$([Uri]::EscapeDataString($migratorPassword))@127.0.0.1:${HostPort}/$Database?sslmode=disable"
+    $env:PHASE_1B2D_MIGRATOR_DSN = "postgres://tp_migrator:$([Uri]::EscapeDataString($migratorPassword))@127.0.0.1:${HostPort}/${Database}?sslmode=disable"
     & go run .\scripts\phase-1b2d-manual\migrate up
-    Assert-DockerSuccess "Apply Goose UP migrations"
+    Assert-NativeSuccess "Apply Goose UP migrations"
     $version = (& go run .\scripts\phase-1b2d-manual\migrate version).Trim()
-    Assert-DockerSuccess "Read Goose version"
+    Assert-NativeSuccess "Read Goose version"
     if ($version -ne "13") {
         throw "Expected isolated manual database at Goose version 13, got $version."
     }
@@ -126,7 +186,7 @@ SELECT platform.goose_db_version.version_id
 "@
     docker exec -e "PGPASSWORD=$migratorPassword" $Container psql -X -q -v ON_ERROR_STOP=1 `
         -U tp_migrator -d $Database -Atc $verificationSQL
-    Assert-DockerSuccess "Verify isolated PostgreSQL roles and Goose version"
+    Assert-NativeSuccess "Verify isolated PostgreSQL roles and Goose version"
 } finally {
     Pop-Location
 }

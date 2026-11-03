@@ -15,7 +15,7 @@ function Require-Secret([string]$Name) {
     return $value
 }
 
-function Assert-DockerSuccess([string]$Operation) {
+function Assert-NativeSuccess([string]$Operation) {
     if ($LASTEXITCODE -ne 0) {
         throw "$Operation failed."
     }
@@ -26,7 +26,7 @@ function Get-PasswordMaterial([string]$Password) {
     try {
         $env:PHASE_1B2D_PASSWORD = $Password
         $raw = @(& go run .\scripts\phase-1b2d-manual\hash-password)
-        Assert-DockerSuccess "Generate local Argon2id fixture material"
+        Assert-NativeSuccess "Generate local Argon2id fixture material"
         return (($raw -join [Environment]::NewLine) | ConvertFrom-Json)
     } finally {
         if ($null -eq $previous) {
@@ -48,9 +48,14 @@ $driverPassword = Require-Secret "PHASE_1B2D_DRIVER_PASSWORD"
 Push-Location $RepoRoot
 try {
     $label = docker inspect --format '{{ index .Config.Labels "transportation-platform.manual" }}' $Container
-    Assert-DockerSuccess "Inspect isolated manual container"
+    Assert-NativeSuccess "Inspect isolated manual container"
     if ($label -ne "phase-1b2d") {
         throw "Container $Container is not owned by this manual-test procedure."
+    }
+    $running = docker inspect --format '{{.State.Running}}' $Container
+    Assert-NativeSuccess "Inspect isolated manual container state"
+    if ($running -ne "true") {
+        throw "Container $Container is not running. Run prepare.ps1 before loading the fixture."
     }
 
     $supervisorMaterial = Get-PasswordMaterial $supervisorPassword
@@ -62,8 +67,8 @@ try {
     $sql = $sql.Replace("__DRIVER_PARAMETERS__", (SqlQuote ([string]$driverMaterial.parameters)))
 
     $sql | docker exec -i -e "PGPASSWORD=$migratorPassword" $Container psql -X -q -v ON_ERROR_STOP=1 `
-        -U tp_migrator -d transportation_platform_phase_1b2d -f -
-    Assert-DockerSuccess "Load synthetic manual fixture"
+        -U tp_migrator -d $Database -f -
+    Assert-NativeSuccess "Load synthetic manual fixture"
 } finally {
     Pop-Location
 }

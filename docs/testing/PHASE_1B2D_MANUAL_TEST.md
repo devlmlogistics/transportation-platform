@@ -13,7 +13,7 @@ Estado: guía preparada para ejecución supervisada. No ejecuta bootstrap, no mo
 
 ## Requisitos previos
 
-Windows 11 con Docker Desktop, Go 1.25, Node/pnpm, Chrome actualizado y el repositorio en:
+Windows 11 con Docker Desktop, PowerShell 5.1 o PowerShell 7, Go 1.25, Node/pnpm, Chrome actualizado y el repositorio en:
 
 ```powershell
 Set-Location 'C:\Users\hecto\OneDrive\Documentos\ChatGPT\Transportation-Platform'
@@ -22,6 +22,8 @@ git status --short
 ```
 
 El único cambio preexistente esperado es `.gitignore`. No deben aparecer archivos `.env`, contraseñas, dumps ni cambios en proyectos heredados.
+
+Los scripts usan sintaxis compatible con Windows PowerShell 5.1 y PowerShell 7. Las etiquetas Docker con puntos o guiones se leen mediante `index`, no mediante acceso directo a propiedades. Las cadenas de conexión delimitan `${Database}` antes de `?sslmode=disable` y escapan el componente de contraseña con `Uri.EscapeDataString`. No se imprimen contraseñas ni DSN.
 
 ## 1. Variables privadas
 
@@ -52,6 +54,33 @@ Set-PrivateEnv PHASE_1B2D_DRIVER_PASSWORD
 ```
 
 Los scripts crean o reutilizan sólo el contenedor/volumen con la etiqueta `transportation-platform.manual=phase-1b2d`, publican `127.0.0.1:55433`, ejecutan `db/bootstrap/platform_roles.sql` y Goose UP hasta versión 13. No reutilizan `pgdb16.8` ni la base manual de 1B.2-C.
+
+`prepare.ps1` valida antes de reutilizar un recurso existente la etiqueta, imagen `postgres:16.8-alpine3.21`, base configurada, volumen montado y publicación exacta `127.0.0.1:55433`. Si alguno no coincide, se detiene sin eliminar ni corregir recursos. La carga de contraseñas de roles se entrega por stdin a `psql`, no como argumento `-c`.
+
+### Reanudar después de una ejecución parcial
+
+Si el contenedor y el volumen ya existen, no se deben eliminar ni recrear. Después de volver a configurar las variables privadas en la misma sesión de PowerShell, el comando exacto para reanudar es:
+
+```powershell
+Set-Location 'C:\Users\hecto\OneDrive\Documentos\ChatGPT\Transportation-Platform'
+.\scripts\phase-1b2d-manual\prepare.ps1
+```
+
+El script verifica la identidad de los recursos, inicia el contenedor si estaba detenido, reutiliza los roles y ejecuta sólo las migraciones Goose pendientes. La versión se confirma con:
+
+```powershell
+$env:PHASE_1B2D_MIGRATOR_DSN = 'postgres://tp_migrator:<contraseña-privada>@127.0.0.1:55433/transportation_platform_phase_1b2d?sslmode=disable'
+go run .\scripts\phase-1b2d-manual\migrate version
+```
+
+El valor anterior es una plantilla: no se debe pegar una contraseña real en el documento, en el historial de comandos ni en un archivo. `seed-fixture.ps1` se ejecuta por separado y no forma parte de la reanudación de `prepare.ps1`; en esta preparación no se ejecutó.
+
+Las etiquetas y la identidad pueden comprobarse sin modificar recursos:
+
+```powershell
+docker inspect --format '{{ index .Config.Labels "transportation-platform.manual" }}' transportation-platform-phase-1b2d-pg
+docker volume inspect --format '{{ index .Labels "transportation-platform.manual" }}' transportation-platform-phase-1b2d-pgdata
+```
 
 El fixture sintético crea un administrador de plataforma como identidad/rol sin contraseña de login, un supervisor `supervisor-test@example.test` y un conductor `driver-test@example.test`. El supervisor recibe `SUPERVISOR` en DRAYAGE; el conductor recibe `DriverProfile` y `DRIVER`. Los hashes Argon2id se generan localmente.
 
@@ -254,9 +283,13 @@ Detener el backend con Ctrl+C y limpiar sólo el entorno etiquetado:
 
 Los scripts verifican la etiqueta antes de detener o eliminar.
 
+`remove.ps1 -RemoveVolume` valida el contenedor, su montaje y la etiqueta del volumen antes de iniciar cualquier eliminación. No debe ejecutarse sobre el entorno manual existente durante esta auditoría.
+
 ## Resultados y pendientes
 
 - [V] Rutas, payloads y roles se obtuvieron del router, handlers y migraciones existentes.
 - [V] Los helpers preparan sólo el contenedor etiquetado, base sintética, roles mínimos y Goose 13.
+- [V] La auditoría de sólo lectura confirmó el contenedor y volumen manuales esperados, con imagen PostgreSQL 16.8, puerto `55433` y montaje dedicado; no se ejecutaron acciones de modificación sobre ellos.
+- [V] Se corrigieron la interpolación `${Database}` antes de `?sslmode=disable`, el acceso a etiquetas Docker y la validación de reejecución parcial.
 - [P] La ejecución real en Chrome, autenticador virtual, User Verification y supervisión de cookies/IndexedDB siguen siendo manuales.
 - [P] El step-up del supervisor no es actualmente un gate de aprobación.
