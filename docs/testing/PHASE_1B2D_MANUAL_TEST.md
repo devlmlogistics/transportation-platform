@@ -475,3 +475,70 @@ Después de la reparación, comprobar en sólo lectura que existe una única aut
 **[D]** La reparación manual queda limitada adicionalmente a la autorización `4fcde28e-4ef1-406e-aa26-c5c679e4a749`, asociada a la instalación `78f5e1f4-4f86-4e5f-8adf-955cb7d23337`. El UUID exacto se verifica en la precondición, en el `SELECT ... FOR UPDATE` y en el `UPDATE`; coincidir sólo en instalación, usuario, empresa y operación no es suficiente.
 
 **[V]** En PostgreSQL 16 efímero: UUID correcto completó una única reparación y auditoría; UUID diferente terminó con `ROLLBACK`, sin modificar expiración ni crear auditoría; una segunda ejecución rechazó sin renovar ni auditar; y base, instalación, usuario, estado, passkey o solicitud incorrectos continuaron rechazándose. La base manual no debe usarse para estas pruebas.
+
+## Resultados finales de cierre de Fase 1B.2-D
+
+### Pruebas manuales reales
+
+**[V]** Resultados reportados durante la ejecución supervisada en Chrome con autenticador virtual CTAP2, User Verification habilitado, datos sintéticos, PostgreSQL 16 aislado en `transportation_platform_phase_1b2d`, puerto `55433`, backend en `http://localhost:18080` y Goose versión 15:
+
+| Prueba | Resultado |
+|---|---|
+| Preparación y recuperación de instalación desde IndexedDB | PASS |
+| CryptoKey no exportable persistida | PASS |
+| Login inicial del conductor | PASS |
+| Solicitud de enrolamiento | PASS |
+| Aprobación por supervisor | PASS |
+| Registro WebAuthn con User Verification | PASS |
+| Login recurrente WebAuthn y posesión ECDSA | PASS |
+| Creación y resolución de sesión DRIVER | PASS |
+| `GET /api/v1/driver/auth/me` | HTTP 200 |
+| `GET /api/v1/driver/auth/contexts` | HTTP 200 |
+| Revocación por supervisor | HTTP 200, `REVOKED` |
+| Acceso con sesión DRIVER revocada | HTTP 401 |
+| Nuevo login con dispositivo revocado | HTTP 401 |
+
+Después de recargar la página fue necesario volver a introducir el identificador del conductor; la instalación y su clave se recuperaron desde IndexedDB. No se documentan credenciales, cookies, tokens ni claves privadas.
+
+### Validaciones automatizadas
+
+**[V]** La suite automatizada ejecutada para el cierre cubre Go, frontend y PostgreSQL 16 efímero. La ejecución no utiliza `transportation_platform_dev`, la base manual existente ni volúmenes persistentes:
+
+- `go test ./... -count=1`: PASS.
+- `go vet ./...`: PASS.
+- `go build ./cmd/platform`: PASS.
+- `pnpm --dir web typecheck`: PASS.
+- `pnpm --dir web test`: PASS, 5 pruebas.
+- `pnpm --dir web build`: PASS.
+- `docker compose config --quiet`: PASS.
+- `docker build`: PASS.
+- Migraciones PostgreSQL 16 efímeras `up/down/up` hasta Goose 15: PASS.
+- `git diff --check`: PASS.
+
+Las pruebas manuales y los scripts de reparación histórica no forman parte del flujo productivo. Los scripts manuales verifican contenedor, volumen, base, puerto y etiquetas antes de operar; no deben ejecutarse contra bases productivas.
+
+### Defectos encontrados durante la fase
+
+**[V]** Se corrigieron los siguientes problemas sin relajar las garantías de seguridad:
+
+1. Interpolación de plantillas Docker en PowerShell; se sustituyó por inspección JSON validada.
+2. Carga del fixture bloqueada por RLS; se agregó una frontera exclusiva del fixture sin modificar RLS productivo.
+3. UUID cero en `DeviceAuthorization`; se corrigieron generación, frontera SQL y reparación controlada.
+4. Vencimiento heredado incorrectamente desde el enrolamiento; se separó la política propia de la autorización.
+5. React interpretaba incorrectamente el sobre `options.publicKey`; se corrigió el desempaquetado y la conversión Base64URL.
+6. Mensajes genéricos dificultaban diagnosticar el navegador; se agregaron diagnósticos de etapa sólo en desarrollo.
+7. El login recurrente requiere volver a introducir el identificador después de recargar; queda como mejora de experiencia, sin persistir tokens ni contraseñas.
+
+Las migraciones finales de esta fase son `000012_driver_mobile_auth.sql`, `000013_driver_auth_boundary.sql`, `000014_webauthn_device_authorization_uuid.sql` y `000015_device_authorization_expiry.sql`. Las migraciones previas permanecen inmutables.
+
+### Pendientes antes de producción
+
+**[P]** La vigencia provisional de `DeviceAuthorization` es de 24 horas, configurable entre 1 hora y 7 días; requiere decisión operativa.
+
+**[P]** Aprobar o revocar dispositivos aún no exige un step-up WebAuthn adicional; debe evaluarse antes de habilitar estas operaciones en producción.
+
+**[P]** Debe mejorarse la experiencia para no pedir nuevamente el identificador después de una recarga, sin almacenar credenciales ni tokens persistentes.
+
+**[P]** Falta definir recuperación por pérdida, sustitución o reinstalación del teléfono.
+
+**[P]** La aprobación del supervisor se ejecutó mediante API/DevTools; queda pendiente una interfaz administrativa operativa.
