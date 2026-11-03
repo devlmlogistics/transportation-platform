@@ -75,11 +75,25 @@ go run .\scripts\phase-1b2d-manual\migrate version
 
 El valor anterior es una plantilla: no se debe pegar una contraseña real en el documento, en el historial de comandos ni en un archivo. `seed-fixture.ps1` se ejecuta por separado y no forma parte de la reanudación de `prepare.ps1`; en esta preparación no se ejecutó.
 
-Las etiquetas y la identidad pueden comprobarse sin modificar recursos:
+Cuando Goose ya esté en 13 y se autorice cargar los datos sintéticos, la reanudación exacta de `seed-fixture.ps1` —sin repetir migraciones— es:
 
 ```powershell
-docker inspect --format '{{ index .Config.Labels "transportation-platform.manual" }}' transportation-platform-phase-1b2d-pg
-docker volume inspect --format '{{ index .Labels "transportation-platform.manual" }}' transportation-platform-phase-1b2d-pgdata
+Set-Location 'C:\Users\hecto\OneDrive\Documentos\ChatGPT\Transportation-Platform'
+.\scripts\phase-1b2d-manual\seed-fixture.ps1
+```
+
+Las variables `PHASE_1B2D_MIGRATOR_PASSWORD`, `PHASE_1B2D_SUPERVISOR_PASSWORD` y `PHASE_1B2D_DRIVER_PASSWORD` deben estar configuradas previamente sólo en el proceso PowerShell. El script vuelve a comprobar contenedor, volumen, base, puerto, etiqueta y estado antes de cargar el fixture.
+
+Las etiquetas y la identidad pueden comprobarse sin modificar recursos. La inspección usa JSON; no se usan plantillas Docker `--format`:
+
+```powershell
+$containerDetails = @(docker inspect 'transportation-platform-phase-1b2d-pg' | ConvertFrom-Json)
+if ($LASTEXITCODE -ne 0 -or $containerDetails.Count -ne 1) { throw 'Inspección de contenedor inválida' }
+$containerDetails[0].Config.Labels.'transportation-platform.manual'
+
+$volumeDetails = @(docker volume inspect 'transportation-platform-phase-1b2d-pgdata' | ConvertFrom-Json)
+if ($LASTEXITCODE -ne 0 -or $volumeDetails.Count -ne 1) { throw 'Inspección de volumen inválida' }
+$volumeDetails[0].Labels.'transportation-platform.manual'
 ```
 
 El fixture sintético crea un administrador de plataforma como identidad/rol sin contraseña de login, un supervisor `supervisor-test@example.test` y un conductor `driver-test@example.test`. El supervisor recibe `SUPERVISOR` en DRAYAGE; el conductor recibe `DriverProfile` y `DRIVER`. Los hashes Argon2id se generan localmente.
@@ -291,5 +305,7 @@ Los scripts verifican la etiqueta antes de detener o eliminar.
 - [V] Los helpers preparan sólo el contenedor etiquetado, base sintética, roles mínimos y Goose 13.
 - [V] La auditoría de sólo lectura confirmó el contenedor y volumen manuales esperados, con imagen PostgreSQL 16.8, puerto `55433` y montaje dedicado; no se ejecutaron acciones de modificación sobre ellos.
 - [V] Se corrigieron la interpolación `${Database}` antes de `?sslmode=disable`, el acceso a etiquetas Docker y la validación de reejecución parcial.
+- [V] Las inspecciones de contenedores y volúmenes de los cuatro scripts usan la salida JSON de Docker y comprueban el código de salida antes de `ConvertFrom-Json`.
+- [V] El helper compartido rechaza etiquetas, nombres, montajes y puertos incorrectos; se probó contra el entorno existente y con variantes negativas en memoria.
 - [P] La ejecución real en Chrome, autenticador virtual, User Verification y supervisión de cookies/IndexedDB siguen siendo manuales.
 - [P] El step-up del supervisor no es actualmente un gate de aprobación.

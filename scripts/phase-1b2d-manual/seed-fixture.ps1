@@ -5,7 +5,13 @@ Set-StrictMode -Version Latest
 
 $Container = "transportation-platform-phase-1b2d-pg"
 $Database = "transportation_platform_phase_1b2d"
+$Volume = "transportation-platform-phase-1b2d-pgdata"
+$HostPort = 55433
+$ManualLabelKey = "transportation-platform.manual"
+$ManualLabelValue = "phase-1b2d"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+
+. (Join-Path $PSScriptRoot "docker-inspect.ps1")
 
 function Require-Secret([string]$Name) {
     $value = [Environment]::GetEnvironmentVariable($Name, "Process")
@@ -13,12 +19,6 @@ function Require-Secret([string]$Name) {
         throw "$Name must be configured in the private process environment."
     }
     return $value
-}
-
-function Assert-NativeSuccess([string]$Operation) {
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Operation failed."
-    }
 }
 
 function Get-PasswordMaterial([string]$Password) {
@@ -47,16 +47,11 @@ $driverPassword = Require-Secret "PHASE_1B2D_DRIVER_PASSWORD"
 
 Push-Location $RepoRoot
 try {
-    $label = docker inspect --format '{{ index .Config.Labels "transportation-platform.manual" }}' $Container
-    Assert-NativeSuccess "Inspect isolated manual container"
-    if ($label -ne "phase-1b2d") {
-        throw "Container $Container is not owned by this manual-test procedure."
-    }
-    $running = docker inspect --format '{{.State.Running}}' $Container
-    Assert-NativeSuccess "Inspect isolated manual container state"
-    if ($running -ne "true") {
-        throw "Container $Container is not running. Run prepare.ps1 before loading the fixture."
-    }
+    $volumeSpec = Read-DockerInspect "volume" $Volume
+    Assert-ManualVolume $volumeSpec $Volume $ManualLabelKey $ManualLabelValue
+    $containerSpec = Read-DockerInspect "container" $Container
+    Assert-ManualContainer $containerSpec $Container $ManualLabelKey $ManualLabelValue `
+        "postgres:16.8-alpine3.21" $Database $Volume $HostPort -RequireRunning
 
     $supervisorMaterial = Get-PasswordMaterial $supervisorPassword
     $driverMaterial = Get-PasswordMaterial $driverPassword

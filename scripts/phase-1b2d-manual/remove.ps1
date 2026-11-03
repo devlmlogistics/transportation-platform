@@ -5,34 +5,20 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-function Assert-NativeSuccess([string]$Operation) {
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Operation failed."
-    }
-}
-
 $Container = "transportation-platform-phase-1b2d-pg"
 $Volume = "transportation-platform-phase-1b2d-pgdata"
+$Database = "transportation_platform_phase_1b2d"
+$HostPort = 55433
+$ManualLabelKey = "transportation-platform.manual"
+$ManualLabelValue = "phase-1b2d"
 
-$containerLabel = docker inspect --format '{{ index .Config.Labels "transportation-platform.manual" }}' $Container
-Assert-NativeSuccess "Inspect isolated manual container"
-if ($containerLabel -ne "phase-1b2d") {
-    throw "Refusing to remove an unverified or unrelated container."
-}
+. (Join-Path $PSScriptRoot "docker-inspect.ps1")
 
-$containerVolume = docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' $Container
-Assert-NativeSuccess "Inspect isolated container volume"
-if ($containerVolume -ne $Volume) {
-    throw "Container $Container is not attached to the expected isolated volume."
-}
-
-if ($RemoveVolume) {
-    $volumeLabel = docker volume inspect --format '{{ index .Labels "transportation-platform.manual" }}' $Volume
-    Assert-NativeSuccess "Inspect isolated manual volume"
-    if ($volumeLabel -ne "phase-1b2d") {
-        throw "Refusing to remove an unverified or unrelated volume."
-    }
-}
+$volumeSpec = Read-DockerInspect "volume" $Volume
+Assert-ManualVolume $volumeSpec $Volume $ManualLabelKey $ManualLabelValue
+$containerSpec = Read-DockerInspect "container" $Container
+Assert-ManualContainer $containerSpec $Container $ManualLabelKey $ManualLabelValue `
+    "postgres:16.8-alpine3.21" $Database $Volume $HostPort
 
 docker rm -f $Container | Out-Null
 Assert-NativeSuccess "Remove isolated manual-test container"
