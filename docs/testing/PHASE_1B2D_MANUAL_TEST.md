@@ -57,6 +57,10 @@ Los scripts crean o reutilizan sólo el contenedor/volumen con la etiqueta `tran
 
 `prepare.ps1` valida antes de reutilizar un recurso existente la etiqueta, imagen `postgres:16.8-alpine3.21`, base configurada, volumen montado y publicación exacta `127.0.0.1:55433`. Si alguno no coincide, se detiene sin eliminar ni corregir recursos. La carga de contraseñas de roles se entrega por stdin a `psql`, no como argumento `-c`.
 
+`seed-fixture.ps1` no usa `tp_migrator` para insertar datos: ese rol es migrador y está sujeto a `FORCE ROW LEVEL SECURITY`. Crea temporalmente un rol `tp_manual_fixture_<id>` sin `SUPERUSER`, `BYPASSRLS`, `CREATEDB`, `CREATEROLE` ni herencia; el rol sólo puede cambiar explícitamente a `tp_runtime` y `tp_owner` durante una transacción. El rol temporal se elimina siempre al terminar. Las políticas RLS existentes permanecen intactas.
+
+La causa del error original fue que `platform.company` tiene RLS y `FORCE ROW LEVEL SECURITY`; la política de creación aplica a `tp_runtime` sólo con `app.access_mode = 'PLATFORM'` y tenant nulo. `tp_migrator`, aunque sea miembro de `tp_owner` y tenga privilegio de tabla heredado, no coincide con esa política y no puede insertar. El fixture tampoco usa `SET row_security = off`. Para reintentos, las tablas con políticas runtime usan actualización seguida de `INSERT ... WHERE NOT EXISTS`; las tablas de autenticación usan las políticas existentes de `tp_owner` después de `SET ROLE tp_owner` y `app.auth_internal = '1'`.
+
 ### Reanudar después de una ejecución parcial
 
 Si el contenedor y el volumen ya existen, no se deben eliminar ni recrear. Después de volver a configurar las variables privadas en la misma sesión de PowerShell, el comando exacto para reanudar es:
@@ -82,7 +86,7 @@ Set-Location 'C:\Users\hecto\OneDrive\Documentos\ChatGPT\Transportation-Platform
 .\scripts\phase-1b2d-manual\seed-fixture.ps1
 ```
 
-Las variables `PHASE_1B2D_MIGRATOR_PASSWORD`, `PHASE_1B2D_SUPERVISOR_PASSWORD` y `PHASE_1B2D_DRIVER_PASSWORD` deben estar configuradas previamente sólo en el proceso PowerShell. El script vuelve a comprobar contenedor, volumen, base, puerto, etiqueta y estado antes de cargar el fixture.
+Las variables `PHASE_1B2D_POSTGRES_PASSWORD`, `PHASE_1B2D_SUPERVISOR_PASSWORD` y `PHASE_1B2D_DRIVER_PASSWORD` deben estar configuradas previamente sólo en el proceso PowerShell. El script vuelve a comprobar contenedor, volumen, base, puerto, etiqueta y estado antes de cargar el fixture. No requiere ni utiliza la contraseña de `tp_migrator`.
 
 Las etiquetas y la identidad pueden comprobarse sin modificar recursos. La inspección usa JSON; no se usan plantillas Docker `--format`:
 
@@ -305,6 +309,8 @@ Los scripts verifican la etiqueta antes de detener o eliminar.
 - [V] Los helpers preparan sólo el contenedor etiquetado, base sintética, roles mínimos y Goose 13.
 - [V] La auditoría de sólo lectura confirmó el contenedor y volumen manuales esperados, con imagen PostgreSQL 16.8, puerto `55433` y montaje dedicado; no se ejecutaron acciones de modificación sobre ellos.
 - [V] Se corrigieron la interpolación `${Database}` antes de `?sslmode=disable`, el acceso a etiquetas Docker y la validación de reejecución parcial.
+- [V] Un PostgreSQL 16 efímero ejecutó Goose 13 y el fixture dos veces; ambas transacciones terminaron correctamente, sin duplicados y sin cambiar `SUPERUSER`/`BYPASSRLS` de los roles runtime.
+- [V] La base manual persistente fue inspeccionada y no recibió el fixture porque las credenciales privadas disponibles apuntan a `transportation_platform_dev`.
 - [V] Las inspecciones de contenedores y volúmenes de los cuatro scripts usan la salida JSON de Docker y comprueban el código de salida antes de `ConvertFrom-Json`.
 - [V] El helper compartido rechaza etiquetas, nombres, montajes y puertos incorrectos; se probó contra el entorno existente y con variantes negativas en memoria.
 - [P] La ejecución real en Chrome, autenticador virtual, User Verification y supervisión de cookies/IndexedDB siguen siendo manuales.

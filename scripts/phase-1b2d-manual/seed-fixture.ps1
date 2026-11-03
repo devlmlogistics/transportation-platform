@@ -10,6 +10,7 @@ $HostPort = 55433
 $ManualLabelKey = "transportation-platform.manual"
 $ManualLabelValue = "phase-1b2d"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$FixtureRole = "tp_manual_fixture_" + ([guid]::NewGuid().ToString("N").Substring(0, 16))
 
 . (Join-Path $PSScriptRoot "docker-inspect.ps1")
 
@@ -41,9 +42,22 @@ function SqlQuote([string]$Value) {
     return $Value.Replace("'", "''")
 }
 
-$migratorPassword = Require-Secret "PHASE_1B2D_MIGRATOR_PASSWORD"
+function New-RandomSecret() {
+    $bytes = New-Object byte[] 32
+    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $generator.GetBytes($bytes)
+    } finally {
+        $generator.Dispose()
+    }
+    return [Convert]::ToBase64String($bytes)
+}
+
+$postgresPassword = Require-Secret "PHASE_1B2D_POSTGRES_PASSWORD"
 $supervisorPassword = Require-Secret "PHASE_1B2D_SUPERVISOR_PASSWORD"
 $driverPassword = Require-Secret "PHASE_1B2D_DRIVER_PASSWORD"
+$loaderPassword = New-RandomSecret
+$roleCreated = $false
 
 Push-Location $RepoRoot
 try {
@@ -61,10 +75,42 @@ try {
     $sql = $sql.Replace("__DRIVER_HASH__", (SqlQuote ([string]$driverMaterial.hash)))
     $sql = $sql.Replace("__DRIVER_PARAMETERS__", (SqlQuote ([string]$driverMaterial.parameters)))
 
-    $sql | docker exec -i -e "PGPASSWORD=$migratorPassword" $Container psql -X -q -v ON_ERROR_STOP=1 `
-        -U tp_migrator -d $Database -f -
+    $roleSQL = @"
+BEGIN;
+CREATE ROLE $FixtureRole LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT NOCREATEDB NOCREATEROLE PASSWORD '$(SqlQuote $loaderPassword)';
+GRANT tp_runtime TO $FixtureRole;
+GRANT tp_owner TO $FixtureRole;
+COMMIT;
+"@
+    $roleSQL | docker exec -i -e "PGPASSWORD=$postgresPassword" $Container psql -X -q -v ON_ERROR_STOP=1 `
+        -U postgres -d $Database -f -
+    Assert-NativeSuccess "Create temporary fixture role"
+    $roleCreated = $true
+
+    $sql | docker exec -i -e "PGPASSWORD=$loaderPassword" $Container psql -X -q -v ON_ERROR_STOP=1 `
+        -U $FixtureRole -d $Database -f -
     Assert-NativeSuccess "Load synthetic manual fixture"
+
+    $verificationSQL = @"
+SELECT current_database() || '|' || current_user;
+SELECT 'company=' || count(*) FROM platform.company WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+SELECT 'operation=' || count(*) FROM platform.company_operation WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-000000000001';
+SELECT 'supervisor=' || count(*) FROM platform.user_account WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-200000000002' AND status = 'ACTIVE';
+SELECT 'driver=' || count(*) FROM platform.user_account WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-200000000003' AND status = 'ACTIVE';
+SELECT rolname || '|' || rolsuper || '|' || rolbypassrls
+  FROM pg_roles
+ WHERE rolname IN ('tp_runtime','tp_auth_runtime','tp_driver_auth_runtime','tp_bootstrap_runtime')
+ ORDER BY rolname;
+"@
+    docker exec -e "PGPASSWORD=$postgresPassword" $Container psql -X -q -v ON_ERROR_STOP=1 `
+        -U postgres -d $Database -Atc $verificationSQL
+    Assert-NativeSuccess "Verify synthetic manual fixture"
 } finally {
+    if ($roleCreated) {
+        docker exec -e "PGPASSWORD=$postgresPassword" $Container psql -X -q -v ON_ERROR_STOP=1 `
+            -U postgres -d $Database -c "DROP ROLE IF EXISTS $FixtureRole" | Out-Null
+        Assert-NativeSuccess "Remove temporary fixture role"
+    }
     Pop-Location
 }
 
