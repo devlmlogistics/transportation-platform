@@ -469,3 +469,9 @@ Get-Content .\scripts\phase-1b2d-manual\repair-device-authorization-expiry.sql -
 El resultado exitoso debe mostrar `authorization_id`, `previous_expires_at`, `new_expires_at` aproximadamente 24 horas después del reloj del servidor y `audit_id`, seguido de `COMMIT`. Cualquier error, referencia ambigua, autorización no ACTIVE, passkey ausente o código de salida no cero implica `ROLLBACK`; no reintentar sin revisar la causa. No se deben modificar manualmente la passkey, IndexedDB, membresías, solicitudes ni sesiones.
 
 Después de la reparación, comprobar en sólo lectura que existe una única autorización ACTIVE para la instalación, que `expires_at > clock_timestamp()`, que la solicitud sigue `CONSUMED`, que no se alteró la credencial WebAuthn y que existe el evento `DEVICE_AUTHORIZATION_EXPIRY_RECOVERED`. Luego reiniciar Go en el puerto 18080 y repetir el login recurrente. Una autorización realmente vencida o revocada debe seguir siendo rechazada; las sesiones DRIVER mantienen 12 horas absolutas y 60 minutos de inactividad.
+
+#### Validación defensiva del UUID histórico
+
+**[D]** La reparación manual queda limitada adicionalmente a la autorización `4fcde28e-4ef1-406e-aa26-c5c679e4a749`, asociada a la instalación `78f5e1f4-4f86-4e5f-8adf-955cb7d23337`. El UUID exacto se verifica en la precondición, en el `SELECT ... FOR UPDATE` y en el `UPDATE`; coincidir sólo en instalación, usuario, empresa y operación no es suficiente.
+
+**[V]** En PostgreSQL 16 efímero: UUID correcto completó una única reparación y auditoría; UUID diferente terminó con `ROLLBACK`, sin modificar expiración ni crear auditoría; una segunda ejecución rechazó sin renovar ni auditar; y base, instalación, usuario, estado, passkey o solicitud incorrectos continuaron rechazándose. La base manual no debe usarse para estas pruebas.

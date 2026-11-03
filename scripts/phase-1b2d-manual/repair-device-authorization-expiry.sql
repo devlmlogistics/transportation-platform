@@ -37,6 +37,7 @@ SELECT current_database() = 'transportation_platform_phase_1b2d'
    AND (SELECT count(*)
           FROM platform.device_authorization da
          WHERE da.installation_id = '78f5e1f4-4f86-4e5f-8adf-955cb7d23337'
+           AND da.id = '4fcde28e-4ef1-406e-aa26-c5c679e4a749'::uuid
            AND da.user_account_id = 'aaaaaaaa-aaaa-aaaa-aaaa-200000000003'
            AND da.company_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
            AND da.company_operation_id = 'aaaaaaaa-aaaa-aaaa-aaaa-000000000001'
@@ -89,6 +90,7 @@ BEGIN
     SELECT da.* INTO v_authorization
       FROM platform.device_authorization da
      WHERE da.installation_id = '78f5e1f4-4f86-4e5f-8adf-955cb7d23337'::uuid
+       AND da.id = '4fcde28e-4ef1-406e-aa26-c5c679e4a749'::uuid
        AND da.user_account_id = 'aaaaaaaa-aaaa-aaaa-aaaa-200000000003'::uuid
        AND da.company_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'::uuid
        AND da.company_operation_id = 'aaaaaaaa-aaaa-aaaa-aaaa-000000000001'::uuid
@@ -147,6 +149,7 @@ BEGIN
        SET expires_at = v_new_expires_at,
            last_validated_at = v_now
      WHERE id = v_authorization.id
+       AND id = '4fcde28e-4ef1-406e-aa26-c5c679e4a749'::uuid
        AND status = 'ACTIVE'
        AND expires_at <= v_now
        AND revoked_by_user_account_id IS NULL
