@@ -323,3 +323,118 @@ Los scripts verifican la etiqueta antes de detener o eliminar.
 - [V] Esta corrección no aplicó Goose ni reparó la fila existente en la base manual persistente. El contenedor, volumen, datos de supervisor/conductor, passkey e IndexedDB se conservaron.
 
 Para reanudar de forma segura: mantener el contenedor y no ejecutar todavía `seed-fixture.ps1`, bootstrap ni Chrome. Tras validar el commit en PostgreSQL efímero, ejecutar sólo Goose UP con `tp_migrator` para llevar la base manual de 13 a 14. Después comprobar la autorización existente con UUID cero y decidir una recuperación explícita; no sustituirla automáticamente ni borrar la passkey. La fila inválida debe corregirse mediante un procedimiento controlado antes del login recurrente.
+
+### Recuperación controlada de la autorización UUID cero
+
+La migración 000014 sólo reemplaza la función de registro y no inspecciona ni modifica filas de `device_authorization`; puede aplicarse mientras exista la fila UUID cero. La consulta de dependencias confirmó dos FKs directas, ambas con características reales `NOT DEFERRABLE`, `NOT INITIALLY DEFERRED` y `ON UPDATE NO ACTION`:
+
+| Restricción | Origen | Referencia | Deferrable | Inicialmente diferida | ON UPDATE |
+| --- | --- | --- | --- | --- | --- |
+| `auth_challenge_device_authorization_id_fkey` | `platform.auth_challenge.device_authorization_id` | `platform.device_authorization.id` | No | No | `NO ACTION` |
+| `auth_session_device_authorization_id_fkey` | `platform.auth_session.device_authorization_id` | `platform.device_authorization.id` | No | No | `NO ACTION` |
+
+En el estado observado ambas tienen cero referencias, existe exactamente una autorización para la instalación indicada y la clave pública permanece en la fila.
+
+El script [repair-device-authorization.sql](../../scripts/phase-1b2d-manual/repair-device-authorization.sql) es exclusivo del entorno manual. Verifica base, usuario efectivo, instalación, unicidad y estado; cambia temporalmente a `tp_owner` dentro de una transacción, bloquea la fila, cuenta las referencias y sólo continúa si ambas son cero. No actualiza `auth_session` ni `auth_challenge`, no difiere restricciones, genera un UUID nuevo, conserva la clave pública y hace `COMMIT` sólo si todas las comprobaciones pasan. Ante cualquier precondición, referencia dependiente, bloqueo o error, ejecuta `ROLLBACK` y termina con código no exitoso de `psql`. No modifica `AuthenticatorCredential`, `installation_public_key` ni concede privilegios.
+
+La validación de referencias ocurre después de `SELECT ... FOR UPDATE` sobre la autorización. Ese bloqueo de la fila principal es compatible con las FK inmediatas: una inserción concurrente que intente referenciar el UUID cero debe esperar al bloqueo; si la referencia ya existía, el conteo provoca rechazo. Si el bloqueo o la actualización de la clave no puede completarse dentro de los timeouts, el script falla cerrado. Si aparece cualquier referencia, detenerse y solicitar revisión manual; no borrar ni reescribir filas dependientes.
+
+Orden exacto, sin ejecutar automáticamente:
+
+```powershell
+Set-Location 'C:\Users\hecto\OneDrive\Documentos\ChatGPT\Transportation-Platform'
+$env:PHASE_1B2D_MIGRATOR_DSN = 'postgres://tp_migrator:<contraseña-privada>@127.0.0.1:55433/transportation_platform_phase_1b2d?sslmode=disable'
+go run .\scripts\phase-1b2d-manual\migrate version   # debe mostrar 13
+go run .\scripts\phase-1b2d-manual\migrate up
+go run .\scripts\phase-1b2d-manual\migrate version   # debe mostrar 14
+```
+
+El valor de la contraseña es una plantilla y no debe aparecer en el historial, archivos versionados ni logs. Después de comprobar Goose 14, ejecutar el script usando el mismo secreto privado del migrador; `SET ROLE tp_owner` se limita a esa sesión y transacción:
+
+```powershell
+Get-Content .\scripts\phase-1b2d-manual\repair-device-authorization.sql -Raw |
+    docker exec -i -e "PGPASSWORD=$env:PHASE_1B2D_MIGRATOR_PASSWORD" `
+        transportation-platform-phase-1b2d-pg `
+        psql -X -v ON_ERROR_STOP=1 -U tp_migrator -d transportation_platform_phase_1b2d -f -
+```
+
+El resultado debe mostrar `repaired_device_authorization_id` distinto del UUID cero, con `session_references = 0` y `challenge_references = 0`. Si aparece `repair_error_code`, una excepción de referencias, o el proceso termina con error, no se debe reintentar a ciegas: el script ya ejecutó rollback y deben revisarse las precondiciones. Un código de salida cero sólo se acepta junto con el `COMMIT` y el UUID nuevo mostrado.
+
+#### Validación efímera del procedimiento
+
+- [V] En PostgreSQL 16 efímero con Goose 14, el caso sin referencias completó la reparación, conservó `installation_public_key` y dejó una sola autorización ACTIVE con UUID no cero.
+- [V] Una segunda ejecución rechazó la operación y conservó el UUID reparado (`idempotencia segura`).
+- [V] Una referencia en `platform.auth_challenge` provocó rechazo, `ROLLBACK`, código no exitoso y conservación de la referencia y del UUID cero.
+- [V] Una referencia en `platform.auth_session` produjo el mismo resultado.
+- [V] Instalación incorrecta, autorización inexistente, estado distinto de `ACTIVE` y ausencia del UUID cero fueron rechazados sin cambios.
+- [V] Una base efímera clonada con nombre distinto fue rechazada por la precondición de `current_database()` y terminó con código no exitoso.
+- [V] El contenedor efímero se eliminó al finalizar; no se ejecutó Goose 14 ni la reparación contra la base manual, DEV o WebAuthn persistente.
+
+Verificación posterior, sólo lectura y con `tp_owner` temporal:
+
+```powershell
+$verifySql = @"
+SET ROLE tp_owner;
+SELECT current_database(), current_user;
+SELECT id, installation_id, user_account_id, company_id, company_operation_id,
+       status, key_algorithm
+  FROM platform.device_authorization
+ WHERE installation_id = '78f5e1f4-4f86-4e5f-8adf-955cb7d23337';
+SELECT count(*) AS zero_uuid_rows
+  FROM platform.device_authorization
+ WHERE id = '00000000-0000-0000-0000-000000000000';
+SELECT count(*) AS zero_uuid_session_references
+  FROM platform.auth_session
+ WHERE device_authorization_id = '00000000-0000-0000-0000-000000000000';
+SELECT count(*) AS zero_uuid_challenge_references
+  FROM platform.auth_challenge
+ WHERE device_authorization_id = '00000000-0000-0000-0000-000000000000';
+SELECT count(*) AS credential_rows
+  FROM platform.authenticator_credential
+ WHERE user_account_id = 'aaaaaaaa-aaaa-aaaa-aaaa-200000000003'
+   AND status = 'ACTIVE';
+SELECT c.constraint_name, tc.table_name, kcu.column_name
+  FROM information_schema.table_constraints c
+  JOIN information_schema.key_column_usage kcu
+    ON c.constraint_name = kcu.constraint_name AND c.table_schema = kcu.table_schema
+  JOIN information_schema.constraint_column_usage cc
+    ON c.constraint_name = cc.constraint_name AND c.table_schema = cc.table_schema
+  JOIN information_schema.table_constraints tc
+    ON tc.constraint_name = c.constraint_name AND tc.table_schema = c.table_schema
+ WHERE c.constraint_type = 'FOREIGN KEY'
+   AND cc.table_schema = 'platform' AND cc.table_name = 'device_authorization'
+   AND cc.column_name = 'id';
+RESET ROLE;
+"@
+$verifySql | docker exec -i -e "PGPASSWORD=$env:PHASE_1B2D_MIGRATOR_PASSWORD" `
+    transportation-platform-phase-1b2d-pg `
+    psql -X -v ON_ERROR_STOP=1 -U tp_migrator -d transportation_platform_phase_1b2d -f -
+```
+
+Sólo después de verificar un UUID no cero, una autorización ACTIVE única, cero referencias al UUID cero y la credencial conservada, reiniciar Go. Para esta prueba se puede usar el puerto 18080; el RP ID sigue siendo `localhost`, pero los orígenes deben coincidir con el nuevo puerto:
+
+```powershell
+$env:APP_ENV = 'development'
+$env:PORT = '18080'
+$env:AUTH_ONLINE_ENABLED = 'true'
+$env:WEBAUTHN_ENABLED = 'true'
+$env:ADMIN_HTTP_ENABLED = 'false'
+$env:AUTH_ALLOWED_ORIGINS = 'http://localhost:18080'
+$env:WEBAUTHN_RP_ID = 'localhost'
+$env:WEBAUTHN_ORIGINS = 'http://localhost:18080'
+$env:DATABASE_HOST = '127.0.0.1'
+$env:DATABASE_PORT = '55433'
+$env:DATABASE_NAME = 'transportation_platform_phase_1b2d'
+$env:DATABASE_SSLMODE = 'disable'
+$env:DATABASE_RUNTIME_USER = 'tp_runtime'
+$env:DATABASE_RUNTIME_PASSWORD = $env:PHASE_1B2D_RUNTIME_PASSWORD
+$env:DATABASE_AUTH_USER = 'tp_auth_runtime'
+$env:DATABASE_AUTH_PASSWORD = $env:PHASE_1B2D_AUTH_PASSWORD
+$env:DATABASE_DRIVER_AUTH_USER = 'tp_driver_auth_runtime'
+$env:DATABASE_DRIVER_AUTH_PASSWORD = $env:PHASE_1B2D_DRIVER_AUTH_PASSWORD
+Remove-Item Env:DATABASE_USER -ErrorAction SilentlyContinue
+Remove-Item Env:DATABASE_PASSWORD -ErrorAction SilentlyContinue
+go run .\cmd\platform
+```
+
+La URL esperada pasa a ser `http://localhost:18080`. No se debe ejecutar bootstrap, `seed-fixture.ps1`, Goose DOWN, eliminar el contenedor/volumen ni modificar `transportation_platform_dev`.
