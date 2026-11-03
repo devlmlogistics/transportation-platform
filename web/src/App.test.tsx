@@ -11,4 +11,12 @@ describe("platform shell", () => {
     expect(screen.getByRole("heading", { name: "Drayage" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Transportation" })).toBeInTheDocument();
   });
+
+  it("keeps recurring login closed until an installation is prepared", async () => {
+    render(<App />);
+
+    screen.getByRole("button", { name: "Ingresar con passkey" }).click();
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Prepara primero la instalación");
+  });
 });

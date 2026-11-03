@@ -34,6 +34,14 @@ Si la primera sesión de activación expira, el conductor debe iniciar nuevament
 
 `POST /api/v1/driver/auth/webauthn/finish` verifica en Go la respuesta WebAuthn con `go-webauthn/webauthn v0.13.0`, exige User Verification, valida la firma ECDSA de instalación y sólo después llama a `complete_driver_login`. La función SQL bloquea challenge, cuenta y autorización, revalida estados/memberships/epoch y consume el challenge antes de insertar la sesión.
 
+### Diagnóstico de interrupción en React
+
+**[V]** La biblioteca devuelve `protocol.CredentialAssertion` y `protocol.CredentialCreation` dentro del campo JSON `options.publicKey`. El frontend estaba pasando el sobre `options` completo a `navigator.credentials.get()`, por lo que `challenge` y `allowCredentials[].id` no llegaban como `BufferSource`; Chrome rechazaba la ceremonia antes de generar la solicitud `webauthn/finish`. El `catch` de `App.tsx` convertía ese error en el mensaje genérico de autenticación rechazada.
+
+**[V]** `web/src/webauthn.ts` ahora desempaqueta `options.publicKey` para login DRIVER, registro y step-up, decodifica challenge e identificadores Base64URL a bytes y conserva la firma ECDSA de instalación antes de enviar `webauthn/finish`. Las pruebas del frontend cubren el contrato anidado, la conversión, la firma con la clave recuperada, la recuperación desde IndexedDB y el rechazo seguro sin llamada de finalización.
+
+**[D]** En desarrollo se registran sólo etapas y clases de error (`driver.login.*`); no se registran challenges, assertions, firmas, claves, cookies, tokens ni contraseñas. Producción mantiene el mensaje genérico.
+
 La sesión final contiene:
 
 - `session_policy = DRIVER`;

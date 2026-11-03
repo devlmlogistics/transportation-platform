@@ -4,6 +4,7 @@ import {
   loginDriverWithPassword,
   loginDriverWithPasskey,
   requestDriverActivation,
+  driverLoginErrorMessage,
   type DriverInstallation,
 } from "./webauthn";
 
@@ -88,8 +89,8 @@ export default function App() {
     try {
       await loginDriverWithPasskey(identifier, installation);
       setStatus("Sesión DRIVER creada con WebAuthn y prueba de posesión de instalación.");
-    } catch {
-      setStatus("El ingreso móvil fue rechazado o la autorización del dispositivo ya no está vigente.");
+    } catch (error) {
+      setStatus(driverLoginErrorMessage(error));
     }
   };
 

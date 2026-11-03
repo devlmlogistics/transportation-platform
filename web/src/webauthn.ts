@@ -21,10 +21,36 @@ const encode = (value: ArrayBuffer): string => {
 };
 
 const decode = (value: string): ArrayBuffer => {
-  const padded = value.replaceAll("-", "+").replaceAll("_", "/") + "===".slice((value.length + 3) % 4);
+  if (value.length % 4 === 1) throw new Error("Invalid base64url value");
+  const padding = (4 - (value.length % 4)) % 4;
+  const padded = value.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat(padding);
   const binary = atob(padded);
   const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
   return bytes.buffer;
+};
+
+const unwrapPublicKeyOptions = (value: JSONValue): JSONValue => {
+  const nested = value.publicKey;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) return nested as JSONValue;
+  return value;
+};
+
+const driverLoginErrorType = (error: unknown): string => {
+  if (error && typeof error === "object" && "name" in error && typeof error.name === "string" && error.name) {
+    return error.name;
+  }
+  if (error instanceof Error && error.name) return error.name;
+  return "UnknownError";
+};
+
+const reportDriverLoginDiagnostic = (stage: string, error?: unknown): void => {
+  if (!import.meta.env.DEV) return;
+  console.debug("[driver-login]", { stage, error_type: error ? driverLoginErrorType(error) : undefined });
+};
+
+export const driverLoginErrorMessage = (error: unknown): string => {
+  if (import.meta.env.DEV) return `El ingreso móvil fue rechazado (${driverLoginErrorType(error)}).`;
+  return "El ingreso móvil fue rechazado o la autorización del dispositivo ya no está vigente.";
 };
 
 const credentialPayload = (credential: PublicKeyCredential): CeremonyCredential => {
@@ -59,7 +85,7 @@ const readCSRFToken = (): string => document.cookie.split(";").map((item) => ite
 export async function registerPasskey(displayName = "", deviceRequestID?: string): Promise<void> {
   if (!window.PublicKeyCredential) throw new Error("This browser does not support passkeys");
   const started = await requestJSON("/api/v1/auth/webauthn/registration/options", { display_name: displayName, ...(deviceRequestID ? { device_request_id: deviceRequestID } : {}) });
-  const options = started.options as JSONValue;
+  const options = unwrapPublicKeyOptions(started.options as JSONValue);
   const publicKey = { ...options, challenge: decode(String(options.challenge)), user: { ...(options.user as JSONValue), id: decode(String((options.user as JSONValue).id)) }, ...(Array.isArray(options.excludeCredentials) ? { excludeCredentials: (options.excludeCredentials as JSONValue[]).map((item) => ({ ...item, id: decode(String(item.id)) })) } : {}) } as PublicKeyCredentialCreationOptions;
   const credential = await navigator.credentials.create({ publicKey });
   if (!(credential instanceof PublicKeyCredential)) throw new Error("No passkey was returned");
@@ -69,7 +95,7 @@ export async function registerPasskey(displayName = "", deviceRequestID?: string
 export async function completeStepUp(): Promise<void> {
   if (!window.PublicKeyCredential) throw new Error("This browser does not support passkeys");
   const started = await requestJSON("/api/v1/auth/webauthn/step-up/options", {});
-  const options = started.options as JSONValue;
+  const options = unwrapPublicKeyOptions(started.options as JSONValue);
   const publicKey = { ...options, challenge: decode(String(options.challenge)), ...(Array.isArray(options.allowCredentials) ? { allowCredentials: (options.allowCredentials as JSONValue[]).map((item) => ({ ...item, id: decode(String(item.id)) })) } : {}) } as PublicKeyCredentialRequestOptions;
   const credential = await navigator.credentials.get({ publicKey });
   if (!(credential instanceof PublicKeyCredential)) throw new Error("No passkey was returned");
@@ -163,8 +189,16 @@ export async function loginDriverWithPassword(identifier: string, password: stri
 
 export async function loginDriverWithPasskey(identifier: string, installation: DriverInstallation): Promise<void> {
   if (!window.PublicKeyCredential) throw new Error("This browser does not support passkeys");
-  const started = await requestJSON("/api/v1/driver/auth/webauthn/options", { identifier, installation_id: installation.id });
-  const options = started.options as JSONValue;
+  reportDriverLoginDiagnostic("driver.login.installation_loaded");
+  let started: JSONValue;
+  try {
+    started = await requestJSON("/api/v1/driver/auth/webauthn/options", { identifier, installation_id: installation.id });
+  } catch (error) {
+    reportDriverLoginDiagnostic("driver.login.options_received", error);
+    throw error;
+  }
+  reportDriverLoginDiagnostic("driver.login.options_received");
+  const options = unwrapPublicKeyOptions(started.options as JSONValue);
   const rawChallenge = decode(String(options.challenge));
   const publicKey = {
     ...options,
@@ -173,18 +207,40 @@ export async function loginDriverWithPasskey(identifier: string, installation: D
       ? { allowCredentials: (options.allowCredentials as JSONValue[]).map((item) => ({ ...item, id: decode(String(item.id)) })) }
       : {}),
   } as PublicKeyCredentialRequestOptions;
-  const credential = await navigator.credentials.get({ publicKey });
+  reportDriverLoginDiagnostic("driver.login.webauthn_started");
+  let credential: Credential | null;
+  try {
+    credential = await navigator.credentials.get({ publicKey });
+  } catch (error) {
+    reportDriverLoginDiagnostic("driver.login.webauthn_completed", error);
+    throw error;
+  }
+  reportDriverLoginDiagnostic("driver.login.webauthn_completed");
   if (!(credential instanceof PublicKeyCredential)) throw new Error("No passkey was returned");
   const challengeHash = await crypto.subtle.digest("SHA-256", rawChallenge);
   const proofMessage = new Uint8Array(new TextEncoder().encode("tp-driver-possession\0").length + challengeHash.byteLength + 16);
   proofMessage.set(new TextEncoder().encode("tp-driver-possession\0"), 0);
   proofMessage.set(new Uint8Array(challengeHash), new TextEncoder().encode("tp-driver-possession\0").length);
   proofMessage.set(decodeUUID(installation.id), new TextEncoder().encode("tp-driver-possession\0").length + challengeHash.byteLength);
-  const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, installation.privateKey, proofMessage);
-  await requestJSON("/api/v1/driver/auth/webauthn/finish", {
-    challenge_id: String(started.challenge_id), credential: credentialPayload(credential) as unknown as JSONValue,
-    possession_signature: encode(signature),
-  });
+  let signature: ArrayBuffer;
+  try {
+    signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, installation.privateKey, proofMessage);
+  } catch (error) {
+    reportDriverLoginDiagnostic("driver.login.possession_signed", error);
+    throw error;
+  }
+  reportDriverLoginDiagnostic("driver.login.possession_signed");
+  reportDriverLoginDiagnostic("driver.login.finish_started");
+  try {
+    await requestJSON("/api/v1/driver/auth/webauthn/finish", {
+      challenge_id: String(started.challenge_id), credential: credentialPayload(credential) as unknown as JSONValue,
+      possession_signature: encode(signature),
+    });
+  } catch (error) {
+    reportDriverLoginDiagnostic("driver.login.finish_completed", error);
+    throw error;
+  }
+  reportDriverLoginDiagnostic("driver.login.finish_completed");
 }
 
 const decodeUUID = (value: string): Uint8Array => {
