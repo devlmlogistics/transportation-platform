@@ -147,6 +147,8 @@ Este documento es normativo para el diseño futuro de la plataforma; los documen
 
 **Razón:** WebAuthn no garantiza que una credencial multidispositivo permanezca en un único teléfono físico. La autorización operacional debe poder aprobarse, limitarse, auditarse y revocarse por instalación.
 
+**[D] Fase 1B.2-D:** `DeviceAuthorization` usa provisionalmente 24 horas desde el registro aprobado, independiente de `DeviceEnrollmentRequest.expires_at`. El valor de desarrollo está protegido en `platform.device_authorization_policy`; la política de producción queda pendiente.
+
 ### ADR-013 — Reutilizar el patrón de aprobación de Drayage, no sus límites de identidad
 
 **Estado:** [D] recomendado.
@@ -209,3 +211,15 @@ La autenticación y el offline descritos en DEVICE_AUTHENTICATION.md son diseño
 **Razón:** una PWA puede perder almacenamiento o cambiar de service worker sin que exista conectividad suficiente para recuperar datos.
 
 La especificación operativa está en DEVICE_AUTHENTICATION.md. La planificación de ejecución documental y futura implementación está en docs/planning/PHASE_1A_PLAN.md.
+
+### ADR-018 — Sesión DRIVER derivada de autorización de instalación
+
+**Estado:** [D] implementado para revisión en Fase 1B.2-D.
+
+**Decisión:** la activación inicial usa una política `DRIVER_ACTIVATION` temporal y sin contexto para crear una `DeviceEnrollmentRequest`; no es una sesión operativa. El login recurrente requiere WebAuthn con User Verification, una `DeviceAuthorization` ACTIVE y una firma independiente de la clave pública de instalación. `complete_driver_login` deriva la cuenta, empresa, operación, credencial y dispositivo desde el challenge y emite una sesión DRIVER de 12 horas absolutas/60 minutos idle. La emisión SQL sólo está concedida al rol `tp_driver_auth_runtime`; `tp_auth_runtime` no puede invocarla.
+
+**Razón:** permite reutilizar la identidad única y el patrón de aprobación existente sin aceptar `user_account_id`, `company_id`, roles o códigos de correlación como prueba de identidad. Un rol o membership revocado no queda sustituido por la mera existencia de una autorización histórica.
+
+**Límites:** la clave de instalación en Web Crypto se persiste como CryptoKey no exportable en IndexedDB, pero no es atestación de hardware; borrar datos del sitio o cambiar de teléfono requiere repetir el flujo. No se implementan PIN de supervisor, offline, formularios ni GPS.
+
+**Consecuencia:** una sesión DRIVER no puede cambiar de contexto a otra empresa/operación ni acceder a rutas administrativas sólo por compartir la misma persona.

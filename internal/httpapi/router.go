@@ -13,6 +13,7 @@ func NewRouter(cfg config.Config, logger *slog.Logger) (http.Handler, error) {
 
 type RouterDependencies struct {
 	Auth     OnlineAuthHTTPService
+	Driver   DriverAuthHTTPService
 	Admin    AdminService
 	WebAuthn WebAuthnHTTPService
 }
@@ -47,6 +48,15 @@ func NewRouterWithDependencies(cfg config.Config, logger *slog.Logger, dependenc
 		webauthnHandler = configured
 	}
 	mux.Handle("/api/v1/auth/webauthn/", webauthnHandler)
+	driverHandler := http.Handler(ClosedWebAuthnHandler())
+	if cfg.WebAuthnEnabled && dependencies.Driver != nil && authSecurity != nil {
+		configured, err := NewDriverAuthHandler(dependencies.Driver, authSecurity)
+		if err != nil {
+			return nil, err
+		}
+		driverHandler = configured
+	}
+	mux.Handle("/api/v1/driver/auth/", driverHandler)
 	adminHandler := ClosedAdminHandler()
 	if cfg.AdminHTTPEnabled && dependencies.Admin != nil && authSecurity != nil {
 		resolver := SessionPrincipalResolver{Service: dependencies.Auth}

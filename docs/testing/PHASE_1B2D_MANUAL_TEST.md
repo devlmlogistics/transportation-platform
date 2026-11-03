@@ -1,0 +1,544 @@
+# Fase 1B.2-D — prueba manual funcional en Chrome
+
+Estado: guía preparada para ejecución supervisada. No ejecuta bootstrap, no modifica `transportation_platform_dev` y no usa `transportation_platform_webauthn_manual`.
+
+## Alcance y límites
+
+- [V] La prueba usa HTTP real, cookies, WebAuthn CTAP2, IndexedDB y PostgreSQL 16.
+- [V] El entorno aislado usa el contenedor `transportation-platform-phase-1b2d-pg`, volumen `transportation-platform-phase-1b2d-pgdata`, base `transportation_platform_phase_1b2d` y `127.0.0.1:55433`.
+- [V] El backend usa `tp_runtime`, `tp_auth_runtime` y `tp_driver_auth_runtime` en pools separados. `tp_migrator` sólo ejecuta Goose/fixture y `tp_bootstrap_runtime` no participa en el servidor.
+- [D] La guía conserva `ADMIN_HTTP_ENABLED=false`. La aprobación se ejecuta mediante el endpoint WebAuthn existente con una sesión administrativa de supervisor.
+- [P] El contrato actual no exige step-up WebAuthn para aprobar/revocar dispositivos; las funciones SQL sólo exigen sesión activa, membresías, rol y permiso vigentes.
+- [P] La respuesta de `device-enrollment-requests` usa nombres Go por defecto (`ID`, `CorrelationCode`, etc.), mientras la pantalla React espera algunos nombres snake_case. Para obtener el identificador se debe revisar Network/Console.
+
+## Requisitos previos
+
+Windows 11 con Docker Desktop, PowerShell 5.1 o PowerShell 7, Go 1.25, Node/pnpm, Chrome actualizado y el repositorio en:
+
+```powershell
+Set-Location 'C:\Users\hecto\OneDrive\Documentos\ChatGPT\Transportation-Platform'
+git switch feature/phase-1b2d-driver-mobile-auth
+git status --short
+```
+
+El único cambio preexistente esperado es `.gitignore`. No deben aparecer archivos `.env`, contraseñas, dumps ni cambios en proyectos heredados.
+
+Los scripts usan sintaxis compatible con Windows PowerShell 5.1 y PowerShell 7. Las etiquetas Docker con puntos o guiones se leen mediante `index`, no mediante acceso directo a propiedades. Las cadenas de conexión delimitan `${Database}` antes de `?sslmode=disable` y escapan el componente de contraseña con `Uri.EscapeDataString`. No se imprimen contraseñas ni DSN.
+
+## 1. Variables privadas
+
+Los valores se mantienen sólo en el proceso PowerShell. No se escriben en archivos, commits ni logs. Use contraseñas sintéticas distintas.
+
+```powershell
+function Set-PrivateEnv([string]$Name) {
+  $secure = Read-Host $Name -AsSecureString
+  $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+  try { Set-Item -Path "Env:$Name" -Value ([Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)) }
+  finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+}
+Set-PrivateEnv PHASE_1B2D_POSTGRES_PASSWORD
+Set-PrivateEnv PHASE_1B2D_MIGRATOR_PASSWORD
+Set-PrivateEnv PHASE_1B2D_RUNTIME_PASSWORD
+Set-PrivateEnv PHASE_1B2D_AUTH_PASSWORD
+Set-PrivateEnv PHASE_1B2D_DRIVER_AUTH_PASSWORD
+Set-PrivateEnv PHASE_1B2D_BOOTSTRAP_PASSWORD
+Set-PrivateEnv PHASE_1B2D_SUPERVISOR_PASSWORD
+Set-PrivateEnv PHASE_1B2D_DRIVER_PASSWORD
+```
+
+## 2. PostgreSQL aislado y migraciones
+
+```powershell
+.\scripts\phase-1b2d-manual\prepare.ps1
+.\scripts\phase-1b2d-manual\seed-fixture.ps1
+```
+
+Los scripts crean o reutilizan sólo el contenedor/volumen con la etiqueta `transportation-platform.manual=phase-1b2d`, publican `127.0.0.1:55433`, ejecutan `db/bootstrap/platform_roles.sql` y Goose UP hasta versión 14. No reutilizan `pgdb16.8` ni la base manual de 1B.2-C.
+
+`prepare.ps1` valida antes de reutilizar un recurso existente la etiqueta, imagen `postgres:16.8-alpine3.21`, base configurada, volumen montado y publicación exacta `127.0.0.1:55433`. Si alguno no coincide, se detiene sin eliminar ni corregir recursos. La carga de contraseñas de roles se entrega por stdin a `psql`, no como argumento `-c`.
+
+`seed-fixture.ps1` no usa `tp_migrator` para insertar datos: ese rol es migrador y está sujeto a `FORCE ROW LEVEL SECURITY`. Crea temporalmente un rol `tp_manual_fixture_<id>` sin `SUPERUSER`, `BYPASSRLS`, `CREATEDB`, `CREATEROLE` ni herencia; el rol sólo puede cambiar explícitamente a `tp_runtime` y `tp_owner` durante una transacción. El rol temporal se elimina siempre al terminar. Las políticas RLS existentes permanecen intactas.
+
+La causa del error original fue que `platform.company` tiene RLS y `FORCE ROW LEVEL SECURITY`; la política de creación aplica a `tp_runtime` sólo con `app.access_mode = 'PLATFORM'` y tenant nulo. `tp_migrator`, aunque sea miembro de `tp_owner` y tenga privilegio de tabla heredado, no coincide con esa política y no puede insertar. El fixture tampoco usa `SET row_security = off`. Para reintentos, las tablas con políticas runtime usan actualización seguida de `INSERT ... WHERE NOT EXISTS`; las tablas de autenticación usan las políticas existentes de `tp_owner` después de `SET ROLE tp_owner` y `app.auth_internal = '1'`.
+
+### Reanudar después de una ejecución parcial
+
+Si el contenedor y el volumen ya existen, no se deben eliminar ni recrear. Después de volver a configurar las variables privadas en la misma sesión de PowerShell, el comando exacto para reanudar es:
+
+```powershell
+Set-Location 'C:\Users\hecto\OneDrive\Documentos\ChatGPT\Transportation-Platform'
+.\scripts\phase-1b2d-manual\prepare.ps1
+```
+
+El script verifica la identidad de los recursos, inicia el contenedor si estaba detenido, reutiliza los roles y ejecuta sólo las migraciones Goose pendientes. La versión se confirma con:
+
+```powershell
+$env:PHASE_1B2D_MIGRATOR_DSN = 'postgres://tp_migrator:<contraseña-privada>@127.0.0.1:55433/transportation_platform_phase_1b2d?sslmode=disable'
+go run .\scripts\phase-1b2d-manual\migrate version
+```
+
+El valor anterior es una plantilla: no se debe pegar una contraseña real en el documento, en el historial de comandos ni en un archivo. `seed-fixture.ps1` se ejecuta por separado y no forma parte de la reanudación de `prepare.ps1`; en esta preparación no se ejecutó.
+
+Cuando Goose ya esté en 14 y se autorice cargar los datos sintéticos, la reanudación exacta de `seed-fixture.ps1` —sin repetir migraciones— es:
+
+```powershell
+Set-Location 'C:\Users\hecto\OneDrive\Documentos\ChatGPT\Transportation-Platform'
+.\scripts\phase-1b2d-manual\seed-fixture.ps1
+```
+
+Las variables `PHASE_1B2D_POSTGRES_PASSWORD`, `PHASE_1B2D_SUPERVISOR_PASSWORD` y `PHASE_1B2D_DRIVER_PASSWORD` deben estar configuradas previamente sólo en el proceso PowerShell. El script vuelve a comprobar contenedor, volumen, base, puerto, etiqueta y estado antes de cargar el fixture. No requiere ni utiliza la contraseña de `tp_migrator`.
+
+Las etiquetas y la identidad pueden comprobarse sin modificar recursos. La inspección usa JSON; no se usan plantillas Docker `--format`:
+
+```powershell
+$containerDetails = @(docker inspect 'transportation-platform-phase-1b2d-pg' | ConvertFrom-Json)
+if ($LASTEXITCODE -ne 0 -or $containerDetails.Count -ne 1) { throw 'Inspección de contenedor inválida' }
+$containerDetails[0].Config.Labels.'transportation-platform.manual'
+
+$volumeDetails = @(docker volume inspect 'transportation-platform-phase-1b2d-pgdata' | ConvertFrom-Json)
+if ($LASTEXITCODE -ne 0 -or $volumeDetails.Count -ne 1) { throw 'Inspección de volumen inválida' }
+$volumeDetails[0].Labels.'transportation-platform.manual'
+```
+
+El fixture sintético crea un administrador de plataforma como identidad/rol sin contraseña de login, un supervisor `supervisor-test@example.test` y un conductor `driver-test@example.test`. El supervisor recibe `SUPERVISOR` en DRAYAGE; el conductor recibe `DriverProfile` y `DRIVER`. Los hashes Argon2id se generan localmente.
+
+Validación sólo lectura:
+
+```powershell
+$container = 'transportation-platform-phase-1b2d-pg'
+$sql = "SELECT current_database() || '|' || current_user; SELECT version_id FROM platform.goose_db_version ORDER BY version_id DESC LIMIT 1; SELECT rolname, rolsuper, rolbypassrls, rolcanlogin FROM pg_roles WHERE rolname IN ('tp_runtime','tp_auth_runtime','tp_driver_auth_runtime','tp_migrator','tp_bootstrap_runtime') ORDER BY rolname;"
+docker exec -e "PGPASSWORD=$env:PHASE_1B2D_MIGRATOR_PASSWORD" $container psql -X -q -v ON_ERROR_STOP=1 -U tp_migrator -d transportation_platform_phase_1b2d -Atc $sql
+```
+
+Esperado: `transportation_platform_phase_1b2d|tp_migrator`, versión `13` y roles runtime sin SUPERUSER/BYPASSRLS.
+
+## 3. Backend Go
+
+```powershell
+Set-Location 'C:\Users\hecto\OneDrive\Documentos\ChatGPT\Transportation-Platform'
+pnpm --dir web build
+$env:APP_ENV = 'development'
+$env:PORT = '8080'
+$env:WEB_DIR = 'web/dist'
+$env:AUTH_ONLINE_ENABLED = 'true'
+$env:WEBAUTHN_ENABLED = 'true'
+$env:ADMIN_HTTP_ENABLED = 'false'
+$env:AUTH_ALLOWED_ORIGINS = 'http://localhost:8080'
+$env:AUTH_COOKIE_SECURE = 'false'
+$env:WEBAUTHN_RP_ID = 'localhost'
+$env:WEBAUTHN_RP_DISPLAY_NAME = 'Transportation Platform Manual 1B2D'
+$env:WEBAUTHN_ORIGINS = 'http://localhost:8080'
+$env:DATABASE_HOST = '127.0.0.1'
+$env:DATABASE_PORT = '55433'
+$env:DATABASE_NAME = 'transportation_platform_phase_1b2d'
+$env:DATABASE_SSLMODE = 'disable'
+$env:DATABASE_RUNTIME_USER = 'tp_runtime'
+$env:DATABASE_RUNTIME_PASSWORD = $env:PHASE_1B2D_RUNTIME_PASSWORD
+$env:DATABASE_AUTH_USER = 'tp_auth_runtime'
+$env:DATABASE_AUTH_PASSWORD = $env:PHASE_1B2D_AUTH_PASSWORD
+$env:DATABASE_DRIVER_AUTH_USER = 'tp_driver_auth_runtime'
+$env:DATABASE_DRIVER_AUTH_PASSWORD = $env:PHASE_1B2D_DRIVER_AUTH_PASSWORD
+Remove-Item Env:DATABASE_USER -ErrorAction SilentlyContinue
+Remove-Item Env:DATABASE_PASSWORD -ErrorAction SilentlyContinue
+go run ./cmd/platform
+```
+
+Esperado: `GET http://localhost:8080/healthz` devuelve 200; no aparecen DSN ni contraseñas en logs.
+
+## 4. Chrome y WebAuthn
+
+Usar un perfil Chrome separado para conductor y supervisor:
+
+```powershell
+$chromeProfile = Join-Path $env:TEMP 'transportation-platform-phase-1b2d-chrome-driver'
+$chrome = Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'
+if (-not (Test-Path $chrome)) { $chrome = Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe' }
+& $chrome --user-data-dir=$chromeProfile --new-window http://localhost:8080
+```
+
+En DevTools del conductor: More tools → WebAuthn → Add virtual authenticator. Seleccionar CTAP2, Internal, Resident key si aparece y User verification activado. No asumir opciones no visibles. Origen esperado: `http://localhost:8080`; RP ID: `localhost`.
+
+## 5. Activación inicial
+
+En el perfil conductor:
+
+1. Abrir `http://localhost:8080`.
+2. Pulsar `Preparar instalación`. Se crea una clave ECDSA P-256 no exportable en IndexedDB `transportation-platform-driver-auth/installations`.
+3. Introducir `driver-test@example.test`, la contraseña privada, empresa `aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa` y operación `aaaaaaaa-aaaa-aaaa-aaaa-000000000001`.
+4. Pulsar `Solicitar activación`.
+5. En Network, conservar localmente el JSON 201 de `POST /api/v1/auth/webauthn/device-enrollment-requests`. Guardar `ID` (la respuesta actual usa mayúsculas) y `InstallationID`.
+
+Esperado: request `PENDING`, cookie `tp_session` de activación y cookie CSRF legible desde `/`.
+
+## 6. Aprobación del supervisor
+
+En el perfil supervisor separado, DevTools Console:
+
+```javascript
+await fetch('/api/v1/auth/login', {
+  method: 'POST', credentials: 'include',
+  headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify({identifier: 'supervisor-test@example.test', password: '<contraseña privada>'})
+}).then(r => r.json());
+
+const csrf = () => document.cookie.split(';').map(v => v.trim())
+  .find(v => v.startsWith('tp_csrf='))?.slice('tp_csrf='.length) ?? '';
+
+await fetch('/api/v1/auth/webauthn/device-enrollment-requests/' + REQUEST_ID + '/approve', {
+  method: 'POST', credentials: 'include',
+  headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf()},
+  body: JSON.stringify({reason: 'manual 1B.2-D test'})
+}).then(async r => ({status: r.status, body: await r.json().catch(() => null)}));
+```
+
+Esperado: 200 y `status: APPROVED`. El contrato actual no requiere step-up para este endpoint.
+
+## 7. Registro de passkey
+
+La pantalla React no tiene botón de registro ni pantalla supervisor. Ejecutar desde Console del perfil conductor, con la sesión `DRIVER_ACTIVATION`:
+
+```javascript
+const b64u = (value) => {
+  const padded = value.replaceAll('-', '+').replaceAll('_', '/') + '==='.slice((value.length + 3) % 4);
+  const binary = atob(padded);
+  return Uint8Array.from(binary, c => c.charCodeAt(0)).buffer;
+};
+const csrf = () => document.cookie.split(';').map(v => v.trim())
+  .find(v => v.startsWith('tp_csrf='))?.slice('tp_csrf='.length) ?? '';
+const postJSON = async (url, body) => {
+  const response = await fetch(url, {
+    method: 'POST', credentials: 'include',
+    headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf()},
+    body: JSON.stringify(body)
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(String(response.status) + ' ' + JSON.stringify(data));
+  return data;
+};
+const started = await postJSON('/api/v1/auth/webauthn/registration/options', {
+  display_name: 'Chrome virtual driver', device_request_id: 'REQUEST_ID'
+});
+const options = started.options;
+const publicKey = {
+  ...options,
+  challenge: b64u(options.challenge),
+  user: {...options.user, id: b64u(options.user.id)},
+  ...(Array.isArray(options.excludeCredentials)
+    ? {excludeCredentials: options.excludeCredentials.map(item => ({...item, id: b64u(item.id)}))}
+    : {})
+};
+const credential = await navigator.credentials.create({publicKey});
+if (!(credential instanceof PublicKeyCredential)) throw new Error('No passkey returned');
+await postJSON('/api/v1/auth/webauthn/registration/finish', {
+  challenge_id: started.challenge_id,
+  display_name: 'Chrome virtual driver',
+  credential: credential.toJSON()
+});
+```
+
+Esperado: 200, request `CONSUMED`, `DeviceAuthorization ACTIVE` y credencial `ACTIVE`. No registrar la credencial completa en logs.
+
+## 8. Login móvil recurrente
+
+1. En el perfil conductor, cerrar la sesión de activación: `await postJSON('/api/v1/auth/logout', {});`
+2. Recargar la página.
+3. Pulsar `Preparar instalación`; debe recuperar el mismo ID desde IndexedDB.
+4. Pulsar `Ingresar con passkey` y aceptar CTAP2 con User Verification.
+
+La función React firma la posesión ECDSA además de WebAuthn. Esperado: sesión `DRIVER`, 12 horas absolutas, 60 minutos idle y contexto derivado de la autorización.
+
+```javascript
+await fetch('/api/v1/driver/auth/me', {credentials: 'include'}).then(async r => ({status: r.status, body: await r.json().catch(() => null)}));
+await fetch('/api/v1/driver/auth/contexts', {credentials: 'include'}).then(async r => ({status: r.status, body: await r.json().catch(() => null)}));
+```
+
+## 9. Revocación
+
+En el perfil supervisor, obtener `device_authorization.id` mediante SQL de sólo lectura:
+
+```powershell
+$installationID = 'INSTALLATION_ID_FROM_NETWORK'
+$sql = "SELECT id, status, company_id, company_operation_id FROM platform.device_authorization WHERE installation_id = '$installationID' ORDER BY requested_at DESC;"
+docker exec -e "PGPASSWORD=$env:PHASE_1B2D_MIGRATOR_PASSWORD" transportation-platform-phase-1b2d-pg psql -X -q -U tp_migrator -d transportation_platform_phase_1b2d -Atc $sql
+```
+
+Con el UUID devuelto, ejecutar en la Console del perfil supervisor:
+
+```javascript
+await fetch('/api/v1/auth/webauthn/device-authorizations/DEVICE_AUTHORIZATION_ID/revoke', {
+  method: 'POST', credentials: 'include',
+  headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf()},
+  body: JSON.stringify({reason: 'manual revocation test'})
+}).then(async r => ({status: r.status, body: await r.json().catch(() => null)}));
+```
+
+Esperado: 200, autorización `REVOKED` y sesiones DRIVER asociadas `REVOKED`. En conductor, `/me`, `/contexts` y un nuevo `webauthn/options` deben fallar.
+
+## 10. Pruebas negativas
+
+| Caso | Acción | Resultado |
+|---|---|---|
+| Driver en administración | `GET /api/v1/admin/companies` con cookie DRIVER | 401; administración cerrada porque `ADMIN_HTTP_ENABLED=false`. |
+| Firma inválida | Repetir `webauthn/finish` con firma ECDSA alterada | 401 `driver_auth_rejected`. |
+| Replay | Repetir el mismo `webauthn/finish` | Segunda llamada rechazada. |
+| Instalación no autorizada | `POST /api/v1/driver/auth/webauthn/options` con otro UUID | 401 `driver_auth_rejected`. |
+| Membresía fuera de vigencia | Modificar temporalmente sólo esta base aislada y consultar `/me` | Resolución rechazada; restaurar después. |
+| Contexto ajeno | `POST /api/v1/auth/context` con UUID no autorizado | 403 `context_not_allowed`. |
+| Datos borrados | Eliminar IndexedDB y recargar | No se recupera la clave; requiere activación/aprobación nuevas. |
+
+Las pruebas que cambian memberships sólo se ejecutan contra `transportation_platform_phase_1b2d`, nunca DEV.
+
+## 11. Persistencia y limpieza
+
+En DevTools → Application → IndexedDB → `transportation-platform-driver-auth` → `installations`, verificar el registro `CryptoKey` no exportable. No se almacenan tokens.
+
+Detener el backend con Ctrl+C y limpiar sólo el entorno etiquetado:
+
+```powershell
+.\scripts\phase-1b2d-manual\stop.ps1
+.\scripts\phase-1b2d-manual\remove.ps1 -RemoveVolume
+```
+
+Los scripts verifican la etiqueta antes de detener o eliminar.
+
+`remove.ps1 -RemoveVolume` valida el contenedor, su montaje y la etiqueta del volumen antes de iniciar cualquier eliminación. No debe ejecutarse sobre el entorno manual existente durante esta auditoría.
+
+## Resultados y pendientes
+
+- [V] Rutas, payloads y roles se obtuvieron del router, handlers y migraciones existentes.
+- [V] Los helpers preparan sólo el contenedor etiquetado, base sintética, roles mínimos y Goose 14.
+- [V] La auditoría de sólo lectura confirmó el contenedor y volumen manuales esperados, con imagen PostgreSQL 16.8, puerto `55433` y montaje dedicado; no se ejecutaron acciones de modificación sobre ellos.
+- [V] Se corrigieron la interpolación `${Database}` antes de `?sslmode=disable`, el acceso a etiquetas Docker y la validación de reejecución parcial.
+- [V] Un PostgreSQL 16 efímero ejecutó Goose 14 y el fixture dos veces; ambas transacciones terminaron correctamente, sin duplicados y sin cambiar `SUPERUSER`/`BYPASSRLS` de los roles runtime.
+- [V] La base manual persistente fue inspeccionada y no recibió el fixture porque las credenciales privadas disponibles apuntan a `transportation_platform_dev`.
+- [V] Las inspecciones de contenedores y volúmenes de los cuatro scripts usan la salida JSON de Docker y comprueban el código de salida antes de `ConvertFrom-Json`.
+- [V] El helper compartido rechaza etiquetas, nombres, montajes y puertos incorrectos; se probó contra el entorno existente y con variantes negativas en memoria.
+- [P] La ejecución real en Chrome, autenticador virtual, User Verification y supervisión de cookies/IndexedDB siguen siendo manuales.
+- [P] El step-up del supervisor no es actualmente un gate de aprobación.
+
+### Corrección de UUID de autorización
+
+- [V] `FinishRegistration` no poblaba `CompleteRegistrationRequest.DeviceAuthorizationID`; el UUID cero se insertaba como `device_authorization.id` cuando el challenge tenía una solicitud aprobada.
+- [V] Go genera un UUID nuevo sólo para una autorización derivada de un enrolamiento aprobado, y 000014 rechaza `NULL` o el UUID cero en la frontera SQL con SQLSTATE `22023`.
+- [V] Esta corrección no aplicó Goose ni reparó la fila existente en la base manual persistente. El contenedor, volumen, datos de supervisor/conductor, passkey e IndexedDB se conservaron.
+
+Para reanudar de forma segura: mantener el contenedor y no ejecutar todavía `seed-fixture.ps1`, bootstrap ni Chrome. Tras validar el commit en PostgreSQL efímero, ejecutar sólo Goose UP con `tp_migrator` para llevar la base manual de 13 a 14. Después comprobar la autorización existente con UUID cero y decidir una recuperación explícita; no sustituirla automáticamente ni borrar la passkey. La fila inválida debe corregirse mediante un procedimiento controlado antes del login recurrente.
+
+### Recuperación controlada de la autorización UUID cero
+
+La migración 000014 sólo reemplaza la función de registro y no inspecciona ni modifica filas de `device_authorization`; puede aplicarse mientras exista la fila UUID cero. La consulta de dependencias confirmó dos FKs directas, ambas con características reales `NOT DEFERRABLE`, `NOT INITIALLY DEFERRED` y `ON UPDATE NO ACTION`:
+
+| Restricción | Origen | Referencia | Deferrable | Inicialmente diferida | ON UPDATE |
+| --- | --- | --- | --- | --- | --- |
+| `auth_challenge_device_authorization_id_fkey` | `platform.auth_challenge.device_authorization_id` | `platform.device_authorization.id` | No | No | `NO ACTION` |
+| `auth_session_device_authorization_id_fkey` | `platform.auth_session.device_authorization_id` | `platform.device_authorization.id` | No | No | `NO ACTION` |
+
+En el estado observado ambas tienen cero referencias, existe exactamente una autorización para la instalación indicada y la clave pública permanece en la fila.
+
+El script [repair-device-authorization.sql](../../scripts/phase-1b2d-manual/repair-device-authorization.sql) es exclusivo del entorno manual. Verifica base, usuario efectivo, instalación, unicidad y estado; cambia temporalmente a `tp_owner` dentro de una transacción, bloquea la fila, cuenta las referencias y sólo continúa si ambas son cero. No actualiza `auth_session` ni `auth_challenge`, no difiere restricciones, genera un UUID nuevo, conserva la clave pública y hace `COMMIT` sólo si todas las comprobaciones pasan. Ante cualquier precondición, referencia dependiente, bloqueo o error, ejecuta `ROLLBACK` y termina con código no exitoso de `psql`. No modifica `AuthenticatorCredential`, `installation_public_key` ni concede privilegios.
+
+La validación de referencias ocurre después de `SELECT ... FOR UPDATE` sobre la autorización. Ese bloqueo de la fila principal es compatible con las FK inmediatas: una inserción concurrente que intente referenciar el UUID cero debe esperar al bloqueo; si la referencia ya existía, el conteo provoca rechazo. Si el bloqueo o la actualización de la clave no puede completarse dentro de los timeouts, el script falla cerrado. Si aparece cualquier referencia, detenerse y solicitar revisión manual; no borrar ni reescribir filas dependientes.
+
+Orden exacto, sin ejecutar automáticamente:
+
+```powershell
+Set-Location 'C:\Users\hecto\OneDrive\Documentos\ChatGPT\Transportation-Platform'
+$env:PHASE_1B2D_MIGRATOR_DSN = 'postgres://tp_migrator:<contraseña-privada>@127.0.0.1:55433/transportation_platform_phase_1b2d?sslmode=disable'
+go run .\scripts\phase-1b2d-manual\migrate version   # debe mostrar 13
+go run .\scripts\phase-1b2d-manual\migrate up
+go run .\scripts\phase-1b2d-manual\migrate version   # debe mostrar 14
+```
+
+El valor de la contraseña es una plantilla y no debe aparecer en el historial, archivos versionados ni logs. Después de comprobar Goose 14, ejecutar el script usando el mismo secreto privado del migrador; `SET ROLE tp_owner` se limita a esa sesión y transacción:
+
+```powershell
+Get-Content .\scripts\phase-1b2d-manual\repair-device-authorization.sql -Raw |
+    docker exec -i -e "PGPASSWORD=$env:PHASE_1B2D_MIGRATOR_PASSWORD" `
+        transportation-platform-phase-1b2d-pg `
+        psql -X -v ON_ERROR_STOP=1 -U tp_migrator -d transportation_platform_phase_1b2d -f -
+```
+
+El resultado debe mostrar `repaired_device_authorization_id` distinto del UUID cero, con `session_references = 0` y `challenge_references = 0`. Si aparece `repair_error_code`, una excepción de referencias, o el proceso termina con error, no se debe reintentar a ciegas: el script ya ejecutó rollback y deben revisarse las precondiciones. Un código de salida cero sólo se acepta junto con el `COMMIT` y el UUID nuevo mostrado.
+
+#### Validación efímera del procedimiento
+
+- [V] En PostgreSQL 16 efímero con Goose 14, el caso sin referencias completó la reparación, conservó `installation_public_key` y dejó una sola autorización ACTIVE con UUID no cero.
+- [V] Una segunda ejecución rechazó la operación y conservó el UUID reparado (`idempotencia segura`).
+- [V] Una referencia en `platform.auth_challenge` provocó rechazo, `ROLLBACK`, código no exitoso y conservación de la referencia y del UUID cero.
+- [V] Una referencia en `platform.auth_session` produjo el mismo resultado.
+- [V] Instalación incorrecta, autorización inexistente, estado distinto de `ACTIVE` y ausencia del UUID cero fueron rechazados sin cambios.
+- [V] Una base efímera clonada con nombre distinto fue rechazada por la precondición de `current_database()` y terminó con código no exitoso.
+- [V] El contenedor efímero se eliminó al finalizar; no se ejecutó Goose 14 ni la reparación contra la base manual, DEV o WebAuthn persistente.
+
+Verificación posterior, sólo lectura y con `tp_owner` temporal:
+
+```powershell
+$verifySql = @"
+SET ROLE tp_owner;
+SELECT current_database(), current_user;
+SELECT id, installation_id, user_account_id, company_id, company_operation_id,
+       status, key_algorithm
+  FROM platform.device_authorization
+ WHERE installation_id = '78f5e1f4-4f86-4e5f-8adf-955cb7d23337';
+SELECT count(*) AS zero_uuid_rows
+  FROM platform.device_authorization
+ WHERE id = '00000000-0000-0000-0000-000000000000';
+SELECT count(*) AS zero_uuid_session_references
+  FROM platform.auth_session
+ WHERE device_authorization_id = '00000000-0000-0000-0000-000000000000';
+SELECT count(*) AS zero_uuid_challenge_references
+  FROM platform.auth_challenge
+ WHERE device_authorization_id = '00000000-0000-0000-0000-000000000000';
+SELECT count(*) AS credential_rows
+  FROM platform.authenticator_credential
+ WHERE user_account_id = 'aaaaaaaa-aaaa-aaaa-aaaa-200000000003'
+   AND status = 'ACTIVE';
+SELECT c.constraint_name, tc.table_name, kcu.column_name
+  FROM information_schema.table_constraints c
+  JOIN information_schema.key_column_usage kcu
+    ON c.constraint_name = kcu.constraint_name AND c.table_schema = kcu.table_schema
+  JOIN information_schema.constraint_column_usage cc
+    ON c.constraint_name = cc.constraint_name AND c.table_schema = cc.table_schema
+  JOIN information_schema.table_constraints tc
+    ON tc.constraint_name = c.constraint_name AND tc.table_schema = c.table_schema
+ WHERE c.constraint_type = 'FOREIGN KEY'
+   AND cc.table_schema = 'platform' AND cc.table_name = 'device_authorization'
+   AND cc.column_name = 'id';
+RESET ROLE;
+"@
+$verifySql | docker exec -i -e "PGPASSWORD=$env:PHASE_1B2D_MIGRATOR_PASSWORD" `
+    transportation-platform-phase-1b2d-pg `
+    psql -X -v ON_ERROR_STOP=1 -U tp_migrator -d transportation_platform_phase_1b2d -f -
+```
+
+Sólo después de verificar un UUID no cero, una autorización ACTIVE única, cero referencias al UUID cero y la credencial conservada, reiniciar Go. Para esta prueba se puede usar el puerto 18080; el RP ID sigue siendo `localhost`, pero los orígenes deben coincidir con el nuevo puerto:
+
+```powershell
+$env:APP_ENV = 'development'
+$env:PORT = '18080'
+$env:AUTH_ONLINE_ENABLED = 'true'
+$env:WEBAUTHN_ENABLED = 'true'
+$env:ADMIN_HTTP_ENABLED = 'false'
+$env:AUTH_ALLOWED_ORIGINS = 'http://localhost:18080'
+$env:WEBAUTHN_RP_ID = 'localhost'
+$env:WEBAUTHN_ORIGINS = 'http://localhost:18080'
+$env:DATABASE_HOST = '127.0.0.1'
+$env:DATABASE_PORT = '55433'
+$env:DATABASE_NAME = 'transportation_platform_phase_1b2d'
+$env:DATABASE_SSLMODE = 'disable'
+$env:DATABASE_RUNTIME_USER = 'tp_runtime'
+$env:DATABASE_RUNTIME_PASSWORD = $env:PHASE_1B2D_RUNTIME_PASSWORD
+$env:DATABASE_AUTH_USER = 'tp_auth_runtime'
+$env:DATABASE_AUTH_PASSWORD = $env:PHASE_1B2D_AUTH_PASSWORD
+$env:DATABASE_DRIVER_AUTH_USER = 'tp_driver_auth_runtime'
+$env:DATABASE_DRIVER_AUTH_PASSWORD = $env:PHASE_1B2D_DRIVER_AUTH_PASSWORD
+Remove-Item Env:DATABASE_USER -ErrorAction SilentlyContinue
+Remove-Item Env:DATABASE_PASSWORD -ErrorAction SilentlyContinue
+go run .\cmd\platform
+```
+
+La URL esperada pasa a ser `http://localhost:18080`. No se debe ejecutar bootstrap, `seed-fixture.ps1`, Goose DOWN, eliminar el contenedor/volumen ni modificar `transportation_platform_dev`.
+
+### Corrección de expiración prematura de DeviceAuthorization
+
+La causa raíz confirmada era que `complete_webauthn_registration()` copiaba `device_enrollment_request.expires_at` a `device_authorization.expires_at`. La solicitud/challenge conserva una vigencia corta; desde `000015_device_authorization_expiry.sql`, la autorización creada recibe 24 horas desde la finalización del registro, según `platform.device_authorization_policy`. El valor está limitado entre una hora y siete días, no es accesible por los roles runtime y la política productiva sigue pendiente.
+
+La migración `000015` no modifica autorizaciones históricas. Para la única autorización manual vencida se preparó [repair-device-authorization-expiry.sql](../../scripts/phase-1b2d-manual/repair-device-authorization-expiry.sql). El script exige la base manual, la instalación `78f5e1f4-4f86-4e5f-8adf-955cb7d23337`, el usuario `aaaaaaaa-aaaa-aaaa-aaaa-200000000003`, empresa `aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa`, operación `aaaaaaaa-aaaa-aaaa-aaaa-000000000001`, una autorización ACTIVE vencida, una solicitud CONSUMED vencida y al menos una passkey ACTIVE. También exige que no haya revocación, bloquea la fila, usa SERIALIZABLE, registra auditoría y actualiza únicamente la expiración. Una segunda ejecución falla cerrada y no extiende otra autorización.
+
+#### Secuencia exacta, pendiente de autorización explícita
+
+No ejecutar estos comandos durante una revisión. Deben usarse sólo sobre el contenedor manual indicado, nunca sobre DEV:
+
+```powershell
+Set-Location 'C:\Users\hecto\OneDrive\Documentos\ChatGPT\Transportation-Platform'
+$env:PHASE_1B2D_MIGRATOR_DSN = 'postgres://tp_migrator:<contraseña-privada>@127.0.0.1:55433/transportation_platform_phase_1b2d?sslmode=disable'
+go run .\scripts\phase-1b2d-manual\migrate version   # debe mostrar 14
+go run .\scripts\phase-1b2d-manual\migrate up
+go run .\scripts\phase-1b2d-manual\migrate version   # debe mostrar 15
+```
+
+Después de verificar Goose 15 y revisar las precondiciones en modo lectura, ejecutar la reparación una sola vez con la contraseña privada del migrador inyectada fuera de Git:
+
+```powershell
+Get-Content .\scripts\phase-1b2d-manual\repair-device-authorization-expiry.sql -Raw |
+    docker exec -i -e "PGPASSWORD=$env:PHASE_1B2D_MIGRATOR_PASSWORD" `
+        transportation-platform-phase-1b2d-pg `
+        psql -X -v ON_ERROR_STOP=1 -U tp_migrator -d transportation_platform_phase_1b2d -f -
+```
+
+El resultado exitoso debe mostrar `authorization_id`, `previous_expires_at`, `new_expires_at` aproximadamente 24 horas después del reloj del servidor y `audit_id`, seguido de `COMMIT`. Cualquier error, referencia ambigua, autorización no ACTIVE, passkey ausente o código de salida no cero implica `ROLLBACK`; no reintentar sin revisar la causa. No se deben modificar manualmente la passkey, IndexedDB, membresías, solicitudes ni sesiones.
+
+Después de la reparación, comprobar en sólo lectura que existe una única autorización ACTIVE para la instalación, que `expires_at > clock_timestamp()`, que la solicitud sigue `CONSUMED`, que no se alteró la credencial WebAuthn y que existe el evento `DEVICE_AUTHORIZATION_EXPIRY_RECOVERED`. Luego reiniciar Go en el puerto 18080 y repetir el login recurrente. Una autorización realmente vencida o revocada debe seguir siendo rechazada; las sesiones DRIVER mantienen 12 horas absolutas y 60 minutos de inactividad.
+
+#### Validación defensiva del UUID histórico
+
+**[D]** La reparación manual queda limitada adicionalmente a la autorización `4fcde28e-4ef1-406e-aa26-c5c679e4a749`, asociada a la instalación `78f5e1f4-4f86-4e5f-8adf-955cb7d23337`. El UUID exacto se verifica en la precondición, en el `SELECT ... FOR UPDATE` y en el `UPDATE`; coincidir sólo en instalación, usuario, empresa y operación no es suficiente.
+
+**[V]** En PostgreSQL 16 efímero: UUID correcto completó una única reparación y auditoría; UUID diferente terminó con `ROLLBACK`, sin modificar expiración ni crear auditoría; una segunda ejecución rechazó sin renovar ni auditar; y base, instalación, usuario, estado, passkey o solicitud incorrectos continuaron rechazándose. La base manual no debe usarse para estas pruebas.
+
+## Resultados finales de cierre de Fase 1B.2-D
+
+### Pruebas manuales reales
+
+**[V]** Resultados reportados durante la ejecución supervisada en Chrome con autenticador virtual CTAP2, User Verification habilitado, datos sintéticos, PostgreSQL 16 aislado en `transportation_platform_phase_1b2d`, puerto `55433`, backend en `http://localhost:18080` y Goose versión 15:
+
+| Prueba | Resultado |
+|---|---|
+| Preparación y recuperación de instalación desde IndexedDB | PASS |
+| CryptoKey no exportable persistida | PASS |
+| Login inicial del conductor | PASS |
+| Solicitud de enrolamiento | PASS |
+| Aprobación por supervisor | PASS |
+| Registro WebAuthn con User Verification | PASS |
+| Login recurrente WebAuthn y posesión ECDSA | PASS |
+| Creación y resolución de sesión DRIVER | PASS |
+| `GET /api/v1/driver/auth/me` | HTTP 200 |
+| `GET /api/v1/driver/auth/contexts` | HTTP 200 |
+| Revocación por supervisor | HTTP 200, `REVOKED` |
+| Acceso con sesión DRIVER revocada | HTTP 401 |
+| Nuevo login con dispositivo revocado | HTTP 401 |
+
+Después de recargar la página fue necesario volver a introducir el identificador del conductor; la instalación y su clave se recuperaron desde IndexedDB. No se documentan credenciales, cookies, tokens ni claves privadas.
+
+### Validaciones automatizadas
+
+**[V]** La suite automatizada ejecutada para el cierre cubre Go, frontend y PostgreSQL 16 efímero. La ejecución no utiliza `transportation_platform_dev`, la base manual existente ni volúmenes persistentes:
+
+- `go test ./... -count=1`: PASS.
+- `go vet ./...`: PASS.
+- `go build ./cmd/platform`: PASS.
+- `pnpm --dir web typecheck`: PASS.
+- `pnpm --dir web test`: PASS, 5 pruebas.
+- `pnpm --dir web build`: PASS.
+- `docker compose config --quiet`: PASS.
+- `docker build`: PASS.
+- Migraciones PostgreSQL 16 efímeras `up/down/up` hasta Goose 15: PASS.
+- `git diff --check`: PASS.
+
+Las pruebas manuales y los scripts de reparación histórica no forman parte del flujo productivo. Los scripts manuales verifican contenedor, volumen, base, puerto y etiquetas antes de operar; no deben ejecutarse contra bases productivas.
+
+### Defectos encontrados durante la fase
+
+**[V]** Se corrigieron los siguientes problemas sin relajar las garantías de seguridad:
+
+1. Interpolación de plantillas Docker en PowerShell; se sustituyó por inspección JSON validada.
+2. Carga del fixture bloqueada por RLS; se agregó una frontera exclusiva del fixture sin modificar RLS productivo.
+3. UUID cero en `DeviceAuthorization`; se corrigieron generación, frontera SQL y reparación controlada.
+4. Vencimiento heredado incorrectamente desde el enrolamiento; se separó la política propia de la autorización.
+5. React interpretaba incorrectamente el sobre `options.publicKey`; se corrigió el desempaquetado y la conversión Base64URL.
+6. Mensajes genéricos dificultaban diagnosticar el navegador; se agregaron diagnósticos de etapa sólo en desarrollo.
+7. El login recurrente requiere volver a introducir el identificador después de recargar; queda como mejora de experiencia, sin persistir tokens ni contraseñas.
+
+Las migraciones finales de esta fase son `000012_driver_mobile_auth.sql`, `000013_driver_auth_boundary.sql`, `000014_webauthn_device_authorization_uuid.sql` y `000015_device_authorization_expiry.sql`. Las migraciones previas permanecen inmutables.
+
+### Pendientes antes de producción
+
+**[P]** La vigencia provisional de `DeviceAuthorization` es de 24 horas, configurable entre 1 hora y 7 días; requiere decisión operativa.
+
+**[P]** Aprobar o revocar dispositivos aún no exige un step-up WebAuthn adicional; debe evaluarse antes de habilitar estas operaciones en producción.
+
+**[P]** Debe mejorarse la experiencia para no pedir nuevamente el identificador después de una recarga, sin almacenar credenciales ni tokens persistentes.
+
+**[P]** Falta definir recuperación por pérdida, sustitución o reinstalación del teléfono.
+
+**[P]** La aprobación del supervisor se ejecutó mediante API/DevTools; queda pendiente una interfaz administrativa operativa.

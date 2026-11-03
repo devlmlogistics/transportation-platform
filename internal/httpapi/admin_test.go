@@ -59,6 +59,23 @@ func TestAdminHandlerUsesOnlyInjectedTestBoundary(t *testing.T) {
 	}
 }
 
+func TestAdminHandlerRejectsDriverSessionIntent(t *testing.T) {
+	companyID := uuid.New()
+	service := &fakeAdminService{company: postgres.CompanyRecord{ID: companyID}}
+	handler, err := NewAdminHandler(service, fakePrincipalResolver{principal: postgres.Principal{
+		UserAccountID: uuid.New(), PersonID: uuid.New(), Active: true, SessionPolicy: "DRIVER",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/admin/companies/"+companyID.String(), nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden || service.getCompanyCalled {
+		t.Fatalf("driver session admin status=%d called=%v body=%q", response.Code, service.getCompanyCalled, response.Body.String())
+	}
+}
+
 func TestAdminHandlerRejectsAssignmentScopeMismatchesBeforeService(t *testing.T) {
 	companyID := uuid.New()
 	otherCompanyID := uuid.New()

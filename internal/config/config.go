@@ -30,18 +30,20 @@ type Config struct {
 }
 
 type DatabaseConfig struct {
-	Host              string
-	Port              string
-	Name              string
-	User              string
-	Password          string
-	SSLMode           string
-	RuntimeUser       string
-	RuntimePassword   string
-	AuthUser          string
-	AuthPassword      string
-	BootstrapUser     string
-	BootstrapPassword string
+	Host               string
+	Port               string
+	Name               string
+	User               string
+	Password           string
+	SSLMode            string
+	RuntimeUser        string
+	RuntimePassword    string
+	AuthUser           string
+	AuthPassword       string
+	DriverAuthUser     string
+	DriverAuthPassword string
+	BootstrapUser      string
+	BootstrapPassword  string
 }
 
 func (c Config) ListenAddr() string {
@@ -108,11 +110,11 @@ func Load(getenv func(string) string) (Config, error) {
 		if config.Database.Host == "" || config.Database.Port == "" || config.Database.Name == "" {
 			return Config{}, fmt.Errorf("database host, port and name are required when online authentication is enabled")
 		}
-		if config.Database.RuntimeUser != "tp_runtime" || config.Database.AuthUser != "tp_auth_runtime" {
-			return Config{}, fmt.Errorf("online authentication requires DATABASE_RUNTIME_USER=tp_runtime and DATABASE_AUTH_USER=tp_auth_runtime")
+		if config.Database.RuntimeUser != "tp_runtime" || config.Database.AuthUser != "tp_auth_runtime" || config.Database.DriverAuthUser != "tp_driver_auth_runtime" {
+			return Config{}, fmt.Errorf("online authentication requires tp_runtime, tp_auth_runtime and tp_driver_auth_runtime database users")
 		}
-		if config.Database.RuntimePassword == "" || config.Database.AuthPassword == "" {
-			return Config{}, fmt.Errorf("runtime and authentication database passwords are required when online authentication is enabled")
+		if config.Database.RuntimePassword == "" || config.Database.AuthPassword == "" || config.Database.DriverAuthPassword == "" {
+			return Config{}, fmt.Errorf("runtime, authentication and driver-auth database passwords are required when online authentication is enabled")
 		}
 		if len(config.AllowedOrigins) == 0 {
 			return Config{}, fmt.Errorf("AUTH_ALLOWED_ORIGINS must contain at least one origin when online authentication is enabled")
@@ -140,18 +142,20 @@ func databaseConfig(getenv func(string) string) DatabaseConfig {
 		runtimePassword = getenv("DATABASE_PASSWORD")
 	}
 	return DatabaseConfig{
-		Host:              strings.TrimSpace(getenv("DATABASE_HOST")),
-		Port:              strings.TrimSpace(getenv("DATABASE_PORT")),
-		Name:              strings.TrimSpace(getenv("DATABASE_NAME")),
-		User:              baseUser,
-		Password:          getenv("DATABASE_PASSWORD"),
-		SSLMode:           valueOrDefault(getenv("DATABASE_SSLMODE"), "disable"),
-		RuntimeUser:       runtimeUser,
-		RuntimePassword:   runtimePassword,
-		AuthUser:          valueOrDefault(getenv("DATABASE_AUTH_USER"), "tp_auth_runtime"),
-		AuthPassword:      getenv("DATABASE_AUTH_PASSWORD"),
-		BootstrapUser:     valueOrDefault(getenv("DATABASE_BOOTSTRAP_USER"), "tp_bootstrap_runtime"),
-		BootstrapPassword: getenv("DATABASE_BOOTSTRAP_PASSWORD"),
+		Host:               strings.TrimSpace(getenv("DATABASE_HOST")),
+		Port:               strings.TrimSpace(getenv("DATABASE_PORT")),
+		Name:               strings.TrimSpace(getenv("DATABASE_NAME")),
+		User:               baseUser,
+		Password:           getenv("DATABASE_PASSWORD"),
+		SSLMode:            valueOrDefault(getenv("DATABASE_SSLMODE"), "disable"),
+		RuntimeUser:        runtimeUser,
+		RuntimePassword:    runtimePassword,
+		AuthUser:           valueOrDefault(getenv("DATABASE_AUTH_USER"), "tp_auth_runtime"),
+		AuthPassword:       getenv("DATABASE_AUTH_PASSWORD"),
+		DriverAuthUser:     valueOrDefault(getenv("DATABASE_DRIVER_AUTH_USER"), "tp_driver_auth_runtime"),
+		DriverAuthPassword: getenv("DATABASE_DRIVER_AUTH_PASSWORD"),
+		BootstrapUser:      valueOrDefault(getenv("DATABASE_BOOTSTRAP_USER"), "tp_bootstrap_runtime"),
+		BootstrapPassword:  getenv("DATABASE_BOOTSTRAP_PASSWORD"),
 	}
 }
 

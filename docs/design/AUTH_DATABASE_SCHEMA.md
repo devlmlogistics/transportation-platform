@@ -172,7 +172,7 @@ Campos propuestos:
 
 La FK compuesta de `company_id` y `company_operation_id` debe impedir que una autorización operacional apunte a otra empresa. El servicio debe impedir que una instalación pendiente se convierta en activa sin una solicitud aprobada, una aprobación independiente y una ceremonia válida.
 
-El modelo admite varias autorizaciones por cuenta según `max_devices`; la política de reemplazo y la duración son **[P]**. Revocar no borra la fila ni autoriza borrar automáticamente datos locales pendientes.
+El modelo admite varias autorizaciones por cuenta según `max_devices`. Para Fase 1B.2-D se adopta **[D]** una duración provisional de 24 horas para `DeviceAuthorization`, calculada por PostgreSQL desde la finalización exitosa del registro y almacenada en `platform.device_authorization_policy`. El valor de desarrollo puede cambiarlo exclusivamente el rol migrador/owner dentro de los límites de la tabla; ningún runtime ni cliente puede proporcionarlo. La duración de producción permanece **[P]**. Revocar no borra la fila ni autoriza borrar automáticamente datos locales pendientes.
 
 ### 3.6 `platform.device_enrollment_request`
 
