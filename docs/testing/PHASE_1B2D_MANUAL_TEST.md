@@ -438,3 +438,34 @@ go run .\cmd\platform
 ```
 
 La URL esperada pasa a ser `http://localhost:18080`. No se debe ejecutar bootstrap, `seed-fixture.ps1`, Goose DOWN, eliminar el contenedor/volumen ni modificar `transportation_platform_dev`.
+
+### Corrección de expiración prematura de DeviceAuthorization
+
+La causa raíz confirmada era que `complete_webauthn_registration()` copiaba `device_enrollment_request.expires_at` a `device_authorization.expires_at`. La solicitud/challenge conserva una vigencia corta; desde `000015_device_authorization_expiry.sql`, la autorización creada recibe 24 horas desde la finalización del registro, según `platform.device_authorization_policy`. El valor está limitado entre una hora y siete días, no es accesible por los roles runtime y la política productiva sigue pendiente.
+
+La migración `000015` no modifica autorizaciones históricas. Para la única autorización manual vencida se preparó [repair-device-authorization-expiry.sql](../../scripts/phase-1b2d-manual/repair-device-authorization-expiry.sql). El script exige la base manual, la instalación `78f5e1f4-4f86-4e5f-8adf-955cb7d23337`, el usuario `aaaaaaaa-aaaa-aaaa-aaaa-200000000003`, empresa `aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa`, operación `aaaaaaaa-aaaa-aaaa-aaaa-000000000001`, una autorización ACTIVE vencida, una solicitud CONSUMED vencida y al menos una passkey ACTIVE. También exige que no haya revocación, bloquea la fila, usa SERIALIZABLE, registra auditoría y actualiza únicamente la expiración. Una segunda ejecución falla cerrada y no extiende otra autorización.
+
+#### Secuencia exacta, pendiente de autorización explícita
+
+No ejecutar estos comandos durante una revisión. Deben usarse sólo sobre el contenedor manual indicado, nunca sobre DEV:
+
+```powershell
+Set-Location 'C:\Users\hecto\OneDrive\Documentos\ChatGPT\Transportation-Platform'
+$env:PHASE_1B2D_MIGRATOR_DSN = 'postgres://tp_migrator:<contraseña-privada>@127.0.0.1:55433/transportation_platform_phase_1b2d?sslmode=disable'
+go run .\scripts\phase-1b2d-manual\migrate version   # debe mostrar 14
+go run .\scripts\phase-1b2d-manual\migrate up
+go run .\scripts\phase-1b2d-manual\migrate version   # debe mostrar 15
+```
+
+Después de verificar Goose 15 y revisar las precondiciones en modo lectura, ejecutar la reparación una sola vez con la contraseña privada del migrador inyectada fuera de Git:
+
+```powershell
+Get-Content .\scripts\phase-1b2d-manual\repair-device-authorization-expiry.sql -Raw |
+    docker exec -i -e "PGPASSWORD=$env:PHASE_1B2D_MIGRATOR_PASSWORD" `
+        transportation-platform-phase-1b2d-pg `
+        psql -X -v ON_ERROR_STOP=1 -U tp_migrator -d transportation_platform_phase_1b2d -f -
+```
+
+El resultado exitoso debe mostrar `authorization_id`, `previous_expires_at`, `new_expires_at` aproximadamente 24 horas después del reloj del servidor y `audit_id`, seguido de `COMMIT`. Cualquier error, referencia ambigua, autorización no ACTIVE, passkey ausente o código de salida no cero implica `ROLLBACK`; no reintentar sin revisar la causa. No se deben modificar manualmente la passkey, IndexedDB, membresías, solicitudes ni sesiones.
+
+Después de la reparación, comprobar en sólo lectura que existe una única autorización ACTIVE para la instalación, que `expires_at > clock_timestamp()`, que la solicitud sigue `CONSUMED`, que no se alteró la credencial WebAuthn y que existe el evento `DEVICE_AUTHORIZATION_EXPIRY_RECOVERED`. Luego reiniciar Go en el puerto 18080 y repetir el login recurrente. Una autorización realmente vencida o revocada debe seguir siendo rechazada; las sesiones DRIVER mantienen 12 horas absolutas y 60 minutos de inactividad.

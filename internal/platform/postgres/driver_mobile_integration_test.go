@@ -33,6 +33,16 @@ func testDriverMobileAuth(t *testing.T, ctx context.Context, repository *OnlineA
 	if authCanIssue || !driverAuthCanIssue {
 		t.Fatalf("unexpected driver issuance privileges: tp_auth_runtime=%v tp_driver_auth_runtime=%v", authCanIssue, driverAuthCanIssue)
 	}
+	var authPolicyCanRead, runtimePolicyCanRead bool
+	if err := authPool.QueryRow(ctx, `SELECT has_table_privilege(current_user, 'platform.device_authorization_policy', 'SELECT')`).Scan(&authPolicyCanRead); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtimePool.QueryRow(ctx, `SELECT has_table_privilege(current_user, 'platform.device_authorization_policy', 'SELECT')`).Scan(&runtimePolicyCanRead); err != nil {
+		t.Fatal(err)
+	}
+	if authPolicyCanRead || runtimePolicyCanRead {
+		t.Fatalf("runtime roles can read device authorization policy: auth=%v runtime=%v", authPolicyCanRead, runtimePolicyCanRead)
+	}
 	if _, err := runtimePool.Exec(ctx, `SELECT platform.complete_driver_login($1,$2,$3,$4,0,$5,$6,$7,$8,'', $9,$10)`, uuid.New(), makeHash(0xB1), makeHash(0xB2), makeHash(0xB3), uuid.New(), makeHash(0xB4), makeHash(0xB5), makeHash(0xB6), uuid.New(), uuid.New()); err == nil {
 		t.Fatal("tp_runtime executed the DRIVER session issuance boundary")
 	}
@@ -185,14 +195,27 @@ func testDriverMobileAuth(t *testing.T, ctx context.Context, repository *OnlineA
 		t.Fatalf("finish approved device registration: %v", err)
 	}
 	var registeredDeviceID uuid.UUID
+	var registeredDeviceExpiresAt, enrollmentExpiresAt time.Time
+	var deviceExpiryIndependent, deviceExpiryProvisional bool
 	if err := adminPool.QueryRow(ctx, `
-		SELECT id FROM platform.device_authorization
-		 WHERE installation_id = $1 AND user_account_id = $2
-	`, activationInstallationID, fixture.UserADriver).Scan(&registeredDeviceID); err != nil {
+		SELECT da.id, da.expires_at, d.expires_at,
+		       da.expires_at > d.expires_at,
+		       da.expires_at > clock_timestamp() + interval '23 hours'
+		  FROM platform.device_authorization da
+		  JOIN platform.device_enrollment_request d
+		    ON d.id = $3 AND d.installation_id = da.installation_id
+		 WHERE da.installation_id = $1 AND da.user_account_id = $2
+	`, activationInstallationID, fixture.UserADriver, enrollment.ID).Scan(
+		&registeredDeviceID, &registeredDeviceExpiresAt, &enrollmentExpiresAt,
+		&deviceExpiryIndependent, &deviceExpiryProvisional); err != nil {
 		t.Fatal(err)
 	}
 	if registeredDeviceID == uuid.Nil {
 		t.Fatal("registration created a zero device authorization UUID")
+	}
+	if !deviceExpiryIndependent || !deviceExpiryProvisional || !registeredDeviceExpiresAt.After(enrollmentExpiresAt) {
+		t.Fatalf("device authorization inherited enrollment expiry: device=%s enrollment=%s independent=%v provisional=%v",
+			registeredDeviceExpiresAt, enrollmentExpiresAt, deviceExpiryIndependent, deviceExpiryProvisional)
 	}
 	var registeredCredentialStatus string
 	if err := adminPool.QueryRow(ctx, `
@@ -202,6 +225,14 @@ func testDriverMobileAuth(t *testing.T, ctx context.Context, repository *OnlineA
 	}
 	if registeredCredentialStatus != "ACTIVE" {
 		t.Fatalf("registered credential status=%s", registeredCredentialStatus)
+	}
+	if _, err := adminPool.Exec(ctx, `
+		UPDATE platform.device_enrollment_request
+		   SET requested_at = clock_timestamp() - interval '20 minutes',
+		       expires_at = clock_timestamp() - interval '1 second'
+		 WHERE id = $1 AND status = 'CONSUMED'
+	`, enrollment.ID); err != nil {
+		t.Fatal(err)
 	}
 
 	// Exercise the SQL boundary directly with the real authentication role.
@@ -267,6 +298,17 @@ func testDriverMobileAuth(t *testing.T, ctx context.Context, repository *OnlineA
 	}
 	if recurrentDeviceID != registeredDeviceID {
 		t.Fatalf("recurrent session device authorization=%s want=%s", recurrentDeviceID, registeredDeviceID)
+	}
+	if _, err := adminPool.Exec(ctx, `
+		UPDATE platform.device_authorization
+		   SET requested_at = clock_timestamp() - interval '20 minutes',
+		       expires_at = clock_timestamp() - interval '1 second'
+		 WHERE id = $1 AND status = 'ACTIVE'
+	`, registeredDeviceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := driverService.BeginLogin(ctx, identifier, activationInstallationID); err == nil {
+		t.Fatal("expired device authorization produced driver login options")
 	}
 	if err := activationService.Logout(ctx, recurrent.Token, recurrent.Session.ID); err != nil {
 		t.Fatal(err)

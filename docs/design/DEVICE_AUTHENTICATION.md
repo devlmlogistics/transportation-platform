@@ -190,6 +190,12 @@ Este fallback es online y temporal en el sentido de que requiere conexión para 
 
 La credencial WebAuthn puede autenticar a la cuenta; la instalación autorizada puede ser la que permite el acceso operativo y offline. Una no reemplaza a la otra.
 
+### Política provisional de vigencia
+
+**[D]** Durante Fase 1B.2-D, una `DeviceAuthorization` creada después de un registro WebAuthn aprobado recibe una vigencia independiente de 24 horas desde la finalización del registro. La solicitud de enrolamiento y sus challenges conservan sus expiraciones cortas; que la solicitud quede `CONSUMED` o expire después no acorta ni renueva la autorización.
+
+La duración se almacena en `platform.device_authorization_policy` con límites de una hora a siete días. Sólo el rol migrador/owner puede ajustar el valor en el entorno de desarrollo; `tp_runtime`, `tp_auth_runtime`, `tp_driver_auth_runtime` y el cliente no tienen DML ni pueden enviar una fecha. Cada resolución de sesión y login DRIVER vuelve a comprobar `status`, `expires_at`, membresías y operación. La revocación sigue siendo inmediata. La duración definitiva de producción es **[P]**.
+
 ### Limitaciones de passkeys sincronizadas
 
 **[V]** El código original guarda backup_eligible y backup_state, y el frontend muestra “Passkey multidispositivo” cuando corresponde.

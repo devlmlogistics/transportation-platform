@@ -147,6 +147,8 @@ Este documento es normativo para el diseño futuro de la plataforma; los documen
 
 **Razón:** WebAuthn no garantiza que una credencial multidispositivo permanezca en un único teléfono físico. La autorización operacional debe poder aprobarse, limitarse, auditarse y revocarse por instalación.
 
+**[D] Fase 1B.2-D:** `DeviceAuthorization` usa provisionalmente 24 horas desde el registro aprobado, independiente de `DeviceEnrollmentRequest.expires_at`. El valor de desarrollo está protegido en `platform.device_authorization_policy`; la política de producción queda pendiente.
+
 ### ADR-013 — Reutilizar el patrón de aprobación de Drayage, no sus límites de identidad
 
 **Estado:** [D] recomendado.

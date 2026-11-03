@@ -98,6 +98,7 @@ Las siguientes preguntas dejan de ser abiertas en su principio de negocio, aunqu
 | A-04 | ¿Cuál es la vigencia offline por operación? | Propuesta inicial: 8–12 horas para Drayage y 24 horas general, con límite absoluto. | Dueños de operación |
 | A-05 | ¿La PWA ofrece protección suficiente para datos offline? | IndexedDB cifrada y clave de instalación como mínimo; operaciones de alto riesgo pueden prohibir offline. | Seguridad/arquitectura |
 | A-06 | ¿Quién puede revocar, recuperar o reemplazar una instalación? | Supervisor autorizado de la operación, con permisos explícitos y auditoría. | Seguridad/negocio |
+| A-12 | ¿Cuál será la duración productiva de `DeviceAuthorization`? | **[D]** 24 horas provisionales en desarrollo; aprobar TTL productivo y reglas de renovación antes de producción. | Seguridad/operaciones |
 | A-07 | ¿Qué proveedor/librería WebAuthn usará Go? | Seleccionar una implementación mantenida y probar RP ID, origin, counters y passkeys multidispositivo. | Backend/seguridad |
 | A-08 | ¿Qué datos pueden descargarse para trabajo offline? | Sólo trabajos asignados y formularios/campos necesarios; excluir dashboards consolidados y datos no operativos. | Dueños de operación |
 
