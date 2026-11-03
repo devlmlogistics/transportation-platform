@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -16,12 +17,12 @@ import (
 
 	webauthn "github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	applicationauth "transportation-platform/internal/application/auth"
 )
 
 func testDriverMobileAuth(t *testing.T, ctx context.Context, repository *OnlineAuthRepository, webauthnService *applicationauth.WebAuthnService, runtimePool, authPool, driverAuthPool, adminPool *pgxpool.Pool, fixture foundationFixture) {
-	t.Helper()
 	var authCanIssue, driverAuthCanIssue bool
 	if err := authPool.QueryRow(ctx, `SELECT has_function_privilege(current_user, 'platform.complete_driver_login(uuid,bytea,bytea,bytea,bigint,uuid,bytea,bytea,bytea,text,uuid,uuid)', 'EXECUTE')`).Scan(&authCanIssue); err != nil {
 		t.Fatal(err)
@@ -77,6 +78,18 @@ func testDriverMobileAuth(t *testing.T, ctx context.Context, repository *OnlineA
 	driverService, err := applicationauth.NewDriverMobileService(repository, webauthnService.Engine)
 	if err != nil {
 		t.Fatal(err)
+	}
+	zeroInstallationID := uuid.New()
+	if _, err := adminPool.Exec(ctx, `
+		INSERT INTO platform.device_authorization(
+			id, installation_id, user_account_id, company_id, company_operation_id,
+			installation_public_key, key_algorithm, status, approved_at)
+		VALUES ($1, $2, $3, $4, $5, $6, 'ECDSA_P256_SHA256', 'ACTIVE', clock_timestamp())
+	`, uuid.Nil, zeroInstallationID, fixture.UserADriver, fixture.CompanyA, fixture.OperationA, installationPublicKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := driverService.BeginLogin(ctx, identifier, zeroInstallationID); err == nil {
+		t.Fatal("zero device authorization UUID produced driver login options")
 	}
 	activationService, err := applicationauth.NewOnlineAuthService(repository)
 	if err != nil {
@@ -156,6 +169,115 @@ func testDriverMobileAuth(t *testing.T, ctx context.Context, repository *OnlineA
 	if err := repository.ApproveDeviceEnrollmentRequest(ctx, applicationauth.HashSessionToken(supervisorToken), enrollment.ID, "test approval"); err != nil {
 		t.Fatalf("approved enrollment request was not accepted: %v", err)
 	}
+	registrationChallengeID, _, err := webauthnService.BeginRegistration(ctx, activation.Token, resolvedActivation, "registered driver passkey", &enrollment.ID)
+	if err != nil {
+		t.Fatalf("begin approved device registration: %v", err)
+	}
+	registrationChallenge, err := repository.GetWebAuthnChallenge(ctx, applicationauth.HashSessionToken(activation.Token), registrationChallengeID, applicationauth.RegistrationChallenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registeredCredential := newTestAssertionCredential(t)
+	registrationPayload := validRegistrationPayloadForCredential(t, registrationChallenge.SessionData, registeredCredential)
+	if err := webauthnService.FinishRegistration(ctx, activation.Token, resolvedActivation, registrationChallengeID,
+		httptest.NewRequest(http.MethodPost, "/api/v1/auth/webauthn/registration/finish", bytes.NewReader(registrationPayload)),
+		"registered driver passkey"); err != nil {
+		t.Fatalf("finish approved device registration: %v", err)
+	}
+	var registeredDeviceID uuid.UUID
+	if err := adminPool.QueryRow(ctx, `
+		SELECT id FROM platform.device_authorization
+		 WHERE installation_id = $1 AND user_account_id = $2
+	`, activationInstallationID, fixture.UserADriver).Scan(&registeredDeviceID); err != nil {
+		t.Fatal(err)
+	}
+	if registeredDeviceID == uuid.Nil {
+		t.Fatal("registration created a zero device authorization UUID")
+	}
+	var registeredCredentialStatus string
+	if err := adminPool.QueryRow(ctx, `
+		SELECT status FROM platform.authenticator_credential WHERE credential_id = $1
+	`, registeredCredential.CredentialID).Scan(&registeredCredentialStatus); err != nil {
+		t.Fatal(err)
+	}
+	if registeredCredentialStatus != "ACTIVE" {
+		t.Fatalf("registered credential status=%s", registeredCredentialStatus)
+	}
+
+	// Exercise the SQL boundary directly with the real authentication role.
+	// A valid approved request must not accept uuid.Nil for the new authorization.
+	nilEnrollment, err := webauthnService.CreateDeviceEnrollmentRequest(ctx, activation.Token, resolvedActivation,
+		fixture.CompanyA, &fixture.OperationA, uuid.New(), activationPublicKey, "ECDSA_P256_SHA256")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.ApproveDeviceEnrollmentRequest(ctx, applicationauth.HashSessionToken(supervisorToken), nilEnrollment.ID, "nil UUID regression"); err != nil {
+		t.Fatal(err)
+	}
+	nilChallengeID, _, err := webauthnService.BeginRegistration(ctx, activation.Token, resolvedActivation, "nil UUID regression", &nilEnrollment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nilChallenge, err := repository.GetWebAuthnChallenge(ctx, applicationauth.HashSessionToken(activation.Token), nilChallengeID, applicationauth.RegistrationChallenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = repository.CompleteWebAuthnRegistration(ctx, applicationauth.HashSessionToken(activation.Token), applicationauth.CompleteRegistrationRequest{
+		ChallengeID: nilChallengeID, ChallengeHash: nilChallenge.ChallengeHash, BindingHash: ceremonyBindingForTest(activation.Session.ID, applicationauth.RegistrationChallenge),
+		CredentialID: uuid.New(), CredentialKey: []byte("nil-uuid-regression"), PublicKey: []byte{1},
+		SignCount: 0, UserVerified: true, Metadata: []byte(`{}`), DeviceAuthorizationID: uuid.Nil, AuditID: uuid.New(),
+	})
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "22023" {
+		t.Fatalf("zero device authorization UUID error=%v, pg=%v", err, pgErr)
+	}
+
+	// The same newly registered credential must complete a recurrent login.
+	recurrentChallengeID, _, err := driverService.BeginLogin(ctx, identifier, activationInstallationID)
+	if err != nil {
+		t.Fatalf("begin recurrent login after registration: %v", err)
+	}
+	recurrentChallenge, err := repository.GetDriverLoginChallenge(ctx, recurrentChallengeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recurrentCeremony webauthn.SessionData
+	if err := json.Unmarshal(recurrentChallenge.SessionData, &recurrentCeremony); err != nil {
+		t.Fatal(err)
+	}
+	recurrentPayload := signedAssertion(t, recurrentCeremony, registeredCredential, true, true)
+	proofMessage := append(append([]byte("tp-driver-possession\x00"), recurrentChallenge.ChallengeHash...), activationInstallationID[:]...)
+	digest := sha256.Sum256(proofMessage)
+	r, s, err := ecdsa.Sign(rand.Reader, activationInstallationKey, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := make([]byte, 64)
+	r.FillBytes(proof[:32])
+	s.FillBytes(proof[32:])
+	recurrent, err := driverService.FinishLogin(ctx, recurrentChallengeID,
+		httptest.NewRequest(http.MethodPost, "/api/v1/driver/auth/webauthn/finish", bytes.NewReader(recurrentPayload)),
+		proof, "test-driver", "192.0.2.56:443")
+	if err != nil {
+		t.Fatalf("recurrent login after registration: %v", err)
+	}
+	var recurrentDeviceID uuid.UUID
+	if err := adminPool.QueryRow(ctx, `SELECT device_authorization_id FROM platform.auth_session WHERE id = $1`, recurrent.Session.ID).Scan(&recurrentDeviceID); err != nil {
+		t.Fatal(err)
+	}
+	if recurrentDeviceID != registeredDeviceID {
+		t.Fatalf("recurrent session device authorization=%s want=%s", recurrentDeviceID, registeredDeviceID)
+	}
+	if err := activationService.Logout(ctx, recurrent.Token, recurrent.Session.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminPool.Exec(ctx, `
+		UPDATE platform.authenticator_credential
+		   SET status = 'REVOKED', revoked_at = clock_timestamp(), revoked_reason = 'uuid-regression-cleanup'
+		 WHERE credential_id = $1
+	`, registeredCredential.CredentialID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := authPool.Exec(ctx, `SELECT platform.complete_driver_login($1,$2,$3,$4,0,$5,$6,$7,$8,'',$9,$10)`, uuid.New(), makeHash(0xB8), makeHash(0xB9), makeHash(0xBA), uuid.New(), makeHash(0xBB), makeHash(0xBC), makeHash(0xBD), uuid.New(), uuid.New()); err == nil {
 		t.Fatal("tp_auth_runtime executed the DRIVER session issuance boundary")
 	}
@@ -185,13 +307,13 @@ func testDriverMobileAuth(t *testing.T, ctx context.Context, repository *OnlineA
 	if _, err := driverService.FinishLogin(ctx, challengeID, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(credentialPayload)), badProof, "test-driver", "192.0.2.55:443"); err == nil {
 		t.Fatal("invalid installation proof was accepted")
 	}
-	proofMessage := append(append([]byte("tp-driver-possession\x00"), challenge.ChallengeHash...), installationID[:]...)
-	digest := sha256.Sum256(proofMessage)
-	r, s, err := ecdsa.Sign(rand.Reader, installationKey, digest[:])
+	proofMessage = append(append([]byte("tp-driver-possession\x00"), challenge.ChallengeHash...), installationID[:]...)
+	digest = sha256.Sum256(proofMessage)
+	r, s, err = ecdsa.Sign(rand.Reader, installationKey, digest[:])
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof := make([]byte, 64)
+	proof = make([]byte, 64)
 	r.FillBytes(proof[:32])
 	s.FillBytes(proof[32:])
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/driver/auth/webauthn/finish", bytes.NewReader(credentialPayload))
@@ -313,6 +435,11 @@ func testDriverMobileAuth(t *testing.T, ctx context.Context, repository *OnlineA
 	if _, err := driverService.FinishLogin(ctx, challengeID, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(credentialPayload)), proof, "test-driver", "192.0.2.55:443"); err == nil {
 		t.Fatal("driver login challenge replay was accepted")
 	}
+}
+
+func ceremonyBindingForTest(sessionID uuid.UUID, purpose applicationauth.ChallengePurpose) []byte {
+	hash := sha256.Sum256(append(append([]byte("tp-webauthn-binding\x00"), sessionID[:]...), []byte(string(purpose))...))
+	return hash[:]
 }
 
 func assertSessionIdleWindow(t *testing.T, lastSeenAt, idleExpiresAt time.Time, expected time.Duration) {

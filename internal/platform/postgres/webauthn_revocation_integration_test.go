@@ -70,7 +70,7 @@ func testWebAuthnCredentialRevocation(t *testing.T, ctx context.Context, reposit
 	if err := repository.BeginWebAuthnChallenge(ctx, HashSessionToken(postRevokeToken), applicationauth.WebAuthnChallengeRequest{
 		ID: challengeID, Purpose: applicationauth.StepUpChallenge, ChallengeHash: challengeHash,
 		SessionData: []byte(`{"challenge":"synthetic"}`), SessionDataFormat: "webauthn.v1",
-		BindingHash: bindingHash, ExpiresAt: time.Now().UTC().Add(5 * time.Minute), AuditID: uuid.New(),
+		BindingHash: bindingHash, ExpiresAt: time.Now().UTC().Add(4*time.Minute + 30*time.Second), AuditID: uuid.New(),
 	}); err != nil {
 		t.Fatalf("begin challenge after revocation: %v", err)
 	}

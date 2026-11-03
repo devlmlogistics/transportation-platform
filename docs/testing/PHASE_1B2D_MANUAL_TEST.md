@@ -53,7 +53,7 @@ Set-PrivateEnv PHASE_1B2D_DRIVER_PASSWORD
 .\scripts\phase-1b2d-manual\seed-fixture.ps1
 ```
 
-Los scripts crean o reutilizan sólo el contenedor/volumen con la etiqueta `transportation-platform.manual=phase-1b2d`, publican `127.0.0.1:55433`, ejecutan `db/bootstrap/platform_roles.sql` y Goose UP hasta versión 13. No reutilizan `pgdb16.8` ni la base manual de 1B.2-C.
+Los scripts crean o reutilizan sólo el contenedor/volumen con la etiqueta `transportation-platform.manual=phase-1b2d`, publican `127.0.0.1:55433`, ejecutan `db/bootstrap/platform_roles.sql` y Goose UP hasta versión 14. No reutilizan `pgdb16.8` ni la base manual de 1B.2-C.
 
 `prepare.ps1` valida antes de reutilizar un recurso existente la etiqueta, imagen `postgres:16.8-alpine3.21`, base configurada, volumen montado y publicación exacta `127.0.0.1:55433`. Si alguno no coincide, se detiene sin eliminar ni corregir recursos. La carga de contraseñas de roles se entrega por stdin a `psql`, no como argumento `-c`.
 
@@ -79,7 +79,7 @@ go run .\scripts\phase-1b2d-manual\migrate version
 
 El valor anterior es una plantilla: no se debe pegar una contraseña real en el documento, en el historial de comandos ni en un archivo. `seed-fixture.ps1` se ejecuta por separado y no forma parte de la reanudación de `prepare.ps1`; en esta preparación no se ejecutó.
 
-Cuando Goose ya esté en 13 y se autorice cargar los datos sintéticos, la reanudación exacta de `seed-fixture.ps1` —sin repetir migraciones— es:
+Cuando Goose ya esté en 14 y se autorice cargar los datos sintéticos, la reanudación exacta de `seed-fixture.ps1` —sin repetir migraciones— es:
 
 ```powershell
 Set-Location 'C:\Users\hecto\OneDrive\Documentos\ChatGPT\Transportation-Platform'
@@ -306,12 +306,20 @@ Los scripts verifican la etiqueta antes de detener o eliminar.
 ## Resultados y pendientes
 
 - [V] Rutas, payloads y roles se obtuvieron del router, handlers y migraciones existentes.
-- [V] Los helpers preparan sólo el contenedor etiquetado, base sintética, roles mínimos y Goose 13.
+- [V] Los helpers preparan sólo el contenedor etiquetado, base sintética, roles mínimos y Goose 14.
 - [V] La auditoría de sólo lectura confirmó el contenedor y volumen manuales esperados, con imagen PostgreSQL 16.8, puerto `55433` y montaje dedicado; no se ejecutaron acciones de modificación sobre ellos.
 - [V] Se corrigieron la interpolación `${Database}` antes de `?sslmode=disable`, el acceso a etiquetas Docker y la validación de reejecución parcial.
-- [V] Un PostgreSQL 16 efímero ejecutó Goose 13 y el fixture dos veces; ambas transacciones terminaron correctamente, sin duplicados y sin cambiar `SUPERUSER`/`BYPASSRLS` de los roles runtime.
+- [V] Un PostgreSQL 16 efímero ejecutó Goose 14 y el fixture dos veces; ambas transacciones terminaron correctamente, sin duplicados y sin cambiar `SUPERUSER`/`BYPASSRLS` de los roles runtime.
 - [V] La base manual persistente fue inspeccionada y no recibió el fixture porque las credenciales privadas disponibles apuntan a `transportation_platform_dev`.
 - [V] Las inspecciones de contenedores y volúmenes de los cuatro scripts usan la salida JSON de Docker y comprueban el código de salida antes de `ConvertFrom-Json`.
 - [V] El helper compartido rechaza etiquetas, nombres, montajes y puertos incorrectos; se probó contra el entorno existente y con variantes negativas en memoria.
 - [P] La ejecución real en Chrome, autenticador virtual, User Verification y supervisión de cookies/IndexedDB siguen siendo manuales.
 - [P] El step-up del supervisor no es actualmente un gate de aprobación.
+
+### Corrección de UUID de autorización
+
+- [V] `FinishRegistration` no poblaba `CompleteRegistrationRequest.DeviceAuthorizationID`; el UUID cero se insertaba como `device_authorization.id` cuando el challenge tenía una solicitud aprobada.
+- [V] Go genera un UUID nuevo sólo para una autorización derivada de un enrolamiento aprobado, y 000014 rechaza `NULL` o el UUID cero en la frontera SQL con SQLSTATE `22023`.
+- [V] Esta corrección no aplicó Goose ni reparó la fila existente en la base manual persistente. El contenedor, volumen, datos de supervisor/conductor, passkey e IndexedDB se conservaron.
+
+Para reanudar de forma segura: mantener el contenedor y no ejecutar todavía `seed-fixture.ps1`, bootstrap ni Chrome. Tras validar el commit en PostgreSQL efímero, ejecutar sólo Goose UP con `tp_migrator` para llevar la base manual de 13 a 14. Después comprobar la autorización existente con UUID cero y decidir una recuperación explícita; no sustituirla automáticamente ni borrar la passkey. La fila inválida debe corregirse mediante un procedimiento controlado antes del login recurrente.

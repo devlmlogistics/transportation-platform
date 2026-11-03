@@ -102,8 +102,8 @@ ALTER ROLE tp_bootstrap_runtime PASSWORD $(SqlQuote $bootstrapPassword);
     Assert-NativeSuccess "Apply Goose UP migrations"
     $version = (& go run .\scripts\phase-1b2d-manual\migrate version).Trim()
     Assert-NativeSuccess "Read Goose version"
-    if ($version -ne "13") {
-        throw "Expected isolated manual database at Goose version 13, got $version."
+    if ($version -ne "14") {
+        throw "Expected isolated manual database at Goose version 14, got $version."
     }
 
     $verificationSQL = @"
@@ -124,4 +124,4 @@ SELECT platform.goose_db_version.version_id
     Pop-Location
 }
 
-Write-Output "Prepared $Container on 127.0.0.1:$HostPort with database $Database at Goose version 13."
+Write-Output "Prepared $Container on 127.0.0.1:$HostPort with database $Database at Goose version 14."

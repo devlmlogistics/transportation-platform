@@ -70,15 +70,18 @@ func NewWebAuthnService(store WebAuthnStore, cfg WebAuthnConfig) (*WebAuthnServi
 
 func (s *WebAuthnService) BeginRegistration(ctx context.Context, token []byte, session AuthenticatedSession, displayName string, deviceRequestID *uuid.UUID) (uuid.UUID, *protocol.CredentialCreation, error) {
 	if !s.canRegister(session) || len(token) != 32 || (session.SessionPolicy == DriverActivationSession && deviceRequestID == nil) {
+		s.reportDiagnostic("registration.session_policy", ErrStepUpRequired)
 		return uuid.Nil, nil, ErrStepUpRequired
 	}
 	credentials, err := s.Store.ListAuthenticatorCredentials(ctx, HashSessionToken(token))
 	if err != nil {
+		s.reportDiagnostic("registration.credentials_load", err)
 		return uuid.Nil, nil, ErrWebAuthnRejected
 	}
 	user := webAuthnUserForSession(session, credentials, true)
 	creation, ceremony, err := s.Engine.BeginRegistration(user)
 	if err != nil {
+		s.reportDiagnostic("registration.begin", err)
 		return uuid.Nil, nil, ErrWebAuthnRejected
 	}
 	id, err := s.persistChallenge(ctx, token, session.ID, RegistrationChallenge, ceremony, deviceRequestID)
@@ -135,13 +138,24 @@ func (s *WebAuthnService) FinishRegistration(ctx context.Context, token []byte, 
 		transports = append(transports, string(transport))
 	}
 	binding := ceremonyBinding(session.ID, RegistrationChallenge)
+	deviceAuthorizationID := uuid.Nil
+	if challenge.DeviceRequestID != nil {
+		if *challenge.DeviceRequestID == uuid.Nil {
+			s.reportDiagnostic("registration.device_request_id", ErrWebAuthnRejected)
+			return ErrWebAuthnRejected
+		}
+		// The authorization is a new record created by the SQL boundary only
+		// after WebAuthn verification and an approved enrollment request.
+		deviceAuthorizationID = uuid.New()
+	}
 	_, _, err = s.Store.CompleteWebAuthnRegistration(ctx, HashSessionToken(token), CompleteRegistrationRequest{
 		ChallengeID: challengeID, ChallengeHash: challenge.ChallengeHash, BindingHash: binding,
 		CredentialID: uuid.New(), CredentialKey: credential.ID, PublicKey: credential.PublicKey,
 		SignCount: credential.Authenticator.SignCount, Transports: transports,
 		BackupEligible: credential.Flags.BackupEligible, BackupState: boolText(credential.Flags.BackupState),
 		UserVerified: credential.Flags.UserVerified, DisplayName: displayName, Metadata: metadata,
-		AuditID: uuid.New(),
+		DeviceAuthorizationID: deviceAuthorizationID,
+		AuditID:               uuid.New(),
 	})
 	if err != nil {
 		s.reportDiagnostic("registration.credential_persist", err)
@@ -306,6 +320,7 @@ func (s *WebAuthnService) persistChallenge(ctx context.Context, token []byte, se
 		SessionDataFormat: "webauthn.v1", BindingHash: binding, ExpiresAt: s.Now().Add(4*time.Minute + 30*time.Second),
 		DeviceRequestID: deviceRequest, AuditID: uuid.New(),
 	}); err != nil {
+		s.reportDiagnostic("challenge.persist", err)
 		return uuid.Nil, ErrWebAuthnRejected
 	}
 	return id, nil

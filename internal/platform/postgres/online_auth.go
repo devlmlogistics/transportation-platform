@@ -400,10 +400,14 @@ func (r *OnlineAuthRepository) ListAuthenticatorCredentials(ctx context.Context,
 	var result []auth.AuthenticatorCredentialRecord
 	for rows.Next() {
 		var item auth.AuthenticatorCredentialRecord
+		var displayName *string
 		if err := rows.Scan(&item.ID, &item.CredentialID, &item.PublicKey, &item.SignCount, &item.Transports,
-			&item.DisplayName, &item.Status, &item.BackupEligible, &item.BackupState, &item.UserVerifiedLast,
+			&displayName, &item.Status, &item.BackupEligible, &item.BackupState, &item.UserVerifiedLast,
 			&item.CreatedAt, &item.LastUsedAt, &item.RevokedAt); err != nil {
 			return nil, err
+		}
+		if displayName != nil {
+			item.DisplayName = *displayName
 		}
 		result = append(result, item)
 	}

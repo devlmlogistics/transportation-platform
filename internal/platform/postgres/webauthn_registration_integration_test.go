@@ -3,9 +3,6 @@ package postgres
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -66,23 +63,23 @@ func testWebAuthnRegistration(t *testing.T, ctx context.Context, repository *Onl
 
 func validRegistrationPayload(t *testing.T, sessionData []byte) ([]byte, []byte) {
 	t.Helper()
+	credential := newTestAssertionCredential(t)
+	return validRegistrationPayloadForCredential(t, sessionData, credential), credential.CredentialID
+}
+
+func validRegistrationPayloadForCredential(t *testing.T, sessionData []byte, credential testAssertionCredential) []byte {
+	t.Helper()
 	var ceremony webauthn.SessionData
 	if err := json.Unmarshal(sessionData, &ceremony); err != nil {
 		t.Fatal(err)
 	}
-	credentialKey := make([]byte, 32)
-	if _, err := rand.Read(credentialKey); err != nil {
-		t.Fatal(err)
+	publicKey := credential.PublicKey
+	if len(publicKey) == 0 {
+		t.Fatal("registration credential has no public key")
 	}
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	xCoord := key.PublicKey.X.FillBytes(make([]byte, 32))
-	yCoord := key.PublicKey.Y.FillBytes(make([]byte, 32))
-	publicKey, err := webauthncbor.Marshal(map[int]any{1: 2, 3: -7, -1: 1, -2: xCoord, -3: yCoord})
-	if err != nil {
-		t.Fatal(err)
+	credentialKey := credential.CredentialID
+	if len(credentialKey) == 0 {
+		t.Fatal("registration credential has no credential ID")
 	}
 	clientData, err := json.Marshal(map[string]string{
 		"type": "webauthn.create", "challenge": ceremony.Challenge, "origin": "http://localhost:8080",
@@ -113,5 +110,5 @@ func validRegistrationPayload(t *testing.T, sessionData []byte) ([]byte, []byte)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return payload, credentialKey
+	return payload
 }
