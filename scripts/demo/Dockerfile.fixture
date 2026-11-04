@@ -1,0 +1,15 @@
+FROM golang:1.25.0-alpine3.22 AS hash-builder
+WORKDIR /workspace
+COPY go.mod go.sum ./
+RUN go mod download
+COPY internal ./internal
+COPY scripts/phase-1b2d-manual/hash-password ./scripts/phase-1b2d-manual/hash-password
+RUN CGO_ENABLED=0 go build -trimpath -o /out/hash-password ./scripts/phase-1b2d-manual/hash-password
+
+FROM postgres:16.8-alpine3.21
+RUN apk add --no-cache bash jq
+COPY --from=hash-builder /out/hash-password /usr/local/bin/transportation-hash-password
+COPY scripts/phase-1b2d-manual/seed-fixture.sql /repo/seed-fixture.sql
+COPY scripts/demo/seed-second-driver.sql /repo/seed-second-driver.sql
+COPY scripts/demo/seed-fixture.sh /repo/seed-fixture.sh
+ENTRYPOINT ["bash", "/repo/seed-fixture.sh"]

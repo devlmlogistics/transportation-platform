@@ -24,6 +24,8 @@ type WebAuthnHTTPService interface {
 	ListCredentials(context.Context, []byte) ([]applicationauth.AuthenticatorCredentialRecord, error)
 	RevokeCredential(context.Context, []byte, uuid.UUID, string) error
 	CreateDeviceEnrollmentRequest(context.Context, []byte, applicationauth.AuthenticatedSession, uuid.UUID, *uuid.UUID, uuid.UUID, []byte, string) (applicationauth.DeviceEnrollmentRequest, error)
+	ListDeviceEnrollmentRequests(context.Context, []byte) ([]applicationauth.DeviceEnrollmentRequestView, error)
+	ListDeviceAuthorizations(context.Context, []byte) ([]applicationauth.DeviceAuthorizationView, error)
 	ApproveDeviceEnrollmentRequest(context.Context, []byte, uuid.UUID, string) error
 	RejectDeviceEnrollmentRequest(context.Context, []byte, uuid.UUID, string) error
 	RevokeDeviceAuthorization(context.Context, []byte, uuid.UUID, string) error
@@ -66,6 +68,10 @@ func (h *WebAuthnHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.revokeCredential(w, r)
 	case path == "/device-enrollment-requests" && r.Method == http.MethodPost:
 		h.createDeviceRequest(w, r)
+	case path == "/device-enrollment-requests" && r.Method == http.MethodGet:
+		h.listDeviceRequests(w, r)
+	case path == "/device-authorizations" && r.Method == http.MethodGet:
+		h.listDeviceAuthorizations(w, r)
 	case strings.HasPrefix(path, "/device-enrollment-requests/") && strings.HasSuffix(path, "/approve") && r.Method == http.MethodPost:
 		h.changeDeviceRequest(w, r, true)
 	case strings.HasPrefix(path, "/device-enrollment-requests/") && strings.HasSuffix(path, "/reject") && r.Method == http.MethodPost:
@@ -75,6 +81,32 @@ func (h *WebAuthnHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, r, http.StatusNotFound, "not_found", "WebAuthn endpoint not found.")
 	}
+}
+
+func (h *WebAuthnHandler) listDeviceRequests(w http.ResponseWriter, r *http.Request) {
+	token, _, ok := h.Security.session(w, r)
+	if !ok {
+		return
+	}
+	requests, err := h.Service.ListDeviceEnrollmentRequests(r.Context(), token)
+	if err != nil {
+		writeError(w, r, http.StatusForbidden, "device_requests_unavailable", "Device enrollment requests are unavailable.")
+		return
+	}
+	writeJSON(w, http.StatusOK, requests)
+}
+
+func (h *WebAuthnHandler) listDeviceAuthorizations(w http.ResponseWriter, r *http.Request) {
+	token, _, ok := h.Security.session(w, r)
+	if !ok {
+		return
+	}
+	authorizations, err := h.Service.ListDeviceAuthorizations(r.Context(), token)
+	if err != nil {
+		writeError(w, r, http.StatusForbidden, "device_authorizations_unavailable", "Device authorizations are unavailable.")
+		return
+	}
+	writeJSON(w, http.StatusOK, authorizations)
 }
 
 func (h *WebAuthnHandler) createDeviceRequest(w http.ResponseWriter, r *http.Request) {

@@ -255,6 +255,35 @@ type DeviceEnrollmentRequest struct {
 	ExpiresAt          time.Time
 }
 
+type DeviceEnrollmentRequestView struct {
+	ID                 uuid.UUID
+	CorrelationCode    string
+	UserAccountID      uuid.UUID
+	Identifier         string
+	LegalName          string
+	CompanyID          uuid.UUID
+	CompanyOperationID *uuid.UUID
+	InstallationID     uuid.UUID
+	Status             string
+	RequestedAt        time.Time
+	ExpiresAt          time.Time
+}
+
+type DeviceAuthorizationView struct {
+	ID                 uuid.UUID
+	UserAccountID      uuid.UUID
+	Identifier         string
+	LegalName          string
+	CompanyID          uuid.UUID
+	CompanyOperationID *uuid.UUID
+	InstallationID     uuid.UUID
+	KeyAlgorithm       string
+	Status             string
+	RequestedAt        time.Time
+	ApprovedAt         *time.Time
+	ExpiresAt          *time.Time
+}
+
 type DeviceEnrollmentRequestInput struct {
 	ID                    uuid.UUID
 	CorrelationCode       string
@@ -276,6 +305,8 @@ type WebAuthnStore interface {
 	ListAuthenticatorCredentials(context.Context, []byte) ([]AuthenticatorCredentialRecord, error)
 	RevokeOwnAuthenticator(context.Context, []byte, uuid.UUID, string) error
 	CreateDeviceEnrollmentRequest(context.Context, []byte, DeviceEnrollmentRequestInput) (DeviceEnrollmentRequest, error)
+	ListDeviceEnrollmentRequests(context.Context, []byte) ([]DeviceEnrollmentRequestView, error)
+	ListDeviceAuthorizations(context.Context, []byte) ([]DeviceAuthorizationView, error)
 	ApproveDeviceEnrollmentRequest(context.Context, []byte, uuid.UUID, string) error
 	RejectDeviceEnrollmentRequest(context.Context, []byte, uuid.UUID, string) error
 	RevokeDeviceAuthorization(context.Context, []byte, uuid.UUID, string) error

@@ -7,6 +7,15 @@ import {
   driverLoginErrorMessage,
   type DriverInstallation,
 } from "./webauthn";
+import {
+  approveSupervisorDeviceRequest,
+  listSupervisorDeviceAuthorizations,
+  listSupervisorDeviceRequests,
+  loginSupervisor,
+  revokeSupervisorDevice,
+  type DeviceAuthorizationView,
+  type DeviceEnrollmentRequestView,
+} from "./supervisor";
 
 type ModuleCardProps = {
   name: string;
@@ -56,6 +65,53 @@ export default function App() {
   const [operationID, setOperationID] = useState("");
   const [installation, setInstallation] = useState<DriverInstallation>();
   const [status, setStatus] = useState("Listo para comenzar.");
+  const [supervisorIdentifier, setSupervisorIdentifier] = useState("");
+  const [supervisorPassword, setSupervisorPassword] = useState("");
+  const [supervisorStatus, setSupervisorStatus] = useState("Supervisor no autenticado.");
+  const [supervisorLoggedIn, setSupervisorLoggedIn] = useState(false);
+  const [requests, setRequests] = useState<DeviceEnrollmentRequestView[]>([]);
+  const [authorizations, setAuthorizations] = useState<DeviceAuthorizationView[]>([]);
+
+  const refreshSupervisor = async () => {
+    const [nextRequests, nextAuthorizations] = await Promise.all([
+      listSupervisorDeviceRequests(),
+      listSupervisorDeviceAuthorizations(),
+    ]);
+    setRequests(nextRequests);
+    setAuthorizations(nextAuthorizations);
+  };
+
+  const supervisorLogin = async () => {
+    try {
+      await loginSupervisor(supervisorIdentifier, supervisorPassword);
+      setSupervisorPassword("");
+      await refreshSupervisor();
+      setSupervisorLoggedIn(true);
+      setSupervisorStatus("Sesión de supervisor activa. El alcance visible proviene de sus membresías y permisos.");
+    } catch {
+      setSupervisorStatus("No fue posible autenticar al supervisor o cargar sus dispositivos.");
+    }
+  };
+
+  const approveRequest = async (requestID: string) => {
+    try {
+      await approveSupervisorDeviceRequest(requestID, "Aprobación de demo del cliente");
+      await refreshSupervisor();
+      setSupervisorStatus("Solicitud aprobada.");
+    } catch {
+      setSupervisorStatus("La solicitud no pudo aprobarse; su estado o alcance puede haber cambiado.");
+    }
+  };
+
+  const revokeAuthorization = async (authorizationID: string) => {
+    try {
+      await revokeSupervisorDevice(authorizationID, "Revocación de demo del cliente");
+      await refreshSupervisor();
+      setSupervisorStatus("Autorización revocada. El próximo acceso del conductor debe ser rechazado.");
+    } catch {
+      setSupervisorStatus("La autorización no pudo revocarse; su estado o alcance puede haber cambiado.");
+    }
+  };
 
   const prepareInstallation = async () => {
     try {
@@ -165,6 +221,52 @@ export default function App() {
               <ModuleCard key={module.name} {...module} />
             ))}
           </div>
+        </section>
+
+        <section className="mt-6 rounded-3xl bg-white p-6 shadow-2xl shadow-slate-950/20 sm:p-8" aria-label="Consola de supervisor">
+          <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-500">Demo supervisada</p>
+          <h2 className="mt-2 text-2xl font-black text-slate-950">Aprobaciones de dispositivos</h2>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
+            Esta vista usa la sesión normal y los endpoints WebAuthn existentes. No habilita el API administrativo global ni acepta identidades desde headers.
+          </p>
+          <div className="mt-6 grid gap-4 md:grid-cols-[1fr_1fr_auto]">
+            <label className="text-sm font-semibold text-slate-700">Usuario supervisor<input className="mt-2 w-full rounded-xl border border-slate-300 p-3" value={supervisorIdentifier} onChange={(event) => setSupervisorIdentifier(event.target.value)} autoComplete="username" /></label>
+            <label className="text-sm font-semibold text-slate-700">Contraseña<input className="mt-2 w-full rounded-xl border border-slate-300 p-3" type="password" value={supervisorPassword} onChange={(event) => setSupervisorPassword(event.target.value)} autoComplete="current-password" /></label>
+            <button className="self-end rounded-xl bg-slate-900 px-4 py-3 text-sm font-bold text-white" onClick={() => void supervisorLogin()}>Ingresar supervisor</button>
+          </div>
+          <p className="mt-4 rounded-xl bg-slate-100 p-4 text-sm text-slate-700" aria-live="polite">{supervisorStatus}</p>
+          {supervisorLoggedIn && (
+            <div className="mt-6 grid gap-6 lg:grid-cols-2">
+              <div>
+                <h3 className="text-lg font-black text-slate-950">Solicitudes pendientes ({requests.length})</h3>
+                <div className="mt-3 space-y-3">
+                  {requests.length === 0 && <p className="text-sm text-slate-500">No hay solicitudes visibles.</p>}
+                  {requests.map((item) => (
+                    <article className="rounded-2xl border border-amber-200 bg-amber-50 p-4" key={item.request_id}>
+                      <p className="font-bold text-slate-950">{item.legal_name} · {item.identifier}</p>
+                      <p className="mt-1 break-all text-xs text-slate-600">Empresa {item.company_id} · Operación {item.company_operation_id ?? "general"}</p>
+                      <p className="mt-1 text-xs text-slate-600">Código {item.correlation_code} · Instalación {item.installation_id}</p>
+                      <button className="mt-3 rounded-lg bg-amber-700 px-3 py-2 text-xs font-bold text-white" onClick={() => void approveRequest(item.request_id)}>Aprobar</button>
+                    </article>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <h3 className="text-lg font-black text-slate-950">Dispositivos autorizados ({authorizations.length})</h3>
+                <div className="mt-3 space-y-3">
+                  {authorizations.length === 0 && <p className="text-sm text-slate-500">No hay dispositivos visibles.</p>}
+                  {authorizations.map((item) => (
+                    <article className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4" key={item.authorization_id}>
+                      <p className="font-bold text-slate-950">{item.legal_name} · {item.identifier}</p>
+                      <p className="mt-1 break-all text-xs text-slate-600">{item.status} · Empresa {item.company_id} · Operación {item.company_operation_id ?? "general"}</p>
+                      <p className="mt-1 text-xs text-slate-600">Instalación {item.installation_id} · {item.key_algorithm}</p>
+                      {item.status === "ACTIVE" && <button className="mt-3 rounded-lg bg-rose-700 px-3 py-2 text-xs font-bold text-white" onClick={() => void revokeAuthorization(item.authorization_id)}>Revocar</button>}
+                    </article>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
         </section>
       </div>
     </main>
