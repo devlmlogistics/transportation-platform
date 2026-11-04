@@ -91,6 +91,51 @@ func testDeviceAuthorizationBoundaries(t *testing.T, ctx context.Context, authPo
 		if visibleRequests != 0 {
 			t.Fatalf("cross-company request was visible: %s", requestB)
 		}
+		companyScopedRequest := companyOperationRequest(fixture.UserADriver, fixture.CompanyA, nil)
+		if err := authPool.QueryRow(ctx, `
+			SELECT count(*) FROM platform.list_device_enrollment_requests($1) WHERE request_id = $2
+		`, supervisorToken, companyScopedRequest).Scan(&visibleRequests); err != nil {
+			t.Fatal(err)
+		}
+		if visibleRequests != 0 {
+			t.Fatal("operation-only supervisor saw a company-scoped request")
+		}
+		companyApproveGrant := uuid.New()
+		companyRevokeGrant := uuid.New()
+		for _, grant := range []struct {
+			id   uuid.UUID
+			code string
+		}{
+			{companyApproveGrant, "device.enrollment.approve"},
+			{companyRevokeGrant, "device.enrollment.revoke"},
+		} {
+			if _, err := adminPool.Exec(ctx, `
+				INSERT INTO platform.permission_grant(
+					id, person_id, permission_code, scope_type, company_id,
+					valid_from, lifecycle_status)
+				VALUES ($1, $2, $3, 'COMPANY', $4, clock_timestamp() - interval '1 minute', 'ACTIVE')
+			`, grant.id, fixture.PersonASupervisor, grant.code, fixture.CompanyA); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := authPool.QueryRow(ctx, `
+			SELECT count(*) FROM platform.list_device_enrollment_requests($1) WHERE request_id = $2
+		`, supervisorToken, companyScopedRequest).Scan(&visibleRequests); err != nil {
+			t.Fatal(err)
+		}
+		if visibleRequests != 1 {
+			t.Fatalf("company-scoped permission did not reveal company request: visible=%d", visibleRequests)
+		}
+		if !callDecision("approve_device_enrollment_request", supervisorToken, companyScopedRequest) {
+			t.Fatal("company-scoped permission did not allow approval")
+		}
+		if _, err := adminPool.Exec(ctx, `
+			UPDATE platform.permission_grant
+			   SET lifecycle_status = 'REVOKED', revoked_at = clock_timestamp()
+			 WHERE id IN ($1, $2)
+		`, companyApproveGrant, companyRevokeGrant); err != nil {
+			t.Fatal(err)
+		}
 		driverToken := newTokenHash()
 		insertSession(fixture.UserADriver, driverToken)
 		if err := authPool.QueryRow(ctx, `
