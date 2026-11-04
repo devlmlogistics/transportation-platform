@@ -22,6 +22,7 @@ Clasificación: [D] procedimiento de validación para un entorno aislado. Los da
 - [ ] Empresa, operación e instalación visibles coinciden con los datos sintéticos.
 - [ ] La misma prueba con el segundo conductor no reutiliza credenciales ni instalaciones.
 - [ ] Una solicitud sin operación sólo es visible y gestionable con permiso explícito COMPANY; una identidad limitada a OPERATION no la ve.
+- [ ] La segunda ejecución del fixture conserva una sola concesión COMPANY activa por permiso y no revierte la carga por una lectura bajo `tp_owner`.
 
 ## Pruebas negativas
 

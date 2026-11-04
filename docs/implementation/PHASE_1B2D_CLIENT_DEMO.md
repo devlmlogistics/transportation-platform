@@ -98,7 +98,7 @@ docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml 
 
 La imagen del fixture compila el helper Argon2id y utiliza el cliente `psql` dentro del contenedor. No requiere Go, PowerShell ni un puerto PostgreSQL en el host. La secuencia es idempotente para los identificadores sintéticos. Si falla, no continuar con la demo hasta revisar la salida y verificar la base aislada; no ejecutar el script contra otro proyecto Compose.
 
-Después de aplicar Goose 18, ejecutar de nuevo el fixture para agregar o revalidar los permisos COMPANY sintéticos del supervisor. La carga no elimina solicitudes ni reinicia el volumen; sí vuelve a dejar los registros sintéticos bajo sus valores declarados, por lo que debe ejecutarse sólo sobre este proyecto Compose.
+Después de aplicar Goose 18, ejecutar de nuevo el fixture para agregar o revalidar los permisos COMPANY sintéticos del supervisor. La validación de empresa, operación, membresías y permisos se ejecuta mientras la sesión es `tp_runtime` con contexto `TENANT`; las credenciales se validan después bajo el contexto propietario interno. Esto evita que `FORCE ROW LEVEL SECURITY` haga aparecer cero permisos durante la comprobación. La carga no elimina solicitudes ni reinicia el volumen; sí vuelve a dejar los registros sintéticos bajo sus valores declarados, por lo que debe ejecutarse sólo sobre este proyecto Compose. Si falla, el `BEGIN`/`COMMIT` revierte toda la carga y el mensaje indica la condición faltante.
 
 Para validar todo el flujo sin tocar ninguna instalación persistente:
 
