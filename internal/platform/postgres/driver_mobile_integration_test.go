@@ -217,6 +217,61 @@ func testDriverMobileAuth(t *testing.T, ctx context.Context, repository *OnlineA
 		t.Fatalf("device authorization inherited enrollment expiry: device=%s enrollment=%s independent=%v provisional=%v",
 			registeredDeviceExpiresAt, enrollmentExpiresAt, deviceExpiryIndependent, deviceExpiryProvisional)
 	}
+	companyGrantIDs := []uuid.UUID{uuid.New(), uuid.New()}
+	for index, permission := range []string{"device.enrollment.approve", "device.enrollment.revoke"} {
+		if _, err := adminPool.Exec(ctx, `
+			INSERT INTO platform.permission_grant(
+				id, person_id, permission_code, scope_type, company_id,
+				valid_from, lifecycle_status)
+			VALUES ($1, $2, $3, 'COMPANY', $4, clock_timestamp() - interval '1 minute', 'ACTIVE')
+		`, companyGrantIDs[index], fixture.PersonASupervisor, permission, fixture.CompanyA); err != nil {
+			t.Fatal(err)
+		}
+	}
+	companyEnrollmentInstallationID := uuid.New()
+	companyEnrollment, err := webauthnService.CreateDeviceEnrollmentRequest(ctx, activation.Token, resolvedActivation,
+		fixture.CompanyA, nil, companyEnrollmentInstallationID, activationPublicKey, "ECDSA_P256_SHA256")
+	if err != nil {
+		t.Fatalf("company-scoped enrollment request: %v", err)
+	}
+	if err := repository.ApproveDeviceEnrollmentRequest(ctx, applicationauth.HashSessionToken(supervisorToken), companyEnrollment.ID, "company-scoped approval"); err != nil {
+		t.Fatalf("company-scoped enrollment approval: %v", err)
+	}
+	companyChallengeID, _, err := webauthnService.BeginRegistration(ctx, activation.Token, resolvedActivation, "company-scoped passkey", &companyEnrollment.ID)
+	if err != nil {
+		t.Fatalf("begin company-scoped registration: %v", err)
+	}
+	companyChallenge, err := repository.GetWebAuthnChallenge(ctx, applicationauth.HashSessionToken(activation.Token), companyChallengeID, applicationauth.RegistrationChallenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	companyCredential := newTestAssertionCredential(t)
+	companyPayload := validRegistrationPayloadForCredential(t, companyChallenge.SessionData, companyCredential)
+	if err := webauthnService.FinishRegistration(ctx, activation.Token, resolvedActivation, companyChallengeID,
+		httptest.NewRequest(http.MethodPost, "/api/v1/auth/webauthn/registration/finish", bytes.NewReader(companyPayload)),
+		"company-scoped passkey"); err != nil {
+		t.Fatalf("finish company-scoped registration: %v", err)
+	}
+	var companyAuthorizationOperation *uuid.UUID
+	if err := adminPool.QueryRow(ctx, `
+		SELECT company_operation_id
+		  FROM platform.device_authorization
+		 WHERE user_account_id = $1 AND installation_id = $2 AND status = 'ACTIVE'
+		 ORDER BY approved_at DESC
+		 LIMIT 1
+	`, fixture.UserADriver, companyEnrollmentInstallationID).Scan(&companyAuthorizationOperation); err != nil {
+		t.Fatal(err)
+	}
+	if companyAuthorizationOperation != nil {
+		t.Fatalf("company-scoped authorization unexpectedly has operation: %s", companyAuthorizationOperation)
+	}
+	if _, err := adminPool.Exec(ctx, `
+		UPDATE platform.permission_grant
+		   SET lifecycle_status = 'REVOKED', revoked_at = clock_timestamp()
+		 WHERE id IN ($1, $2)
+	`, companyGrantIDs[0], companyGrantIDs[1]); err != nil {
+		t.Fatal(err)
+	}
 	var registeredCredentialStatus string
 	if err := adminPool.QueryRow(ctx, `
 		SELECT status FROM platform.authenticator_credential WHERE credential_id = $1

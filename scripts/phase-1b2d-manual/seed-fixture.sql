@@ -6,12 +6,14 @@
 
 BEGIN;
 
--- Inspect company through the existing owner policy, then let tp_runtime do
--- the actual INSERT. This avoids ON CONFLICT, which needs an RLS conflict
--- check that is intentionally not exposed by the platform-create policy.
+-- Inspect the company through the tenant policy, then let tp_runtime do the
+-- actual INSERT. This avoids ON CONFLICT, which needs an RLS conflict check
+-- that is intentionally not exposed by the platform-create policy. Keeping
+-- this check under tp_runtime makes reruns work on an existing demo database.
 RESET ROLE;
-SET ROLE tp_owner;
-SELECT set_config('app.auth_internal', '1', true);
+SET ROLE tp_runtime;
+SELECT set_config('app.access_mode', 'TENANT', true);
+SELECT set_config('app.tenant_id', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', true);
 SELECT EXISTS (
     SELECT 1 FROM platform.company
     WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
@@ -19,8 +21,6 @@ SELECT EXISTS (
 
 \if :fixture_company_present
 \else
-    RESET ROLE;
-    SET ROLE tp_runtime;
     SELECT set_config('app.access_mode', 'PLATFORM', true);
     SELECT set_config('app.tenant_id', '', true);
     INSERT INTO platform.company (id, slug, legal_name, status)
@@ -192,6 +192,123 @@ INSERT INTO platform.role_assignment (
 SELECT 'aaaaaaaa-aaaa-aaaa-aaaa-430000000003', 'aaaaaaaa-aaaa-aaaa-aaaa-100000000003', 'DRIVER', 'OPERATION', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'aaaaaaaa-aaaa-aaaa-aaaa-000000000001', clock_timestamp() - interval '5 minutes', 'ACTIVE', 'dddddddd-dddd-dddd-dddd-200000000001'
 WHERE NOT EXISTS (SELECT 1 FROM platform.role_assignment WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-430000000003');
 
+-- A request without company_operation_id is COMPANY scope, not an operation
+-- wildcard. The demo supervisor keeps the operational SUPERVISOR role above,
+-- and receives only these explicit company-scoped device permissions so that
+-- it can review and decide company-level activation requests.
+UPDATE platform.permission_grant
+SET person_id = 'aaaaaaaa-aaaa-aaaa-aaaa-100000000002',
+    permission_code = 'device.enrollment.approve', scope_type = 'COMPANY',
+    company_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', company_operation_id = NULL,
+    valid_from = clock_timestamp() - interval '5 minutes', valid_until = NULL,
+    lifecycle_status = 'ACTIVE', revoked_at = NULL, expired_at = NULL,
+    granted_by_user_account_id = 'dddddddd-dddd-dddd-dddd-200000000001'
+WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-470000000002';
+INSERT INTO platform.permission_grant (
+    id, person_id, permission_code, scope_type, company_id, company_operation_id,
+    valid_from, lifecycle_status, granted_by_user_account_id
+)
+SELECT 'aaaaaaaa-aaaa-aaaa-aaaa-470000000002', 'aaaaaaaa-aaaa-aaaa-aaaa-100000000002',
+       'device.enrollment.approve', 'COMPANY', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', NULL,
+       clock_timestamp() - interval '5 minutes', 'ACTIVE', 'dddddddd-dddd-dddd-dddd-200000000001'
+WHERE NOT EXISTS (
+    SELECT 1 FROM platform.permission_grant
+     WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-470000000002'
+        OR (person_id = 'aaaaaaaa-aaaa-aaaa-aaaa-100000000002'
+            AND permission_code = 'device.enrollment.approve'
+            AND scope_type = 'COMPANY'
+            AND company_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+            AND company_operation_id IS NULL
+            AND lifecycle_status = 'ACTIVE')
+);
+UPDATE platform.permission_grant
+SET person_id = 'aaaaaaaa-aaaa-aaaa-aaaa-100000000002',
+    permission_code = 'device.enrollment.revoke', scope_type = 'COMPANY',
+    company_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', company_operation_id = NULL,
+    valid_from = clock_timestamp() - interval '5 minutes', valid_until = NULL,
+    lifecycle_status = 'ACTIVE', revoked_at = NULL, expired_at = NULL,
+    granted_by_user_account_id = 'dddddddd-dddd-dddd-dddd-200000000001'
+WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-470000000003';
+INSERT INTO platform.permission_grant (
+    id, person_id, permission_code, scope_type, company_id, company_operation_id,
+    valid_from, lifecycle_status, granted_by_user_account_id
+)
+SELECT 'aaaaaaaa-aaaa-aaaa-aaaa-470000000003', 'aaaaaaaa-aaaa-aaaa-aaaa-100000000002',
+       'device.enrollment.revoke', 'COMPANY', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', NULL,
+       clock_timestamp() - interval '5 minutes', 'ACTIVE', 'dddddddd-dddd-dddd-dddd-200000000001'
+WHERE NOT EXISTS (
+    SELECT 1 FROM platform.permission_grant
+     WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-470000000003'
+        OR (person_id = 'aaaaaaaa-aaaa-aaaa-aaaa-100000000002'
+            AND permission_code = 'device.enrollment.revoke'
+            AND scope_type = 'COMPANY'
+            AND company_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+            AND company_operation_id IS NULL
+            AND lifecycle_status = 'ACTIVE')
+);
+
+-- Validate tenant-owned rows before switching to tp_owner. permission_grant
+-- is FORCE RLS and its owner policy is intentionally reserved for the device
+-- boundary, so an owner-context SELECT is not a valid fixture assertion.
+DO $$
+DECLARE
+    failures text[] := ARRAY[]::text[];
+    grant_count integer;
+    catalog_count integer;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM platform.company
+         WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+           AND slug = 'manual-acme' AND status = 'ACTIVE'
+    ) THEN
+        failures := array_append(failures, 'company');
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM platform.company_operation
+         WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-000000000001'
+           AND company_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+           AND operation_type_code = 'DRAYAGE' AND status = 'ACTIVE'
+    ) THEN
+        failures := array_append(failures, 'company_operation');
+    END IF;
+    IF (SELECT count(*) FROM platform.company_membership
+        WHERE company_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+          AND person_id IN ('aaaaaaaa-aaaa-aaaa-aaaa-100000000002', 'aaaaaaaa-aaaa-aaaa-aaaa-100000000003')
+          AND status = 'ACTIVE') <> 2 THEN
+        failures := array_append(failures, 'company_memberships');
+    END IF;
+    IF (SELECT count(*) FROM platform.operation_membership
+        WHERE company_operation_id = 'aaaaaaaa-aaaa-aaaa-aaaa-000000000001'
+          AND person_id IN ('aaaaaaaa-aaaa-aaaa-aaaa-100000000002', 'aaaaaaaa-aaaa-aaaa-aaaa-100000000003')
+          AND status = 'ACTIVE') <> 2 THEN
+        failures := array_append(failures, 'operation_memberships');
+    END IF;
+    SELECT count(*) INTO catalog_count
+      FROM platform.permission
+     WHERE code IN ('device.enrollment.approve', 'device.enrollment.revoke')
+       AND status = 'ACTIVE';
+    IF catalog_count <> 2 THEN
+        failures := array_append(failures, 'device_permission_catalog');
+    END IF;
+    SELECT count(*) INTO grant_count
+      FROM platform.permission_grant
+     WHERE person_id = 'aaaaaaaa-aaaa-aaaa-aaaa-100000000002'
+       AND company_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+       AND scope_type = 'COMPANY'
+       AND permission_code IN ('device.enrollment.approve', 'device.enrollment.revoke')
+       AND company_operation_id IS NULL
+       AND lifecycle_status = 'ACTIVE'
+       AND valid_from <= clock_timestamp()
+       AND (valid_until IS NULL OR valid_until > clock_timestamp());
+    IF grant_count <> 2 THEN
+        failures := array_append(failures, format('company_permission_grants(count=%s)', grant_count));
+    END IF;
+    IF cardinality(failures) > 0 THEN
+        RAISE EXCEPTION 'synthetic fixture validation failed: %', array_to_string(failures, ', ');
+    END IF;
+END;
+$$;
+
 -- Auth tables have deliberately no runtime DML policy. Switch to the existing
 -- owner policy with the internal fixture flag; no table policy is changed.
 RESET ROLE;
@@ -225,17 +342,23 @@ SET user_account_id = EXCLUDED.user_account_id,
     expires_at = NULL;
 
 -- Fail closed if a previous partial attempt left a conflicting row under one
--- of the deterministic fixture identifiers.
+-- of the deterministic authentication identifiers. Tenant rows were already
+-- validated above while the session was tp_runtime.
 DO $$
+DECLARE
+    failures text[] := ARRAY[]::text[];
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM platform.company WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' AND slug = 'manual-acme' AND status = 'ACTIVE')
-       OR NOT EXISTS (SELECT 1 FROM platform.company_operation WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-000000000001' AND company_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' AND operation_type_code = 'DRAYAGE' AND status = 'ACTIVE')
-       OR NOT EXISTS (SELECT 1 FROM platform.login_identifier WHERE normalized_identifier = 'supervisor-test@example.test' AND user_account_id = 'aaaaaaaa-aaaa-aaaa-aaaa-200000000002')
-       OR NOT EXISTS (SELECT 1 FROM platform.login_identifier WHERE normalized_identifier = 'driver-test@example.test' AND user_account_id = 'aaaaaaaa-aaaa-aaaa-aaaa-200000000003')
-       OR (SELECT count(*) FROM platform.company_membership WHERE company_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' AND person_id IN ('aaaaaaaa-aaaa-aaaa-aaaa-100000000002', 'aaaaaaaa-aaaa-aaaa-aaaa-100000000003') AND status = 'ACTIVE') <> 2
-       OR (SELECT count(*) FROM platform.operation_membership WHERE company_operation_id = 'aaaaaaaa-aaaa-aaaa-aaaa-000000000001' AND person_id IN ('aaaaaaaa-aaaa-aaaa-aaaa-100000000002', 'aaaaaaaa-aaaa-aaaa-aaaa-100000000003') AND status = 'ACTIVE') <> 2
-    THEN
-        RAISE EXCEPTION 'synthetic fixture validation failed';
+    IF NOT EXISTS (SELECT 1 FROM platform.login_identifier WHERE normalized_identifier = 'supervisor-test@example.test' AND user_account_id = 'aaaaaaaa-aaaa-aaaa-aaaa-200000000002') THEN
+        failures := array_append(failures, 'supervisor_login_identifier');
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM platform.login_identifier WHERE normalized_identifier = 'driver-test@example.test' AND user_account_id = 'aaaaaaaa-aaaa-aaaa-aaaa-200000000003') THEN
+        failures := array_append(failures, 'driver_login_identifier');
+    END IF;
+    IF (SELECT count(*) FROM platform.password_credential WHERE id IN ('aaaaaaaa-aaaa-aaaa-aaaa-600000000002', 'aaaaaaaa-aaaa-aaaa-aaaa-600000000003') AND status = 'ACTIVE') <> 2 THEN
+        failures := array_append(failures, 'password_credentials');
+    END IF;
+    IF cardinality(failures) > 0 THEN
+        RAISE EXCEPTION 'synthetic fixture validation failed: %', array_to_string(failures, ', ');
     END IF;
 END;
 $$;

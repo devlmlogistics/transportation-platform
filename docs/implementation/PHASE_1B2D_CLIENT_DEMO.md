@@ -52,7 +52,7 @@ docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml 
 docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml up -d platform
 ```
 
-La migración nueva es `000017_demo_device_query_visibility.sql`; Goose debe quedar en `17`. No ejecutar `down`, `down --volumes`, `DROP`, `TRUNCATE` ni eliminar el volumen `demo-db-data`: las solicitudes de los conductores permanecen en la base y sólo se reemplazan las funciones de consulta al aplicar Goose UP.
+Las migraciones de la demo llegan a `000018_device_scope_permission_grants.sql`; Goose debe quedar en `18`. No ejecutar `down`, `down --volumes`, `DROP`, `TRUNCATE` ni eliminar el volumen `demo-db-data`: las solicitudes de los conductores permanecen en la base y sólo se reemplazan las funciones de consulta al aplicar Goose UP.
 
 Configurar roles y contraseñas sintéticas una sola vez:
 
@@ -71,11 +71,23 @@ docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml 
   run --rm migrate version
 ```
 
-La versión esperada es la última migración de `db/migrations` (`17` en esta rama). El servicio Go no ejecuta migraciones al iniciar. El DSN usa `PHASE_1B2D_MIGRATOR_DSN` y el usuario efectivo es `tp_migrator`.
+La versión esperada es la última migración de `db/migrations` (`18` en esta rama). El servicio Go no ejecuta migraciones al iniciar. El DSN usa `PHASE_1B2D_MIGRATOR_DSN` y el usuario efectivo es `tp_migrator`.
 
 `000017_demo_device_query_visibility.sql` corrige el listado de demo: una solicitud PENDING o una autorización existente se filtra por el scope de empresa/operación y el permiso vigente del supervisor, no por la membresía actual del conductor. La aprobación y la revocación conservan sus validaciones transaccionales de membresía del destinatario. Esto evita que una solicitud desaparezca de la consola antes de que pueda revisarse, sin ampliar el acceso entre empresas.
 
+`000018_device_scope_permission_grants.sql` alinea esa frontera con el evaluador general de autorización: `company_operation_id IS NULL` significa alcance `COMPANY`, nunca acceso comodín a todas las operaciones. Un supervisor limitado a `OPERATION` no puede ver ni gestionar una solicitud sin operación. La demo entrega al supervisor un permiso directo y vigente `COMPANY` sólo para `device.enrollment.approve` y `device.enrollment.revoke`; las solicitudes con operación concreta siguen requiriendo el alcance `OPERATION`. La función SQL conserva membresía empresarial vigente y no trata un rol o permiso como sustituto de esa membresía.
+
 La respuesta actual de estos endpoints Go serializa los campos de los DTO con nombres PascalCase (`ID`, `CompanyID`, `LegalName`, etc.). `web/src/supervisor.ts` mantiene una adaptación explícita y común para solicitudes y autorizaciones hacia el modelo TypeScript `snake_case`; no se cambia el contrato HTTP existente. Las acciones de aprobar y revocar validan el UUID normalizado antes de construir la URL, por lo que un identificador ausente nunca produce una ruta con `undefined`.
+
+### Presentación UX/UI para la demo
+
+La pantalla React tiene vistas diferenciadas para conductor y supervisor, con diseño mobile-first y acciones táctiles. El conductor ve un flujo guiado de identidad, instalación, aprobación y passkey; el estado de la instalación se recupera automáticamente desde IndexedDB cuando existe una `CryptoKey` válida. La interfaz no almacena tokens de sesión ni crea una instalación nueva automáticamente si ya hay una instalada.
+
+La selección de empresa y operación utiliza un catálogo explícito de datos sintéticos en `web/src/demoCatalog.ts`, porque esta fase no ofrece un endpoint autorizado de descubrimiento de tenants. El catálogo no debe ampliarse con datos reales ni interpretarse como un directorio global. Los UUID, códigos de correlación, instalación y algoritmo permanecen en secciones `Detalles técnicos` desplegables.
+
+La consola del supervisor muestra solicitudes pendientes, dispositivos activos y dispositivos revocados como historial. Aprobar y revocar requieren confirmación explícita, deshabilitan acciones mientras hay una mutación en curso y sólo muestran éxito después de una respuesta HTTP válida. `Actualizar estados` refresca las listas sin recargar la página completa. No se modificaron WebAuthn, ECDSA, CSRF, RLS, autorización ni contratos HTTP.
+
+Esta entrega es exclusivamente de UX/UI y pruebas frontend: no agrega migraciones Goose, endpoints, tablas ni cambios en PostgreSQL.
 
 ### Registro de passkey desde Android después de la aprobación
 
@@ -83,7 +95,7 @@ El teléfono conserva el identificador de la solicitud en memoria de la pantalla
 
 Si la solicitud está pendiente, se informa que debe esperar. Si el endpoint rechaza el registro antes de expirar, la pantalla permite reintentar y recomienda verificar con el supervisor. Si expira, se solicita una nueva activación sin borrar la instalación local. La cancelación del diálogo biométrico/PIN no consume la solicitud. Un registro exitoso cambia el estado a autorizado y el siguiente paso es `Ingresar con passkey`.
 
-Esta corrección es exclusivamente de frontend y helpers WebAuthn; no agrega migraciones. Si la instancia Linux ya está en Goose 17, basta reconstruir y reemplazar `platform` con `--no-deps`; no se debe ejecutar Goose ni reiniciar `db` para este cambio.
+La corrección anterior de frontend y helpers WebAuthn no agregó migraciones. Esta corrección de visibilidad sí agrega `000018_device_scope_permission_grants.sql`; si la instancia Linux está en Goose 17, hay que ejecutar únicamente Goose UP hasta 18 antes de reemplazar `platform`. No ejecutar DOWN ni reiniciar `db`.
 
 ## Fixture sintético
 
@@ -96,13 +108,15 @@ docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml 
 
 La imagen del fixture compila el helper Argon2id y utiliza el cliente `psql` dentro del contenedor. No requiere Go, PowerShell ni un puerto PostgreSQL en el host. La secuencia es idempotente para los identificadores sintéticos. Si falla, no continuar con la demo hasta revisar la salida y verificar la base aislada; no ejecutar el script contra otro proyecto Compose.
 
+Después de aplicar Goose 18, ejecutar de nuevo el fixture para agregar o revalidar los permisos COMPANY sintéticos del supervisor. La validación de empresa, operación, membresías y permisos se ejecuta mientras la sesión es `tp_runtime` con contexto `TENANT`; las credenciales se validan después bajo el contexto propietario interno. Esto evita que `FORCE ROW LEVEL SECURITY` haga aparecer cero permisos durante la comprobación. La carga no elimina solicitudes ni reinicia el volumen; sí vuelve a dejar los registros sintéticos bajo sus valores declarados, por lo que debe ejecutarse sólo sobre este proyecto Compose. Si falla, el `BEGIN`/`COMMIT` revierte toda la carga y el mensaje indica la condición faltante.
+
 Para validar todo el flujo sin tocar ninguna instalación persistente:
 
 ```bash
 bash ./scripts/demo/test-e2e.sh
 ```
 
-Este test crea un proyecto Compose y volumen temporales, configura roles, aplica Goose 17, ejecuta bootstrap, carga el fixture, inicia la aplicación, verifica `/healthz` desde el contenedor y comprueba usuarios, empresa y privilegios. Al finalizar elimina únicamente sus recursos con el nombre de proyecto generado.
+Este test crea un proyecto Compose y volumen temporales, configura roles, aplica Goose 18, ejecuta bootstrap, carga el fixture, inicia la aplicación, verifica `/healthz` desde el contenedor y comprueba usuarios, empresa y privilegios. Al finalizar elimina únicamente sus recursos con el nombre de proyecto generado.
 
 En la validación local Windows de esta rama no había Bash/WSL disponible; se ejecutó el mismo flujo Compose por pasos desde PowerShell con nombres de proyecto, volumen y red temporales, y pasó. En Ubuntu ARM64 se debe ejecutar el script Bash anterior como la comprobación canónica.
 
