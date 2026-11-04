@@ -16,7 +16,7 @@ No se habilita `/api/v1/admin`, no se implementan formularios, GPS, operaciones 
 
 ## Requisitos previos
 
-1. Docker Engine/Compose y Go 1.25 en el servidor de la demo.
+1. Docker Engine/Compose en el servidor de la demo. Go y PowerShell no son necesarios en el host: los helpers de migración, bootstrap y fixture se ejecutan en imágenes Docker.
 2. DNS y TLS terminados por Nginx Proxy Manager para `https://nocolm.stdc.cl`.
 3. Crear un archivo privado `.env.demo` a partir de `demo.env.example`. No versionarlo ni pegar sus valores en logs. Cambiar todos los valores `replace-with-a-private-value`; mantener el archivo en sintaxis `KEY=value` compatible con shell y entrecomillar valores que contengan espacios o caracteres especiales.
 4. Definir además, sólo en el entorno del proceso que cargará fixtures:
@@ -34,7 +34,7 @@ El archivo `.env.demo` sólo contiene configuración local. Las contraseñas no 
 Todos los comandos se ejecutan desde la raíz del repositorio y usan exclusivamente el proyecto Compose `transportation-demo`. El servicio PostgreSQL no publica ningún puerto al host.
 
 ```bash
-docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml up -d db
+docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml up -d --wait db
 docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml ps
 ```
 
@@ -43,6 +43,8 @@ Configurar roles y contraseñas sintéticas una sola vez:
 ```bash
 bash ./scripts/demo/bootstrap-roles.sh
 ```
+
+El script lee únicamente las claves requeridas de `.env.demo`; no ejecuta el archivo como código shell, por lo que `WEBAUTHN_RP_DISPLAY_NAME="Transportation Platform Demo"` y otros valores con espacios son seguros.
 
 Aplicar migraciones sólo de forma explícita, tras verificar que `db` está saludable:
 
@@ -53,21 +55,28 @@ docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml 
   run --rm migrate version
 ```
 
-La versión esperada es la última migración de `db/migrations` (`16` en esta rama). El servicio Go no ejecuta migraciones al iniciar.
+La versión esperada es la última migración de `db/migrations` (`16` en esta rama). El servicio Go no ejecuta migraciones al iniciar. El DSN usa `PHASE_1B2D_MIGRATOR_DSN` y el usuario efectivo es `tp_migrator`.
 
 ## Fixture sintético
 
 El fixture crea una empresa, una operación DRAYAGE, un supervisor y dos conductores. La carga usa una cuenta temporal de fixture con los roles existentes, y la elimina al terminar. No se cambian las políticas RLS productivas ni se otorga `BYPASSRLS`.
 
-```powershell
-$env:DEMO_POSTGRES_PASSWORD = 'valor-privado'
-$env:DEMO_SUPERVISOR_PASSWORD = 'valor-privado'
-$env:DEMO_DRIVER_PASSWORD = 'valor-privado'
-$env:DEMO_DRIVER_TWO_PASSWORD = 'valor-privado'
-pwsh -File .\scripts\demo\seed-fixture.ps1
+```bash
+docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml \
+  run --rm fixture
 ```
 
-La secuencia es idempotente para los identificadores sintéticos. Si falla, no continuar con la demo hasta revisar la salida y verificar la base aislada; no ejecutar el script contra otro proyecto Compose.
+La imagen del fixture compila el helper Argon2id y utiliza el cliente `psql` dentro del contenedor. No requiere Go, PowerShell ni un puerto PostgreSQL en el host. La secuencia es idempotente para los identificadores sintéticos. Si falla, no continuar con la demo hasta revisar la salida y verificar la base aislada; no ejecutar el script contra otro proyecto Compose.
+
+Para validar todo el flujo sin tocar ninguna instalación persistente:
+
+```bash
+bash ./scripts/demo/test-e2e.sh
+```
+
+Este test crea un proyecto Compose y volumen temporales, configura roles, aplica Goose 16, ejecuta bootstrap, carga el fixture, inicia la aplicación, verifica `/healthz` desde el contenedor y comprueba usuarios, empresa y privilegios. Al finalizar elimina únicamente sus recursos con el nombre de proyecto generado.
+
+En la validación local Windows de esta rama no había Bash/WSL disponible; se ejecutó el mismo flujo Compose por pasos desde PowerShell con nombres de proyecto, volumen y red temporales, y pasó. En Ubuntu ARM64 se debe ejecutar el script Bash anterior como la comprobación canónica.
 
 ## Servidor Go
 
@@ -79,6 +88,8 @@ docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml 
 ```
 
 La URL pública esperada es `https://nocolm.stdc.cl`. El bind del host por defecto es `127.0.0.1:8080`; si Nginx Proxy Manager está en otro host de la red privada, reemplazar `DEMO_HOST_BIND_ADDRESS` por la IP privada de la interfaz y limitar el firewall al origen del proxy.
+
+En Ubuntu ARM64, conservar `DEMO_PLATFORM=linux/arm64`. La aplicación, migrador, bootstrap y fixture declaran esa plataforma; no se mezclan imágenes x86_64 en el proyecto.
 
 Valores de seguridad obligatorios:
 

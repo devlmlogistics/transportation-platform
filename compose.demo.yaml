@@ -1,6 +1,7 @@
 services:
   db:
     image: postgres:16.8-alpine3.21
+    platform: ${DEMO_PLATFORM:-linux/arm64}
     environment:
       POSTGRES_DB: ${DEMO_DATABASE_NAME:-transportation_platform_demo}
       POSTGRES_USER: ${DEMO_POSTGRES_USER:-postgres}
@@ -8,6 +9,7 @@ services:
     volumes:
       - demo-db-data:/var/lib/postgresql/data
       - ./db:/repo/db:ro
+      - ./scripts/demo:/repo/demo:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -19,9 +21,10 @@ services:
     build:
       context: .
       dockerfile: scripts/demo/Dockerfile.migrate
+    platform: ${DEMO_PLATFORM:-linux/arm64}
     profiles: ["tools"]
     environment:
-      PHASE_1B_2_MIGRATOR_DSN: postgres://${DEMO_MIGRATOR_USER:-tp_migrator}:${DEMO_MIGRATOR_PASSWORD:?set DEMO_MIGRATOR_PASSWORD in .env.demo}@db:5432/${DEMO_DATABASE_NAME:-transportation_platform_demo}?sslmode=disable
+      PHASE_1B2D_MIGRATOR_DSN: postgres://${DEMO_MIGRATOR_USER:-tp_migrator}:${DEMO_MIGRATOR_PASSWORD:?set DEMO_MIGRATOR_PASSWORD in .env.demo}@db:5432/${DEMO_DATABASE_NAME:-transportation_platform_demo}?sslmode=disable
     depends_on:
       db:
         condition: service_healthy
@@ -30,6 +33,7 @@ services:
     build:
       context: .
       dockerfile: scripts/demo/Dockerfile.bootstrap
+    platform: ${DEMO_PLATFORM:-linux/arm64}
     profiles: ["tools"]
     environment:
       APP_ENV: development
@@ -55,10 +59,29 @@ services:
       db:
         condition: service_healthy
 
+  fixture:
+    build:
+      context: .
+      dockerfile: scripts/demo/Dockerfile.fixture
+    platform: ${DEMO_PLATFORM:-linux/arm64}
+    profiles: ["tools"]
+    environment:
+      DEMO_DATABASE_NAME: ${DEMO_DATABASE_NAME:-transportation_platform_demo}
+      DEMO_DATABASE_HOST: db
+      DEMO_POSTGRES_USER: ${DEMO_POSTGRES_USER:-postgres}
+      DEMO_POSTGRES_PASSWORD: ${DEMO_POSTGRES_PASSWORD:?set DEMO_POSTGRES_PASSWORD in .env.demo}
+      DEMO_SUPERVISOR_PASSWORD: ${DEMO_SUPERVISOR_PASSWORD:?set DEMO_SUPERVISOR_PASSWORD in .env.demo}
+      DEMO_DRIVER_PASSWORD: ${DEMO_DRIVER_PASSWORD:?set DEMO_DRIVER_PASSWORD in .env.demo}
+      DEMO_DRIVER_TWO_PASSWORD: ${DEMO_DRIVER_TWO_PASSWORD:?set DEMO_DRIVER_TWO_PASSWORD in .env.demo}
+    depends_on:
+      db:
+        condition: service_healthy
+
   platform:
     build:
       context: .
       dockerfile: Dockerfile
+    platform: ${DEMO_PLATFORM:-linux/arm64}
     ports:
       - "${DEMO_HOST_BIND_ADDRESS:-127.0.0.1}:${DEMO_HOST_PORT:-8080}:${PORT:-8080}"
     environment:

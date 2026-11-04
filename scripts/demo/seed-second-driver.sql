@@ -4,8 +4,10 @@ BEGIN;
 
 RESET ROLE;
 SET ROLE tp_runtime;
-SELECT set_config('app.access_mode', 'TENANT', true);
-SELECT set_config('app.tenant_id', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', true);
+-- Identity rows are global and must be prepared under PLATFORM before the
+-- tenant membership exists; the membership and role rows follow in TENANT.
+SELECT set_config('app.access_mode', 'PLATFORM', true);
+SELECT set_config('app.tenant_id', '', true);
 
 UPDATE platform.person SET legal_name = 'Demo Driver Two', preferred_name = 'Driver Two', status = 'ACTIVE', updated_at = now()
  WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-100000000004';
@@ -22,6 +24,10 @@ UPDATE platform.driver_profile SET person_id = 'aaaaaaaa-aaaa-aaaa-aaaa-10000000
 INSERT INTO platform.driver_profile (id, person_id, status)
 SELECT 'aaaaaaaa-aaaa-aaaa-aaaa-420000000004', 'aaaaaaaa-aaaa-aaaa-aaaa-100000000004', 'ACTIVE'
  WHERE NOT EXISTS (SELECT 1 FROM platform.driver_profile WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-420000000004');
+
+SELECT set_config('app.access_mode', 'TENANT', true);
+SELECT set_config('app.tenant_id', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', true);
+
 UPDATE platform.company_membership SET status = 'ACTIVE', valid_from = clock_timestamp() - interval '5 minutes', valid_until = NULL, updated_at = now()
  WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-400000000004';
 INSERT INTO platform.company_membership (id, company_id, person_id, status, valid_from, created_by_user_account_id)

@@ -5,6 +5,9 @@ Clasificación: [D] procedimiento de validación para un entorno aislado. Los da
 ## Checklist técnico
 
 - [ ] `docker compose ... config --quiet` valida `compose.demo.yaml` usando el archivo privado `.env.demo`.
+- [ ] `bash ./scripts/demo/test-e2e.sh` crea un proyecto y volumen temporales sin puertos fijos.
+- [ ] El E2E confirma Goose 16, bootstrap completado, fixture y `/healthz`.
+- [ ] La imagen de aplicación se construye para `linux/arm64`.
 - [ ] `db` está saludable y no tiene `ports` publicados.
 - [ ] `scripts/demo/bootstrap-roles.sh` confirma los roles sin imprimir secretos.
 - [ ] Goose aplica UP hasta la versión 16; nunca ejecutar DOWN en la demo del cliente.
