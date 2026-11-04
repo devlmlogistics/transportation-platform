@@ -4,6 +4,8 @@ import {
   driverLoginErrorMessage,
   loadDriverInstallation,
   loginDriverWithPasskey,
+  registerPasskey,
+  requestDriverActivation,
   type DriverInstallation,
 } from "./webauthn";
 
@@ -23,6 +25,13 @@ class FakePublicKeyCredential {
     signature: responseBytes(64),
     userHandle: responseBytes(16),
   } as AuthenticatorAssertionResponse;
+}
+
+class FakeRegistrationCredential {
+  readonly id = "registration-credential";
+  readonly rawId = responseBytes(16);
+  readonly type = "public-key";
+  readonly response = { clientDataJSON: responseBytes(8), attestationObject: responseBytes(64) } as AuthenticatorAttestationResponse;
 }
 
 const installCredentialAPI = (credential: PublicKeyCredential | null, error?: Error) => {
@@ -105,6 +114,63 @@ describe("driver WebAuthn browser boundary", () => {
     await expect(loginDriverWithPasskey("driver@example.test", installation)).rejects.toMatchObject({ name: "NotAllowedError" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(driverLoginErrorMessage(error)).toMatch(/NotAllowedError/);
+  });
+
+  it("starts and finishes registration for the approved request returned by the backend", async () => {
+    vi.stubGlobal("PublicKeyCredential", FakeRegistrationCredential);
+    Object.defineProperty(navigator, "credentials", {
+      configurable: true,
+      value: { create: vi.fn(async () => new FakeRegistrationCredential()) },
+    });
+    document.cookie = "tp_csrf=registration-csrf";
+    const installation = createInstallation();
+    const stages: string[] = [];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(response({
+      challenge_id: challengeID,
+      options: { publicKey: { challenge, rp: { id: "localhost", name: "Transportation Platform" }, user: { id: challenge, name: "driver" }, userVerification: "required" } },
+    })).mockResolvedValueOnce(response({ status: "registered" }));
+
+    await registerPasskey("", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", (stage) => stages.push(stage));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1] && (fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual(expect.objectContaining({ device_request_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }));
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/v1/auth/webauthn/registration/finish");
+    expect(stages).toEqual(["options_received", "browser_started", "browser_completed", "finished"]);
+  });
+
+  it("normalizes the activation response and rejects a response without an identifier", async () => {
+    const installation = createInstallation();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(response({
+      ID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      CorrelationCode: "REQ-DEMO",
+      Status: "PENDING",
+      ExpiresAt: "2026-11-04T20:01:23Z",
+    }));
+
+    await expect(requestDriverActivation("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", undefined, installation)).resolves.toMatchObject({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      correlationCode: "REQ-DEMO",
+      status: "PENDING",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    fetchMock.mockResolvedValueOnce(response({ Status: "PENDING", ExpiresAt: "2026-11-04T20:01:23Z" }));
+    await expect(requestDriverActivation("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", undefined, installation)).rejects.toThrow("request id");
+  });
+
+  it("does not call registration finish when Android cancels the ceremony", async () => {
+    vi.stubGlobal("PublicKeyCredential", FakeRegistrationCredential);
+    Object.defineProperty(navigator, "credentials", {
+      configurable: true,
+      value: { create: vi.fn(async () => Promise.reject(Object.assign(new Error("cancelled"), { name: "NotAllowedError" }))) },
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(response({
+      challenge_id: challengeID,
+      options: { publicKey: { challenge, rp: { id: "localhost", name: "Transportation Platform" }, user: { id: challenge, name: "driver" }, userVerification: "required" } },
+    }));
+
+    await expect(registerPasskey("", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")).rejects.toMatchObject({ name: "NotAllowedError" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("round-trips an installation and its non-exportable key references through IndexedDB", async () => {

@@ -28,6 +28,67 @@ export type DeviceAuthorizationView = {
   revoked_at: string | null;
 };
 
+type JSONRecord = Record<string, unknown>;
+
+const isJSONRecord = (value: unknown): value is JSONRecord =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const field = (record: JSONRecord, snakeCase: string, pascalCase: string): unknown =>
+  record[snakeCase] ?? record[pascalCase];
+
+const stringField = (record: JSONRecord, snakeCase: string, pascalCase: string): string => {
+  const value = field(record, snakeCase, pascalCase);
+  return typeof value === "string" ? value : "";
+};
+
+const nullableStringField = (record: JSONRecord, snakeCase: string, pascalCase: string): string | null => {
+  const value = field(record, snakeCase, pascalCase);
+  return value == null ? null : typeof value === "string" ? value : "";
+};
+
+const normalizeDeviceEnrollmentRequest = (value: unknown): DeviceEnrollmentRequestView => {
+  if (!isJSONRecord(value)) throw new Error("Invalid device enrollment request response");
+  return {
+    request_id: stringField(value, "request_id", "ID"),
+    correlation_code: stringField(value, "correlation_code", "CorrelationCode"),
+    user_account_id: stringField(value, "user_account_id", "UserAccountID"),
+    identifier: stringField(value, "identifier", "Identifier"),
+    legal_name: stringField(value, "legal_name", "LegalName"),
+    company_id: stringField(value, "company_id", "CompanyID"),
+    company_operation_id: nullableStringField(value, "company_operation_id", "CompanyOperationID"),
+    installation_id: stringField(value, "installation_id", "InstallationID"),
+    status: stringField(value, "status", "Status"),
+    requested_at: stringField(value, "requested_at", "RequestedAt"),
+    expires_at: stringField(value, "expires_at", "ExpiresAt"),
+  };
+};
+
+const normalizeDeviceAuthorization = (value: unknown): DeviceAuthorizationView => {
+  if (!isJSONRecord(value)) throw new Error("Invalid device authorization response");
+  return {
+    authorization_id: stringField(value, "authorization_id", "ID"),
+    user_account_id: stringField(value, "user_account_id", "UserAccountID"),
+    identifier: stringField(value, "identifier", "Identifier"),
+    legal_name: stringField(value, "legal_name", "LegalName"),
+    company_id: stringField(value, "company_id", "CompanyID"),
+    company_operation_id: nullableStringField(value, "company_operation_id", "CompanyOperationID"),
+    installation_id: stringField(value, "installation_id", "InstallationID"),
+    key_algorithm: stringField(value, "key_algorithm", "KeyAlgorithm"),
+    status: stringField(value, "status", "Status"),
+    requested_at: stringField(value, "requested_at", "RequestedAt"),
+    approved_at: nullableStringField(value, "approved_at", "ApprovedAt"),
+    expires_at: nullableStringField(value, "expires_at", "ExpiresAt"),
+    revoked_at: nullableStringField(value, "revoked_at", "RevokedAt"),
+  };
+};
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const requireUUID = (value: string, resource: string): string => {
+  if (!UUID_PATTERN.test(value.trim())) throw new Error(`Invalid ${resource} id`);
+  return value.trim();
+};
+
 const csrfToken = (): string =>
   document.cookie
     .split(";")
@@ -56,20 +117,24 @@ export async function loginSupervisor(identifier: string, password: string): Pro
   });
 }
 
-export const listSupervisorDeviceRequests = (): Promise<DeviceEnrollmentRequestView[]> =>
-  request<DeviceEnrollmentRequestView[]>("/api/v1/auth/webauthn/device-enrollment-requests");
+export const listSupervisorDeviceRequests = async (): Promise<DeviceEnrollmentRequestView[]> =>
+  (await request<unknown[]>("/api/v1/auth/webauthn/device-enrollment-requests")).map(normalizeDeviceEnrollmentRequest);
 
-export const listSupervisorDeviceAuthorizations = (): Promise<DeviceAuthorizationView[]> =>
-  request<DeviceAuthorizationView[]>("/api/v1/auth/webauthn/device-authorizations");
+export const listSupervisorDeviceAuthorizations = async (): Promise<DeviceAuthorizationView[]> =>
+  (await request<unknown[]>("/api/v1/auth/webauthn/device-authorizations")).map(normalizeDeviceAuthorization);
 
-export const approveSupervisorDeviceRequest = (requestID: string, reason: string): Promise<unknown> =>
-  request(`/api/v1/auth/webauthn/device-enrollment-requests/${encodeURIComponent(requestID)}/approve`, {
+export const approveSupervisorDeviceRequest = async (requestID: string, reason: string): Promise<unknown> => {
+  const validRequestID = requireUUID(requestID, "request");
+  return request(`/api/v1/auth/webauthn/device-enrollment-requests/${encodeURIComponent(validRequestID)}/approve`, {
     method: "POST",
     body: JSON.stringify({ reason }),
   });
+};
 
-export const revokeSupervisorDevice = (authorizationID: string, reason: string): Promise<unknown> =>
-  request(`/api/v1/auth/webauthn/device-authorizations/${encodeURIComponent(authorizationID)}/revoke`, {
+export const revokeSupervisorDevice = async (authorizationID: string, reason: string): Promise<unknown> => {
+  const validAuthorizationID = requireUUID(authorizationID, "authorization");
+  return request(`/api/v1/auth/webauthn/device-authorizations/${encodeURIComponent(validAuthorizationID)}/revoke`, {
     method: "POST",
     body: JSON.stringify({ reason }),
   });
+};
