@@ -79,6 +79,16 @@ La versión esperada es la última migración de `db/migrations` (`18` en esta r
 
 La respuesta actual de estos endpoints Go serializa los campos de los DTO con nombres PascalCase (`ID`, `CompanyID`, `LegalName`, etc.). `web/src/supervisor.ts` mantiene una adaptación explícita y común para solicitudes y autorizaciones hacia el modelo TypeScript `snake_case`; no se cambia el contrato HTTP existente. Las acciones de aprobar y revocar validan el UUID normalizado antes de construir la URL, por lo que un identificador ausente nunca produce una ruta con `undefined`.
 
+### Presentación UX/UI para la demo
+
+La pantalla React tiene vistas diferenciadas para conductor y supervisor, con diseño mobile-first y acciones táctiles. El conductor ve un flujo guiado de identidad, instalación, aprobación y passkey; el estado de la instalación se recupera automáticamente desde IndexedDB cuando existe una `CryptoKey` válida. La interfaz no almacena tokens de sesión ni crea una instalación nueva automáticamente si ya hay una instalada.
+
+La selección de empresa y operación utiliza un catálogo explícito de datos sintéticos en `web/src/demoCatalog.ts`, porque esta fase no ofrece un endpoint autorizado de descubrimiento de tenants. El catálogo no debe ampliarse con datos reales ni interpretarse como un directorio global. Los UUID, códigos de correlación, instalación y algoritmo permanecen en secciones `Detalles técnicos` desplegables.
+
+La consola del supervisor muestra solicitudes pendientes, dispositivos activos y dispositivos revocados como historial. Aprobar y revocar requieren confirmación explícita, deshabilitan acciones mientras hay una mutación en curso y sólo muestran éxito después de una respuesta HTTP válida. `Actualizar estados` refresca las listas sin recargar la página completa. No se modificaron WebAuthn, ECDSA, CSRF, RLS, autorización ni contratos HTTP.
+
+Esta entrega es exclusivamente de UX/UI y pruebas frontend: no agrega migraciones Goose, endpoints, tablas ni cambios en PostgreSQL.
+
 ### Registro de passkey desde Android después de la aprobación
 
 El teléfono conserva el identificador de la solicitud en memoria de la pantalla y conserva la instalación (`installation_id` y `CryptoKey` no exportable) en IndexedDB; nunca guarda tokens de sesión allí. Después de `Solicitar activación`, el conductor espera la aprobación del supervisor y pulsa `Registrar passkey`. La interfaz llama a `registration/options` con el `device_request_id`, ejecuta `navigator.credentials.create()` con User Verification requerida y envía el resultado a `registration/finish`. El backend sólo permite ese challenge para una solicitud APPROVED y vigente; al finalizar consume la solicitud y crea `DeviceAuthorization`.

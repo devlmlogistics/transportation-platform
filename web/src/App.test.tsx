@@ -28,6 +28,15 @@ describe("platform shell", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("Prepara primero la instalación");
   });
 
+  it("uses the synthetic demo catalog instead of asking the driver for UUIDs", () => {
+    render(<App />);
+
+    expect(screen.getByRole("combobox", { name: "Empresa" })).toHaveDisplayValue("Manual Acme Logistics");
+    expect(screen.getByRole("option", { name: "Drayage" })).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("UUID autorizado")).not.toBeInTheDocument();
+    expect(screen.getByText("Dispositivo sin activar")).toBeInTheDocument();
+  });
+
   it("renders the backend PascalCase response and approves the real request UUID", async () => {
     document.cookie = "tp_csrf=demo-csrf";
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
@@ -69,14 +78,47 @@ describe("platform shell", () => {
     });
 
     render(<App />);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
     fireEvent.click(screen.getByRole("button", { name: "Ingresar supervisor" }));
 
-    expect((await screen.findAllByText("Conductor Demo · driver@example.test")).length).toBe(2);
-    expect(screen.getAllByText(/Empresa dddddddd-dddd-4ddd-8ddd-dddddddddddd/)).toHaveLength(2);
-    expect(screen.getByText(/Código REQ-DEMO · Instalación eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee/)).toBeInTheDocument();
+    expect((await screen.findAllByText("Conductor Demo")).length).toBe(2);
+    expect(screen.getAllByText("driver@example.test")).toHaveLength(2);
+    expect(screen.getAllByText(/dddddddd-dddd-4ddd-8ddd-dddddddddddd/)).toHaveLength(2);
+    expect(screen.getByText("REQ-DEMO")).toBeInTheDocument();
+    expect(screen.getAllByText("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")).toHaveLength(2);
 
-    fireEvent.click(screen.getByRole("button", { name: "Aprobar" }));
+    fireEvent.click(screen.getByRole("button", { name: "Aprobar instalación" }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith(`/device-enrollment-requests/${requestID}/approve`))).toBe(true));
-    expect(screen.getByText("Solicitud aprobada.")).toBeInTheDocument();
+    expect(screen.getByText(/Solicitud aprobada/)).toBeInTheDocument();
+  });
+
+  it("keeps revoked devices visible as history and does not offer a revoke action", async () => {
+    document.cookie = "tp_csrf=demo-csrf";
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({}))
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse([{
+        ID: authorizationID,
+        UserAccountID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        Identifier: "driver@example.test",
+        LegalName: "Conductor Revocado",
+        CompanyID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        CompanyOperationID: null,
+        InstallationID: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        KeyAlgorithm: "ECDSA_P256_SHA256",
+        Status: "REVOKED",
+        RequestedAt: "2026-01-01T00:00:00Z",
+        ApprovedAt: "2026-01-01T00:05:00Z",
+        ExpiresAt: null,
+        RevokedAt: "2026-01-01T00:10:00Z",
+      }]));
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Ingresar supervisor" }));
+
+    expect(await screen.findByText("Conductor Revocado")).toBeInTheDocument();
+    expect(screen.getByText("Historial revocado")).toBeInTheDocument();
+    expect(screen.getAllByText("Revocado")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Revocar dispositivo" })).not.toBeInTheDocument();
   });
 });
