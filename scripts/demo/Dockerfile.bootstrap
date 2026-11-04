@@ -1,0 +1,7 @@
+FROM golang:1.25.0-alpine3.22
+WORKDIR /workspace
+COPY go.mod go.sum ./
+RUN go mod download
+COPY internal ./internal
+COPY cmd/bootstrap ./cmd/bootstrap
+ENTRYPOINT ["go", "run", "./cmd/bootstrap"]

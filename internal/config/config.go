@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 type Config struct {
 	AppEnv              string
 	Port                string
+	ListenHost          string
 	WebDir              string
 	ReadHeaderTimeout   time.Duration
 	ReadTimeout         time.Duration
@@ -47,7 +49,7 @@ type DatabaseConfig struct {
 }
 
 func (c Config) ListenAddr() string {
-	return ":" + c.Port
+	return net.JoinHostPort(c.ListenHost, c.Port)
 }
 
 func Load(getenv func(string) string) (Config, error) {
@@ -70,6 +72,7 @@ func Load(getenv func(string) string) (Config, error) {
 	config := Config{
 		AppEnv:              appEnv,
 		Port:                strconv.Itoa(port),
+		ListenHost:          valueOrDefault(getenv("LISTEN_HOST"), "0.0.0.0"),
 		WebDir:              valueOrDefault(getenv("WEB_DIR"), "web/dist"),
 		AuthOnlineEnabled:   parseBool(getenv("AUTH_ONLINE_ENABLED")),
 		AdminHTTPEnabled:    parseBool(getenv("ADMIN_HTTP_ENABLED")),

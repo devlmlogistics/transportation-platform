@@ -1,0 +1,8 @@
+FROM golang:1.25.0-alpine3.22
+WORKDIR /workspace
+COPY go.mod go.sum ./
+RUN go mod download
+COPY internal ./internal
+COPY scripts/phase-1b2d-manual/migrate ./scripts/phase-1b2d-manual/migrate
+COPY db/migrations ./db/migrations
+ENTRYPOINT ["go", "run", "./scripts/phase-1b2d-manual/migrate"]

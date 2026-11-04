@@ -440,6 +440,60 @@ func (r *OnlineAuthRepository) CreateDeviceEnrollmentRequest(ctx context.Context
 	return result, err
 }
 
+func (r *OnlineAuthRepository) ListDeviceEnrollmentRequests(ctx context.Context, tokenHash []byte) ([]auth.DeviceEnrollmentRequestView, error) {
+	if r == nil || r.authPool == nil || len(tokenHash) != 32 {
+		return nil, auth.ErrInvalidInput
+	}
+	rows, err := r.authPool.Query(ctx, `
+		SELECT request_id, correlation_code, user_account_id, identifier, legal_name,
+		       company_id, company_operation_id, installation_id, status, requested_at, expires_at
+		  FROM platform.list_device_enrollment_requests($1)
+		 ORDER BY requested_at DESC
+	`, tokenHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]auth.DeviceEnrollmentRequestView, 0)
+	for rows.Next() {
+		var item auth.DeviceEnrollmentRequestView
+		if err := rows.Scan(&item.ID, &item.CorrelationCode, &item.UserAccountID, &item.Identifier, &item.LegalName,
+			&item.CompanyID, &item.CompanyOperationID, &item.InstallationID, &item.Status, &item.RequestedAt, &item.ExpiresAt); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (r *OnlineAuthRepository) ListDeviceAuthorizations(ctx context.Context, tokenHash []byte) ([]auth.DeviceAuthorizationView, error) {
+	if r == nil || r.authPool == nil || len(tokenHash) != 32 {
+		return nil, auth.ErrInvalidInput
+	}
+	rows, err := r.authPool.Query(ctx, `
+		SELECT authorization_id, user_account_id, identifier, legal_name, company_id,
+		       company_operation_id, installation_id, key_algorithm, status,
+		       requested_at, approved_at, expires_at
+		  FROM platform.list_device_authorizations($1)
+		 ORDER BY requested_at DESC
+	`, tokenHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]auth.DeviceAuthorizationView, 0)
+	for rows.Next() {
+		var item auth.DeviceAuthorizationView
+		if err := rows.Scan(&item.ID, &item.UserAccountID, &item.Identifier, &item.LegalName, &item.CompanyID,
+			&item.CompanyOperationID, &item.InstallationID, &item.KeyAlgorithm, &item.Status,
+			&item.RequestedAt, &item.ApprovedAt, &item.ExpiresAt); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
 func (r *OnlineAuthRepository) ApproveDeviceEnrollmentRequest(ctx context.Context, tokenHash []byte, requestID uuid.UUID, reason string) error {
 	return r.changeDeviceRequest(ctx, "approve_device_enrollment_request", tokenHash, requestID, reason)
 }

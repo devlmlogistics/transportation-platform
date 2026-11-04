@@ -32,6 +32,12 @@ func (rejectingWebAuthnStore) RevokeOwnAuthenticator(context.Context, []byte, uu
 func (rejectingWebAuthnStore) CreateDeviceEnrollmentRequest(context.Context, []byte, DeviceEnrollmentRequestInput) (DeviceEnrollmentRequest, error) {
 	return DeviceEnrollmentRequest{}, errors.New("unexpected store call")
 }
+func (rejectingWebAuthnStore) ListDeviceEnrollmentRequests(context.Context, []byte) ([]DeviceEnrollmentRequestView, error) {
+	return nil, errors.New("unexpected store call")
+}
+func (rejectingWebAuthnStore) ListDeviceAuthorizations(context.Context, []byte) ([]DeviceAuthorizationView, error) {
+	return nil, errors.New("unexpected store call")
+}
 func (rejectingWebAuthnStore) ApproveDeviceEnrollmentRequest(context.Context, []byte, uuid.UUID, string) error {
 	return errors.New("unexpected store call")
 }

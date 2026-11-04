@@ -1,0 +1,98 @@
+services:
+  db:
+    image: postgres:16.8-alpine3.21
+    environment:
+      POSTGRES_DB: ${DEMO_DATABASE_NAME:-transportation_platform_demo}
+      POSTGRES_USER: ${DEMO_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${DEMO_POSTGRES_PASSWORD:?set DEMO_POSTGRES_PASSWORD in .env.demo}
+    volumes:
+      - demo-db-data:/var/lib/postgresql/data
+      - ./db:/repo/db:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      dockerfile: scripts/demo/Dockerfile.migrate
+    profiles: ["tools"]
+    environment:
+      PHASE_1B_2_MIGRATOR_DSN: postgres://${DEMO_MIGRATOR_USER:-tp_migrator}:${DEMO_MIGRATOR_PASSWORD:?set DEMO_MIGRATOR_PASSWORD in .env.demo}@db:5432/${DEMO_DATABASE_NAME:-transportation_platform_demo}?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+
+  bootstrap:
+    build:
+      context: .
+      dockerfile: scripts/demo/Dockerfile.bootstrap
+    profiles: ["tools"]
+    environment:
+      APP_ENV: development
+      AUTH_ONLINE_ENABLED: "true"
+      AUTH_ALLOWED_ORIGINS: cli://bootstrap
+      DATABASE_HOST: db
+      DATABASE_PORT: 5432
+      DATABASE_NAME: ${DEMO_DATABASE_NAME:-transportation_platform_demo}
+      DATABASE_SSLMODE: disable
+      DATABASE_RUNTIME_USER: ${DEMO_RUNTIME_USER:-tp_runtime}
+      DATABASE_RUNTIME_PASSWORD: ${DEMO_RUNTIME_PASSWORD:?set DEMO_RUNTIME_PASSWORD in .env.demo}
+      DATABASE_AUTH_USER: ${DEMO_AUTH_USER:-tp_auth_runtime}
+      DATABASE_AUTH_PASSWORD: ${DEMO_AUTH_PASSWORD:?set DEMO_AUTH_PASSWORD in .env.demo}
+      DATABASE_DRIVER_AUTH_USER: ${DEMO_DRIVER_AUTH_USER:-tp_driver_auth_runtime}
+      DATABASE_DRIVER_AUTH_PASSWORD: ${DEMO_DRIVER_AUTH_PASSWORD:?set DEMO_DRIVER_AUTH_PASSWORD in .env.demo}
+      DATABASE_BOOTSTRAP_USER: ${DEMO_BOOTSTRAP_USER:-tp_bootstrap_runtime}
+      DATABASE_BOOTSTRAP_PASSWORD: ${DEMO_BOOTSTRAP_PASSWORD:?set DEMO_BOOTSTRAP_PASSWORD in .env.demo}
+      BOOTSTRAP_SECRET: ${BOOTSTRAP_SECRET:?set BOOTSTRAP_SECRET in the private environment}
+      BOOTSTRAP_IDENTIFIER: ${BOOTSTRAP_IDENTIFIER:?set BOOTSTRAP_IDENTIFIER in the private environment}
+      BOOTSTRAP_LEGAL_NAME: ${BOOTSTRAP_LEGAL_NAME:?set BOOTSTRAP_LEGAL_NAME in the private environment}
+      BOOTSTRAP_PASSWORD: ${BOOTSTRAP_PASSWORD:?set BOOTSTRAP_PASSWORD in the private environment}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  platform:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${DEMO_HOST_BIND_ADDRESS:-127.0.0.1}:${DEMO_HOST_PORT:-8080}:${PORT:-8080}"
+    environment:
+      APP_ENV: production
+      PORT: ${PORT:-8080}
+      LISTEN_HOST: ${LISTEN_HOST:-0.0.0.0}
+      WEB_DIR: /app/web/dist
+      AUTH_ONLINE_ENABLED: "true"
+      ADMIN_HTTP_ENABLED: "false"
+      WEBAUTHN_ENABLED: "true"
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:?set WEBAUTHN_RP_ID in .env.demo}
+      WEBAUTHN_RP_DISPLAY_NAME: ${WEBAUTHN_RP_DISPLAY_NAME:-Transportation Platform Demo}
+      WEBAUTHN_ORIGINS: ${WEBAUTHN_ORIGINS:?set WEBAUTHN_ORIGINS in .env.demo}
+      AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:?set AUTH_ALLOWED_ORIGINS in .env.demo}
+      AUTH_COOKIE_SECURE: "true"
+      DATABASE_HOST: db
+      DATABASE_PORT: 5432
+      DATABASE_NAME: ${DEMO_DATABASE_NAME:-transportation_platform_demo}
+      DATABASE_SSLMODE: disable
+      DATABASE_RUNTIME_USER: ${DEMO_RUNTIME_USER:-tp_runtime}
+      DATABASE_RUNTIME_PASSWORD: ${DEMO_RUNTIME_PASSWORD:?set DEMO_RUNTIME_PASSWORD in .env.demo}
+      DATABASE_AUTH_USER: ${DEMO_AUTH_USER:-tp_auth_runtime}
+      DATABASE_AUTH_PASSWORD: ${DEMO_AUTH_PASSWORD:?set DEMO_AUTH_PASSWORD in .env.demo}
+      DATABASE_DRIVER_AUTH_USER: ${DEMO_DRIVER_AUTH_USER:-tp_driver_auth_runtime}
+      DATABASE_DRIVER_AUTH_PASSWORD: ${DEMO_DRIVER_AUTH_PASSWORD:?set DEMO_DRIVER_AUTH_PASSWORD in .env.demo}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:$$PORT/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  demo-db-data:

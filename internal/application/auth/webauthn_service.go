@@ -272,6 +272,20 @@ func (s *WebAuthnService) CreateDeviceEnrollmentRequest(ctx context.Context, tok
 	})
 }
 
+func (s *WebAuthnService) ListDeviceEnrollmentRequests(ctx context.Context, token []byte) ([]DeviceEnrollmentRequestView, error) {
+	if len(token) != 32 {
+		return nil, ErrWebAuthnRejected
+	}
+	return s.Store.ListDeviceEnrollmentRequests(ctx, HashSessionToken(token))
+}
+
+func (s *WebAuthnService) ListDeviceAuthorizations(ctx context.Context, token []byte) ([]DeviceAuthorizationView, error) {
+	if len(token) != 32 {
+		return nil, ErrWebAuthnRejected
+	}
+	return s.Store.ListDeviceAuthorizations(ctx, HashSessionToken(token))
+}
+
 func (s *WebAuthnService) ApproveDeviceEnrollmentRequest(ctx context.Context, token []byte, requestID uuid.UUID, reason string) error {
 	if len(token) != 32 || requestID == uuid.Nil {
 		return ErrWebAuthnRejected

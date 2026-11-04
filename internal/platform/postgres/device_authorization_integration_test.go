@@ -75,6 +75,55 @@ func testDeviceAuthorizationBoundaries(t *testing.T, ctx context.Context, authPo
 	supervisorToken := newTokenHash()
 	supervisorSession := insertSession(fixture.UserASupervisor, supervisorToken)
 
+	t.Run("read_queries_are_scope_limited", func(t *testing.T) {
+		requestA := companyOperationRequest(fixture.UserADriver, fixture.CompanyA, &fixture.OperationA)
+		requestB := companyOperationRequest(fixture.UserBAdmin, fixture.CompanyB, &fixture.OperationB)
+		var visibleRequests int
+		if err := authPool.QueryRow(ctx, `SELECT count(*) FROM platform.list_device_enrollment_requests($1) WHERE request_id = $2`, supervisorToken, requestA).Scan(&visibleRequests); err != nil {
+			t.Fatal(err)
+		}
+		if visibleRequests != 1 {
+			t.Fatalf("visible requests = %d, want 1; A=%s B=%s", visibleRequests, requestA, requestB)
+		}
+		if err := authPool.QueryRow(ctx, `SELECT count(*) FROM platform.list_device_enrollment_requests($1) WHERE request_id = $2`, supervisorToken, requestB).Scan(&visibleRequests); err != nil {
+			t.Fatal(err)
+		}
+		if visibleRequests != 0 {
+			t.Fatalf("cross-company request was visible: %s", requestB)
+		}
+
+		authorizationA := uuid.New()
+		authorizationB := uuid.New()
+		for _, item := range []struct {
+			id, user, company, operation uuid.UUID
+		}{
+			{authorizationA, fixture.UserADriver, fixture.CompanyA, fixture.OperationA},
+			{authorizationB, fixture.UserBAdmin, fixture.CompanyB, fixture.OperationB},
+		} {
+			if _, err := adminPool.Exec(ctx, `
+				INSERT INTO platform.device_authorization(
+					id, installation_id, user_account_id, company_id, company_operation_id,
+					installation_public_key, key_algorithm, status, approved_at, expires_at)
+				VALUES ($1, $2, $3, $4, $5, $6, 'ECDSA_P256_SHA256', 'ACTIVE', clock_timestamp(), clock_timestamp() + interval '1 day')
+			`, item.id, uuid.New(), item.user, item.company, item.operation, makeHash(byte(item.id[0]))); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var visibleAuthorizations int
+		if err := authPool.QueryRow(ctx, `SELECT count(*) FROM platform.list_device_authorizations($1) WHERE authorization_id = $2`, supervisorToken, authorizationA).Scan(&visibleAuthorizations); err != nil {
+			t.Fatal(err)
+		}
+		if visibleAuthorizations != 1 {
+			t.Fatalf("visible authorizations = %d, want 1", visibleAuthorizations)
+		}
+		if err := authPool.QueryRow(ctx, `SELECT count(*) FROM platform.list_device_authorizations($1) WHERE authorization_id = $2`, supervisorToken, authorizationB).Scan(&visibleAuthorizations); err != nil {
+			t.Fatal(err)
+		}
+		if visibleAuthorizations != 0 {
+			t.Fatalf("cross-company authorization was visible: %s", authorizationB)
+		}
+	})
+
 	t.Run("revoked_company_membership_blocks_rejection", func(t *testing.T) {
 		requestID := companyOperationRequest(fixture.UserADriver, fixture.CompanyA, &fixture.OperationA)
 		if _, err := adminPool.Exec(ctx, `
