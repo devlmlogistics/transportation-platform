@@ -246,7 +246,7 @@ export default function App() {
                       <p className="font-bold text-slate-950">{item.legal_name} · {item.identifier}</p>
                       <p className="mt-1 break-all text-xs text-slate-600">Empresa {item.company_id} · Operación {item.company_operation_id ?? "general"}</p>
                       <p className="mt-1 text-xs text-slate-600">Código {item.correlation_code} · Instalación {item.installation_id}</p>
-                      <button className="mt-3 rounded-lg bg-amber-700 px-3 py-2 text-xs font-bold text-white" onClick={() => void approveRequest(item.request_id)}>Aprobar</button>
+                      <button className="mt-3 rounded-lg bg-amber-700 px-3 py-2 text-xs font-bold text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={!item.request_id} onClick={() => void approveRequest(item.request_id)}>Aprobar</button>
                     </article>
                   ))}
                 </div>
@@ -260,7 +260,7 @@ export default function App() {
                       <p className="font-bold text-slate-950">{item.legal_name} · {item.identifier}</p>
                       <p className="mt-1 break-all text-xs text-slate-600">{item.status} · Empresa {item.company_id} · Operación {item.company_operation_id ?? "general"}</p>
                       <p className="mt-1 text-xs text-slate-600">Instalación {item.installation_id} · {item.key_algorithm}</p>
-                      {item.status === "ACTIVE" && <button className="mt-3 rounded-lg bg-rose-700 px-3 py-2 text-xs font-bold text-white" onClick={() => void revokeAuthorization(item.authorization_id)}>Revocar</button>}
+                      {item.status === "ACTIVE" && <button className="mt-3 rounded-lg bg-rose-700 px-3 py-2 text-xs font-bold text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={!item.authorization_id} onClick={() => void revokeAuthorization(item.authorization_id)}>Revocar</button>}
                     </article>
                   ))}
                 </div>
