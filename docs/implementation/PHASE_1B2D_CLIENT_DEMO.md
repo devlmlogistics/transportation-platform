@@ -38,6 +38,22 @@ docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml 
 docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml ps
 ```
 
+## Actualización de la instancia Linux existente
+
+Desde `/home/ubuntu/transportation-demo`, con el mismo `.env.demo` privado y sin detener otros proyectos:
+
+```bash
+git fetch origin
+git checkout feature/testing-client-demo
+git pull --ff-only origin feature/testing-client-demo
+docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml up -d --wait db
+docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml run --rm migrate version
+docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml run --rm migrate up
+docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml up -d platform
+```
+
+La migración nueva es `000017_demo_device_query_visibility.sql`; Goose debe quedar en `17`. No ejecutar `down`, `down --volumes`, `DROP`, `TRUNCATE` ni eliminar el volumen `demo-db-data`: las solicitudes de los conductores permanecen en la base y sólo se reemplazan las funciones de consulta al aplicar Goose UP.
+
 Configurar roles y contraseñas sintéticas una sola vez:
 
 ```bash
@@ -55,7 +71,9 @@ docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml 
   run --rm migrate version
 ```
 
-La versión esperada es la última migración de `db/migrations` (`16` en esta rama). El servicio Go no ejecuta migraciones al iniciar. El DSN usa `PHASE_1B2D_MIGRATOR_DSN` y el usuario efectivo es `tp_migrator`.
+La versión esperada es la última migración de `db/migrations` (`17` en esta rama). El servicio Go no ejecuta migraciones al iniciar. El DSN usa `PHASE_1B2D_MIGRATOR_DSN` y el usuario efectivo es `tp_migrator`.
+
+`000017_demo_device_query_visibility.sql` corrige el listado de demo: una solicitud PENDING o una autorización existente se filtra por el scope de empresa/operación y el permiso vigente del supervisor, no por la membresía actual del conductor. La aprobación y la revocación conservan sus validaciones transaccionales de membresía del destinatario. Esto evita que una solicitud desaparezca de la consola antes de que pueda revisarse, sin ampliar el acceso entre empresas.
 
 ## Fixture sintético
 
@@ -74,7 +92,7 @@ Para validar todo el flujo sin tocar ninguna instalación persistente:
 bash ./scripts/demo/test-e2e.sh
 ```
 
-Este test crea un proyecto Compose y volumen temporales, configura roles, aplica Goose 16, ejecuta bootstrap, carga el fixture, inicia la aplicación, verifica `/healthz` desde el contenedor y comprueba usuarios, empresa y privilegios. Al finalizar elimina únicamente sus recursos con el nombre de proyecto generado.
+Este test crea un proyecto Compose y volumen temporales, configura roles, aplica Goose 17, ejecuta bootstrap, carga el fixture, inicia la aplicación, verifica `/healthz` desde el contenedor y comprueba usuarios, empresa y privilegios. Al finalizar elimina únicamente sus recursos con el nombre de proyecto generado.
 
 En la validación local Windows de esta rama no había Bash/WSL disponible; se ejecutó el mismo flujo Compose por pasos desde PowerShell con nombres de proyecto, volumen y red temporales, y pasó. En Ubuntu ARM64 se debe ejecutar el script Bash anterior como la comprobación canónica.
 

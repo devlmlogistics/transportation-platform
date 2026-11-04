@@ -91,6 +91,75 @@ func testDeviceAuthorizationBoundaries(t *testing.T, ctx context.Context, authPo
 		if visibleRequests != 0 {
 			t.Fatalf("cross-company request was visible: %s", requestB)
 		}
+		driverToken := newTokenHash()
+		insertSession(fixture.UserADriver, driverToken)
+		if err := authPool.QueryRow(ctx, `
+			SELECT count(*) FROM platform.list_device_enrollment_requests($1) WHERE request_id = $2
+		`, driverToken, requestA).Scan(&visibleRequests); err != nil {
+			t.Fatal(err)
+		}
+		if visibleRequests != 0 {
+			t.Fatalf("driver without supervisor permission saw request: %s", requestA)
+		}
+
+		requestWithChangedTargetMembership := companyOperationRequest(fixture.UserADriver, fixture.CompanyA, &fixture.OperationA)
+		if _, err := adminPool.Exec(ctx, `
+			UPDATE platform.operation_membership
+			   SET status = 'REVOKED'
+			 WHERE company_id = $1 AND company_operation_id = $2 AND person_id = $3
+		`, fixture.CompanyA, fixture.OperationA, fixture.PersonADriver); err != nil {
+			t.Fatal(err)
+		}
+		if err := authPool.QueryRow(ctx, `
+			SELECT count(*) FROM platform.list_device_enrollment_requests($1) WHERE request_id = $2
+		`, supervisorToken, requestWithChangedTargetMembership).Scan(&visibleRequests); err != nil {
+			t.Fatal(err)
+		}
+		if visibleRequests != 1 {
+			t.Fatalf("request disappeared after target membership changed: visible=%d request=%s", visibleRequests, requestWithChangedTargetMembership)
+		}
+		if _, err := adminPool.Exec(ctx, `
+			UPDATE platform.operation_membership
+			   SET status = 'ACTIVE'
+			 WHERE company_id = $1 AND company_operation_id = $2 AND person_id = $3
+		`, fixture.CompanyA, fixture.OperationA, fixture.PersonADriver); err != nil {
+			t.Fatal(err)
+		}
+
+		expiredRequest := companyOperationRequest(fixture.UserADriver, fixture.CompanyA, &fixture.OperationA)
+		if _, err := adminPool.Exec(ctx, `
+			UPDATE platform.device_enrollment_request
+			   SET requested_at = clock_timestamp() - interval '2 minutes',
+			       expires_at = clock_timestamp() - interval '1 second'
+			 WHERE id = $1
+		`, expiredRequest); err != nil {
+			t.Fatal(err)
+		}
+		if err := authPool.QueryRow(ctx, `
+			SELECT count(*) FROM platform.list_device_enrollment_requests($1) WHERE request_id = $2
+		`, supervisorToken, expiredRequest).Scan(&visibleRequests); err != nil {
+			t.Fatal(err)
+		}
+		if visibleRequests != 0 {
+			t.Fatalf("expired request was visible: %s", expiredRequest)
+		}
+
+		consumedRequest := companyOperationRequest(fixture.UserADriver, fixture.CompanyA, &fixture.OperationA)
+		if _, err := adminPool.Exec(ctx, `
+			UPDATE platform.device_enrollment_request
+			   SET status = 'CONSUMED', consumed_at = clock_timestamp()
+			 WHERE id = $1
+		`, consumedRequest); err != nil {
+			t.Fatal(err)
+		}
+		if err := authPool.QueryRow(ctx, `
+			SELECT count(*) FROM platform.list_device_enrollment_requests($1) WHERE request_id = $2
+		`, supervisorToken, consumedRequest).Scan(&visibleRequests); err != nil {
+			t.Fatal(err)
+		}
+		if visibleRequests != 0 {
+			t.Fatalf("consumed request was visible: %s", consumedRequest)
+		}
 
 		authorizationA := uuid.New()
 		authorizationB := uuid.New()
@@ -121,6 +190,28 @@ func testDeviceAuthorizationBoundaries(t *testing.T, ctx context.Context, authPo
 		}
 		if visibleAuthorizations != 0 {
 			t.Fatalf("cross-company authorization was visible: %s", authorizationB)
+		}
+		if _, err := adminPool.Exec(ctx, `
+			UPDATE platform.operation_membership
+			   SET status = 'REVOKED'
+			 WHERE company_id = $1 AND company_operation_id = $2 AND person_id = $3
+		`, fixture.CompanyA, fixture.OperationA, fixture.PersonADriver); err != nil {
+			t.Fatal(err)
+		}
+		if err := authPool.QueryRow(ctx, `
+			SELECT count(*) FROM platform.list_device_authorizations($1) WHERE authorization_id = $2
+		`, supervisorToken, authorizationA).Scan(&visibleAuthorizations); err != nil {
+			t.Fatal(err)
+		}
+		if visibleAuthorizations != 1 {
+			t.Fatalf("authorization disappeared after target membership changed: visible=%d authorization=%s", visibleAuthorizations, authorizationA)
+		}
+		if _, err := adminPool.Exec(ctx, `
+			UPDATE platform.operation_membership
+			   SET status = 'ACTIVE'
+			 WHERE company_id = $1 AND company_operation_id = $2 AND person_id = $3
+		`, fixture.CompanyA, fixture.OperationA, fixture.PersonADriver); err != nil {
+			t.Fatal(err)
 		}
 	})
 

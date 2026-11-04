@@ -6,12 +6,14 @@ Clasificación: [D] procedimiento de validación para un entorno aislado. Los da
 
 - [ ] `docker compose ... config --quiet` valida `compose.demo.yaml` usando el archivo privado `.env.demo`.
 - [ ] `bash ./scripts/demo/test-e2e.sh` crea un proyecto y volumen temporales sin puertos fijos.
-- [ ] El E2E confirma Goose 16, bootstrap completado, fixture y `/healthz`.
+- [ ] El E2E confirma Goose 17, bootstrap completado, fixture y `/healthz`.
+- [ ] Un supervisor con sesión administrativa sin contexto activo ve solicitudes de su operación; una membresía del conductor modificada no oculta la solicitud.
 - [ ] La imagen de aplicación se construye para `linux/arm64`.
 - [ ] `db` está saludable y no tiene `ports` publicados.
 - [ ] `scripts/demo/bootstrap-roles.sh` confirma los roles sin imprimir secretos.
-- [ ] Goose aplica UP hasta la versión 16; nunca ejecutar DOWN en la demo del cliente.
+- [ ] Goose aplica UP hasta la versión 17; nunca ejecutar DOWN en la demo del cliente.
 - [ ] El fixture crea exactamente una empresa, una operación, un supervisor y dos conductores.
+- [ ] Solicitudes vencidas/consumidas no aparecen; Empresa B y usuarios sin permiso permanecen aislados.
 - [ ] `ADMIN_HTTP_ENABLED=false` y `/api/v1/admin/` permanece cerrado.
 - [ ] Login del supervisor crea cookie segura y la consola carga sólo el alcance autorizado.
 - [ ] Una solicitud de conductor se muestra, se aprueba y crea una autorización.
