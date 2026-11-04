@@ -77,6 +77,14 @@ La versión esperada es la última migración de `db/migrations` (`17` en esta r
 
 La respuesta actual de estos endpoints Go serializa los campos de los DTO con nombres PascalCase (`ID`, `CompanyID`, `LegalName`, etc.). `web/src/supervisor.ts` mantiene una adaptación explícita y común para solicitudes y autorizaciones hacia el modelo TypeScript `snake_case`; no se cambia el contrato HTTP existente. Las acciones de aprobar y revocar validan el UUID normalizado antes de construir la URL, por lo que un identificador ausente nunca produce una ruta con `undefined`.
 
+### Registro de passkey desde Android después de la aprobación
+
+El teléfono conserva el identificador de la solicitud en memoria de la pantalla y conserva la instalación (`installation_id` y `CryptoKey` no exportable) en IndexedDB; nunca guarda tokens de sesión allí. Después de `Solicitar activación`, el conductor espera la aprobación del supervisor y pulsa `Registrar passkey`. La interfaz llama a `registration/options` con el `device_request_id`, ejecuta `navigator.credentials.create()` con User Verification requerida y envía el resultado a `registration/finish`. El backend sólo permite ese challenge para una solicitud APPROVED y vigente; al finalizar consume la solicitud y crea `DeviceAuthorization`.
+
+Si la solicitud está pendiente, se informa que debe esperar. Si el endpoint rechaza el registro antes de expirar, la pantalla permite reintentar y recomienda verificar con el supervisor. Si expira, se solicita una nueva activación sin borrar la instalación local. La cancelación del diálogo biométrico/PIN no consume la solicitud. Un registro exitoso cambia el estado a autorizado y el siguiente paso es `Ingresar con passkey`.
+
+Esta corrección es exclusivamente de frontend y helpers WebAuthn; no agrega migraciones. Si la instancia Linux ya está en Goose 17, basta reconstruir y reemplazar `platform` con `--no-deps`; no se debe ejecutar Goose ni reiniciar `db` para este cambio.
+
 ## Fixture sintético
 
 El fixture crea una empresa, una operación DRAYAGE, un supervisor y dos conductores. La carga usa una cuenta temporal de fixture con los roles existentes, y la elimina al terminar. No se cambian las políticas RLS productivas ni se otorga `BYPASSRLS`.

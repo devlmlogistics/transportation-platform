@@ -3,8 +3,10 @@ import {
   getOrCreateDriverInstallation,
   loginDriverWithPassword,
   loginDriverWithPasskey,
+  registerPasskey,
   requestDriverActivation,
   driverLoginErrorMessage,
+  type DriverActivationRequest,
   type DriverInstallation,
 } from "./webauthn";
 import {
@@ -64,6 +66,8 @@ export default function App() {
   const [companyID, setCompanyID] = useState("");
   const [operationID, setOperationID] = useState("");
   const [installation, setInstallation] = useState<DriverInstallation>();
+  const [activationRequest, setActivationRequest] = useState<DriverActivationRequest>();
+  const [registrationState, setRegistrationState] = useState<"idle" | "pending" | "approved" | "registering" | "registered" | "expired">("idle");
   const [status, setStatus] = useState("Listo para comenzar.");
   const [supervisorIdentifier, setSupervisorIdentifier] = useState("");
   const [supervisorPassword, setSupervisorPassword] = useState("");
@@ -131,9 +135,46 @@ export default function App() {
     try {
       await loginDriverWithPassword(identifier, password);
       const request = await requestDriverActivation(companyID, operationID || undefined, installation);
-      setStatus(`Solicitud creada: ${String(request.correlation_code ?? "pendiente")}. Requiere aprobación del supervisor.`);
+      setActivationRequest(request);
+      setRegistrationState("pending");
+      setStatus(`Solicitud creada: ${request.correlationCode || "pendiente"}. Requiere aprobación del supervisor. Cuando sea aprobada, pulsa Registrar passkey antes de que expire.`);
     } catch {
       setStatus("La activación fue rechazada. La respuesta no revela si el conductor existe.");
+    }
+  };
+
+  const registerApprovedPasskey = async () => {
+    if (!installation || !activationRequest) {
+      setStatus("Solicita primero la activación y espera la aprobación del supervisor.");
+      return;
+    }
+    if (Date.parse(activationRequest.expiresAt) <= Date.now()) {
+      setRegistrationState("expired");
+      setStatus("La solicitud de activación expiró. Solicita una nueva; la instalación local se conserva.");
+      return;
+    }
+    setRegistrationState("registering");
+    setStatus("Verificando aprobación. Después Android solicitará la biometría o el PIN para registrar la passkey.");
+    try {
+      await registerPasskey("", activationRequest.id, (stage) => {
+        if (stage === "options_received") {
+          setRegistrationState("approved");
+          setStatus("Solicitud aprobada. Confirma ahora la biometría o el PIN de Android.");
+        }
+      });
+      setRegistrationState("registered");
+      setStatus("Passkey registrada y dispositivo autorizado. Ya puedes ingresar con passkey.");
+    } catch (error) {
+      if (Date.parse(activationRequest.expiresAt) <= Date.now()) {
+        setRegistrationState("expired");
+        setStatus("La solicitud de activación expiró. Solicita una nueva; la instalación local se conserva.");
+      } else if (error instanceof Error && error.name === "NotAllowedError") {
+        setRegistrationState("pending");
+        setStatus("Registro cancelado desde Android. La solicitud sigue disponible mientras no expire; puedes reintentarlo.");
+      } else {
+        setRegistrationState("pending");
+        setStatus("La solicitud aún puede estar pendiente o haber sido rechazada. Verifica con el supervisor y reintenta mientras siga vigente.");
+      }
     }
   };
 
@@ -203,8 +244,16 @@ export default function App() {
           <div className="mt-5 flex flex-wrap gap-3">
             <button className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-bold text-white" onClick={() => void prepareInstallation()}>Preparar instalación</button>
             <button className="rounded-xl bg-teal-700 px-4 py-3 text-sm font-bold text-white" onClick={() => void activate()}>Solicitar activación</button>
+            <button className="rounded-xl bg-amber-700 px-4 py-3 text-sm font-bold text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={!activationRequest || registrationState === "registered"} onClick={() => void registerApprovedPasskey()}>{registrationState === "registered" ? "Passkey registrada" : "Registrar passkey"}</button>
             <button className="rounded-xl bg-violet-700 px-4 py-3 text-sm font-bold text-white" onClick={() => void recurringLogin()}>Ingresar con passkey</button>
           </div>
+          {activationRequest && <p className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900" aria-live="polite">
+            {registrationState === "pending" && `Solicitud ${activationRequest.correlationCode || activationRequest.id} pendiente de aprobación. Expira a las ${new Date(activationRequest.expiresAt).toLocaleString()}.`}
+            {registrationState === "approved" && "Solicitud aprobada; completa la confirmación de Android."}
+            {registrationState === "registering" && "Registro de passkey en curso."}
+            {registrationState === "registered" && "Registro completado; la autorización del dispositivo fue creada."}
+            {registrationState === "expired" && "Solicitud expirada. Solicita una nueva activación; no se eliminó la instalación local."}
+          </p>}
           <p className="mt-4 rounded-xl bg-slate-100 p-4 text-sm text-slate-700" role="status">{status}</p>
         </section>
 

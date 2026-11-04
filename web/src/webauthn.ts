@@ -1,5 +1,12 @@
 type JSONValue = Record<string, unknown>;
 
+export type DriverActivationRequest = {
+  id: string;
+  correlationCode: string;
+  status: string;
+  expiresAt: string;
+};
+
 type CeremonyCredential = {
   id: string;
   rawId: string;
@@ -80,16 +87,38 @@ const requestJSON = async (path: string, body: JSONValue): Promise<JSONValue> =>
   return (await response.json()) as JSONValue;
 };
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const activationField = (value: JSONValue, snakeCase: string, pascalCase: string): unknown =>
+  value[snakeCase] ?? value[pascalCase];
+
+const normalizeDriverActivationRequest = (value: JSONValue): DriverActivationRequest => {
+  const id = String(activationField(value, "id", "ID") ?? "");
+  if (!UUID_PATTERN.test(id)) throw new Error("The activation request id was not returned by the server");
+  return {
+    id,
+    correlationCode: String(activationField(value, "correlation_code", "CorrelationCode") ?? ""),
+    status: String(activationField(value, "status", "Status") ?? "PENDING"),
+    expiresAt: String(activationField(value, "expires_at", "ExpiresAt") ?? ""),
+  };
+};
+
 const readCSRFToken = (): string => document.cookie.split(";").map((item) => item.trim()).find((item) => item.startsWith("tp_csrf="))?.slice("tp_csrf=".length) ?? "";
 
-export async function registerPasskey(displayName = "", deviceRequestID?: string): Promise<void> {
+export type RegistrationStage = "options_received" | "browser_started" | "browser_completed" | "finished";
+
+export async function registerPasskey(displayName = "", deviceRequestID?: string, onStage?: (stage: RegistrationStage) => void): Promise<void> {
   if (!window.PublicKeyCredential) throw new Error("This browser does not support passkeys");
   const started = await requestJSON("/api/v1/auth/webauthn/registration/options", { display_name: displayName, ...(deviceRequestID ? { device_request_id: deviceRequestID } : {}) });
+  onStage?.("options_received");
   const options = unwrapPublicKeyOptions(started.options as JSONValue);
   const publicKey = { ...options, challenge: decode(String(options.challenge)), user: { ...(options.user as JSONValue), id: decode(String((options.user as JSONValue).id)) }, ...(Array.isArray(options.excludeCredentials) ? { excludeCredentials: (options.excludeCredentials as JSONValue[]).map((item) => ({ ...item, id: decode(String(item.id)) })) } : {}) } as PublicKeyCredentialCreationOptions;
+  onStage?.("browser_started");
   const credential = await navigator.credentials.create({ publicKey });
+  onStage?.("browser_completed");
   if (!(credential instanceof PublicKeyCredential)) throw new Error("No passkey was returned");
   await requestJSON("/api/v1/auth/webauthn/registration/finish", { challenge_id: String(started.challenge_id), display_name: displayName, credential: credentialPayload(credential) as unknown as JSONValue });
+  onStage?.("finished");
 }
 
 export async function completeStepUp(): Promise<void> {
@@ -169,14 +198,15 @@ export async function createDriverInstallation(): Promise<DriverInstallation> {
   return installation;
 }
 
-export async function requestDriverActivation(companyID: string, operationID: string | undefined, installation: DriverInstallation): Promise<JSONValue> {
-  return requestJSON("/api/v1/auth/webauthn/device-enrollment-requests", {
+export async function requestDriverActivation(companyID: string, operationID: string | undefined, installation: DriverInstallation): Promise<DriverActivationRequest> {
+  const response = await requestJSON("/api/v1/auth/webauthn/device-enrollment-requests", {
     company_id: companyID,
     ...(operationID ? { company_operation_id: operationID } : {}),
     installation_id: installation.id,
     installation_public_key: installation.publicKeyEncoded,
     key_algorithm: "ECDSA_P256_SHA256",
   });
+  return normalizeDriverActivationRequest(response);
 }
 
 export async function loginDriverWithPassword(identifier: string, password: string): Promise<void> {
