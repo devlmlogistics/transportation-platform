@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   driverLoginErrorMessage,
   getOrCreateDriverInstallation,
@@ -16,6 +16,7 @@ import {
   listSupervisorDeviceRequests,
   loginSupervisor,
   revokeSupervisorDevice,
+  SupervisorRequestError,
   type DeviceAuthorizationView,
   type DeviceEnrollmentRequestView,
 } from "./supervisor";
@@ -87,9 +88,25 @@ export default function App() {
   const [supervisorStatus, setSupervisorStatus] = useState("Supervisor no autenticado.");
   const [supervisorLoggedIn, setSupervisorLoggedIn] = useState(false);
   const [supervisorRefreshing, setSupervisorRefreshing] = useState(false);
+  const [supervisorPollingBlocked, setSupervisorPollingBlocked] = useState(false);
+  const [supervisorNotice, setSupervisorNotice] = useState<string | null>(null);
   const [requests, setRequests] = useState<DeviceEnrollmentRequestView[]>([]);
   const [authorizations, setAuthorizations] = useState<DeviceAuthorizationView[]>([]);
   const [supervisorAction, setSupervisorAction] = useState<string | null>(null);
+  const supervisorActionRef = useRef<string | null>(null);
+  const supervisorPollingBlockedRef = useRef(false);
+  const supervisorRefreshRef = useRef<Promise<void> | null>(null);
+  const supervisorRefreshFailedRef = useRef(false);
+  const supervisorRefreshSequenceRef = useRef(0);
+  const supervisorSnapshotReadyRef = useRef(false);
+  const knownRequestIDsRef = useRef(new Set<string>());
+  const supervisorNoticeTimerRef = useRef<number | undefined>(undefined);
+  const mountedRef = useRef(true);
+
+  const updateSupervisorAction = (action: string | null) => {
+    supervisorActionRef.current = action;
+    setSupervisorAction(action);
+  };
 
   const selectedCompany = useMemo(() => findDemoCompany(companyID), [companyID]);
   const activeAuthorizations = authorizations.filter((item) => item.status.toUpperCase() === "ACTIVE");
@@ -112,23 +129,95 @@ export default function App() {
     return () => { mounted = false; };
   }, []);
 
-  const refreshSupervisor = async () => {
+  const refreshSupervisor = useCallback(async (source: "manual" | "poll" | "mutation" = "manual"): Promise<void> => {
+    if (supervisorRefreshRef.current) return supervisorRefreshRef.current;
+    if (source === "poll" && (document.visibilityState !== "visible" || supervisorActionRef.current !== null || supervisorPollingBlockedRef.current)) return;
+
+    const sequence = supervisorRefreshSequenceRef.current + 1;
+    supervisorRefreshSequenceRef.current = sequence;
+    supervisorRefreshFailedRef.current = false;
     setSupervisorRefreshing(true);
-    try {
-      const [nextRequests, nextAuthorizations] = await Promise.all([listSupervisorDeviceRequests(), listSupervisorDeviceAuthorizations()]);
-      setRequests(nextRequests);
-      setAuthorizations(nextAuthorizations);
-    } finally {
-      setSupervisorRefreshing(false);
-    }
-  };
+    const refresh = (async () => {
+      try {
+        const [nextRequests, nextAuthorizations] = await Promise.all([listSupervisorDeviceRequests(), listSupervisorDeviceAuthorizations()]);
+        if (!mountedRef.current || supervisorRefreshSequenceRef.current !== sequence) return;
+
+        const newRequestIDs = nextRequests
+          .map((item) => item.request_id)
+          .filter((requestID) => requestID && !knownRequestIDsRef.current.has(requestID));
+        for (const requestID of nextRequests.map((item) => item.request_id).filter(Boolean)) knownRequestIDsRef.current.add(requestID);
+        if (supervisorSnapshotReadyRef.current && newRequestIDs.length > 0) {
+          setSupervisorNotice(newRequestIDs.length === 1 ? "Nueva solicitud de activación pendiente." : `${newRequestIDs.length} nuevas solicitudes de activación pendientes.`);
+          if (supervisorNoticeTimerRef.current !== undefined) window.clearTimeout(supervisorNoticeTimerRef.current);
+          supervisorNoticeTimerRef.current = window.setTimeout(() => setSupervisorNotice(null), 6000);
+        }
+        supervisorSnapshotReadyRef.current = true;
+        setRequests(nextRequests);
+        setAuthorizations(nextAuthorizations);
+        supervisorPollingBlockedRef.current = false;
+        setSupervisorPollingBlocked(false);
+      } catch (error) {
+        if (!mountedRef.current || supervisorRefreshSequenceRef.current !== sequence) return;
+        supervisorRefreshFailedRef.current = true;
+        if (error instanceof SupervisorRequestError && error.status === 401) {
+          setSupervisorLoggedIn(false);
+          setSupervisorPollingBlocked(true);
+          supervisorPollingBlockedRef.current = true;
+          setSupervisorStatus("Tu sesión ha expirado. Vuelve a ingresar.");
+        } else if (error instanceof SupervisorRequestError && error.status === 403) {
+          setSupervisorPollingBlocked(true);
+          supervisorPollingBlockedRef.current = true;
+          setSupervisorStatus("No tienes permisos para consultar esta consola. Se detuvo la actualización automática.");
+        } else {
+          setSupervisorStatus("No fue posible actualizar los estados del supervisor.");
+        }
+      } finally {
+        if (supervisorRefreshSequenceRef.current === sequence) {
+          supervisorRefreshRef.current = null;
+          setSupervisorRefreshing(false);
+        }
+      }
+    })();
+    supervisorRefreshRef.current = refresh;
+    return refresh;
+  }, []);
+
+  useEffect(() => {
+    supervisorActionRef.current = supervisorAction;
+  }, [supervisorAction]);
+
+  useEffect(() => {
+    if (!supervisorLoggedIn) return;
+    const poll = () => {
+      if (document.visibilityState === "visible") void refreshSupervisor("poll");
+    };
+    const intervalID = window.setInterval(poll, 5000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") poll();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.clearInterval(intervalID);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [refreshSupervisor, supervisorLoggedIn]);
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+    if (supervisorNoticeTimerRef.current !== undefined) window.clearTimeout(supervisorNoticeTimerRef.current);
+  }, []);
 
   const supervisorLogin = async () => {
     try {
       await loginSupervisor(supervisorIdentifier, supervisorPassword);
       setSupervisorPassword("");
-      await refreshSupervisor();
+      supervisorSnapshotReadyRef.current = false;
+      knownRequestIDsRef.current.clear();
+      await refreshSupervisor("manual");
+      if (supervisorRefreshFailedRef.current) return;
       setSupervisorLoggedIn(true);
+      setSupervisorPollingBlocked(false);
+      supervisorPollingBlockedRef.current = false;
       setSupervisorStatus("Sesión activa. Sólo se muestran solicitudes dentro del alcance autorizado.");
     } catch {
       setSupervisorStatus("No fue posible autenticar al supervisor o cargar sus dispositivos.");
@@ -137,29 +226,29 @@ export default function App() {
 
   const approveRequest = async (requestID: string) => {
     if (!window.confirm("¿Confirmas aprobar esta instalación? El conductor podrá registrar su passkey.")) return;
-    setSupervisorAction(`approve:${requestID}`);
+    updateSupervisorAction(`approve:${requestID}`);
     try {
       await approveSupervisorDeviceRequest(requestID, "Aprobación de demo del cliente");
-      await refreshSupervisor();
+      await refreshSupervisor("mutation");
       setSupervisorStatus("Solicitud aprobada. El conductor ya puede registrar su passkey.");
     } catch {
       setSupervisorStatus("La solicitud no pudo aprobarse; su estado o alcance puede haber cambiado.");
     } finally {
-      setSupervisorAction(null);
+      updateSupervisorAction(null);
     }
   };
 
   const revokeAuthorization = async (authorizationID: string) => {
     if (!window.confirm("¿Confirmas revocar este dispositivo? El acceso del conductor se bloqueará inmediatamente.")) return;
-    setSupervisorAction(`revoke:${authorizationID}`);
+    updateSupervisorAction(`revoke:${authorizationID}`);
     try {
       await revokeSupervisorDevice(authorizationID, "Revocación de demo del cliente");
-      await refreshSupervisor();
+      await refreshSupervisor("mutation");
       setSupervisorStatus("Dispositivo revocado. El próximo acceso del conductor será rechazado.");
     } catch {
       setSupervisorStatus("El dispositivo no pudo revocarse; su estado o alcance puede haber cambiado.");
     } finally {
-      setSupervisorAction(null);
+      updateSupervisorAction(null);
     }
   };
 
@@ -286,9 +375,11 @@ export default function App() {
       <section className="mt-6 rounded-[2rem] bg-white p-5 shadow-2xl shadow-slate-950/20 sm:p-8" aria-label="Módulos de negocio"><p className="text-xs font-black uppercase tracking-[0.18em] text-slate-500">Una plataforma que puede crecer contigo</p><h2 className="mt-2 text-2xl font-black text-slate-950">Operaciones conectadas</h2><p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">Cada tipo de operación conserva sus propias reglas, mientras la identidad y la seguridad se comparten de forma controlada.</p><div className="mt-6 grid gap-4 md:grid-cols-3">{modules.map((module) => <ModuleCard key={module.name} {...module} />)}</div></section>
 
       <section className="mt-6 rounded-[2rem] bg-white p-5 shadow-2xl shadow-slate-950/20 sm:p-8" aria-label="Consola de supervisor">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between"><div><p className="text-xs font-black uppercase tracking-[0.18em] text-amber-700">Vista de supervisor</p><h2 className="mt-2 text-2xl font-black text-slate-950 sm:text-3xl">Control de dispositivos</h2><p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">Revisa solicitudes, aprueba nuevas instalaciones y revoca accesos sin salir de esta consola.</p></div>{supervisorLoggedIn && <button className="rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={supervisorRefreshing || supervisorAction !== null} onClick={() => void refreshSupervisor()}>{supervisorRefreshing ? "Actualizando…" : "Actualizar estados"}</button>}</div>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between"><div><p className="text-xs font-black uppercase tracking-[0.18em] text-amber-700">Vista de supervisor</p><h2 className="mt-2 text-2xl font-black text-slate-950 sm:text-3xl">Control de dispositivos</h2><p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">Revisa solicitudes, aprueba nuevas instalaciones y revoca accesos sin salir de esta consola.</p></div>{supervisorLoggedIn && <button className="rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={supervisorRefreshing || supervisorAction !== null} onClick={() => void refreshSupervisor()}>{supervisorRefreshing ? "Actualizando…" : "Actualizar ahora"}</button>}</div>
         <div className="mt-6 grid gap-4 md:grid-cols-[1fr_1fr_auto]"><label className="text-sm font-semibold text-slate-700">Usuario supervisor<input className="mt-2 w-full rounded-xl border border-slate-300 bg-white p-3.5 outline-none transition focus:border-amber-600 focus:ring-4 focus:ring-amber-100" value={supervisorIdentifier} onChange={(event) => setSupervisorIdentifier(event.target.value)} autoComplete="username" placeholder="Usuario de demo" /></label><label className="text-sm font-semibold text-slate-700">Contraseña<input className="mt-2 w-full rounded-xl border border-slate-300 bg-white p-3.5 outline-none transition focus:border-amber-600 focus:ring-4 focus:ring-amber-100" value={supervisorPassword} onChange={(event) => setSupervisorPassword(event.target.value)} type="password" autoComplete="current-password" placeholder="Contraseña de demo" /></label><button className="self-end rounded-xl bg-slate-900 px-4 py-3.5 text-sm font-bold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={supervisorRefreshing || supervisorAction !== null} onClick={() => void supervisorLogin()}>{supervisorRefreshing ? "Cargando…" : "Ingresar supervisor"}</button></div>
         <p className="mt-4 rounded-2xl bg-slate-100 p-4 text-sm text-slate-700" aria-live="polite">{supervisorStatus}</p>
+        {supervisorNotice && <div className="mt-3 rounded-2xl border border-teal-200 bg-teal-50 p-4 text-sm font-semibold text-teal-900" role="status" aria-live="polite">{supervisorNotice}</div>}
+        {supervisorPollingBlocked && supervisorLoggedIn && <p className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">La actualización automática está detenida por permisos. Puedes intentar «Actualizar ahora» después de corregir el acceso.</p>}
         {supervisorLoggedIn && <div className="mt-6"><div className="grid gap-3 sm:grid-cols-3"><div className="rounded-2xl border border-amber-200 bg-amber-50 p-4"><p className="text-xs font-black uppercase tracking-wide text-amber-800">Pendientes</p><p className="mt-1 text-3xl font-black text-amber-950">{requests.length}</p></div><div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4"><p className="text-xs font-black uppercase tracking-wide text-emerald-800">Registrados activos</p><p className="mt-1 text-3xl font-black text-emerald-950">{activeAuthorizations.length}</p></div><div className="rounded-2xl border border-slate-200 bg-slate-100 p-4"><p className="text-xs font-black uppercase tracking-wide text-slate-600">Historial revocado</p><p className="mt-1 text-3xl font-black text-slate-900">{revokedAuthorizations.length}</p></div></div>
           <div className="mt-6 grid gap-6 lg:grid-cols-2">
             <div><h3 className="text-lg font-black text-slate-950">Solicitudes pendientes</h3><div className="mt-3 space-y-3">{requests.length === 0 && <p className="rounded-2xl border border-dashed border-slate-300 p-5 text-sm text-slate-500">No hay solicitudes visibles en tu alcance.</p>}{requests.map((item) => <article className="rounded-2xl border border-amber-200 bg-amber-50 p-4" key={item.request_id}><div className="flex items-start justify-between gap-3"><div><p className="font-bold text-slate-950">{item.legal_name || "Conductor de demo"}</p><p className="text-sm text-slate-600">{item.identifier || "Identidad verificada"}</p></div><span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-amber-800">{statusLabel(item.status)}</span></div><dl className="mt-4 grid gap-2 text-sm text-slate-700 sm:grid-cols-2"><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Empresa</dt><dd>{companyName(item.company_id)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Operación</dt><dd>{operationName(item.company_operation_id)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Solicitada</dt><dd>{formatDate(item.requested_at)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Expira</dt><dd>{formatDate(item.expires_at)}</dd></div></dl><button className="mt-4 w-full rounded-xl bg-amber-700 px-3 py-3 text-sm font-bold text-white hover:bg-amber-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={!item.request_id || supervisorAction !== null} onClick={() => void approveRequest(item.request_id)}>{supervisorAction === `approve:${item.request_id}` ? "Aprobando…" : "Aprobar instalación"}</button><details className="mt-3 text-xs text-slate-600"><summary className="cursor-pointer font-bold">Detalles técnicos</summary><dl className="mt-2 grid gap-1"><div><dt className="font-semibold">Solicitud</dt><dd className="break-all">{item.request_id}</dd></div><div><dt className="font-semibold">Código</dt><dd>{item.correlation_code || "—"}</dd></div><div><dt className="font-semibold">Instalación</dt><dd className="break-all">{item.installation_id}</dd></div><div><dt className="font-semibold">Empresa / operación</dt><dd className="break-all">{item.company_id} / {item.company_operation_id ?? "NULL"}</dd></div></dl></details></article>)}</div></div>

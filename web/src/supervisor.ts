@@ -30,6 +30,16 @@ export type DeviceAuthorizationView = {
 
 type JSONRecord = Record<string, unknown>;
 
+export class SupervisorRequestError extends Error {
+  readonly status: number;
+
+  constructor(status: number) {
+    super(`Supervisor request failed (${status})`);
+    this.name = "SupervisorRequestError";
+    this.status = status;
+  }
+}
+
 const isJSONRecord = (value: unknown): value is JSONRecord =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -105,7 +115,7 @@ const request = async <T>(path: string, init: RequestInit = {}): Promise<T> => {
     headers.set("X-CSRF-Token", csrfToken());
   }
   const response = await fetch(path, { ...init, credentials: "include", headers });
-  if (!response.ok) throw new Error(`Supervisor request failed (${response.status})`);
+  if (!response.ok) throw new SupervisorRequestError(response.status);
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 };
