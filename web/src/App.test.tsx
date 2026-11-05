@@ -17,7 +17,7 @@ afterEach(() => {
   Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
 });
 
-const installDriverActivationDB = () => {
+const installDriverActivationDB = (status = "PENDING", expiresAt = "2099-01-01T00:00:00Z") => {
   const values = new Map<string, unknown>([[driverInstallationID, {
     id: driverInstallationID,
     publicKey: {} as CryptoKey,
@@ -28,8 +28,8 @@ const installDriverActivationDB = () => {
   const activationRequest = {
     id: driverRequestID,
     correlationCode: "REQ-DRIVER",
-    status: "PENDING",
-    expiresAt: "2099-01-01T00:00:00Z",
+    status,
+    expiresAt,
     installationId: driverInstallationID,
   };
   values.set(driverInstallationID, { ...(values.get(driverInstallationID) as object), activationRequest });
@@ -101,6 +101,20 @@ const enrollmentResponse = (id: string, legalName: string) => ({
 });
 
 describe("platform shell", () => {
+  it.each(["PENDING", "APPROVED"])("recovers expired %s without enabling passkey registration", async (status) => {
+    installDriverActivationDB(status, "2020-01-01T00:00:00Z");
+    render(<App />);
+    expect(await screen.findByText("La aprobación venció. Solicita una nueva activación")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Registrar passkey" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Solicitar nueva activación" })).toBeInTheDocument();
+  });
+
+  it("recovers a valid approval and enables passkey registration", async () => {
+    installDriverActivationDB("APPROVED");
+    render(<App />);
+    expect(await screen.findByText("Tu dispositivo fue aprobado")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Registrar passkey" })).toBeEnabled();
+  });
   it("shows the driver mobile authentication boundary without claiming operational functionality", () => {
     render(<App />);
 

@@ -67,8 +67,12 @@ const effectiveRequestStatus = (item: DeviceEnrollmentRequestView): string => {
   return ["PENDING", "APPROVED"].includes(status) && (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) ? "EXPIRED" : status;
 };
 
-const registrationStateFor = (requestStatus: string, authorizationStatus: string | null = null): RegistrationState => {
+const registrationStateFor = (requestStatus: string, authorizationStatus: string | null = null, expiresAt?: string): RegistrationState => {
   if (authorizationStatus?.toUpperCase() === "REVOKED") return "revoked";
+  if (["PENDING", "APPROVED"].includes(requestStatus.toUpperCase()) && expiresAt !== undefined) {
+    const expiry = Date.parse(expiresAt);
+    if (!Number.isFinite(expiry) || expiry <= Date.now()) return "expired";
+  }
   switch (requestStatus.toUpperCase()) {
     case "APPROVED": return "approved";
     case "CONSUMED": return "registered";
@@ -162,7 +166,7 @@ export default function App() {
           if (!mounted || !savedRequest) return;
           setActivationRequest(savedRequest);
            if (!stored.identifier && savedRequest.identifier) setIdentifier(savedRequest.identifier);
-          setRegistrationState(registrationStateFor(savedRequest.status));
+          setRegistrationState(registrationStateFor(savedRequest.status, null, savedRequest.expiresAt));
           setStatus("Instalación y solicitud recuperadas de forma segura.");
         }).catch(() => {
           if (mounted) setStatus("Instalación recuperada. No se pudo cargar la solicitud local.");
@@ -207,7 +211,7 @@ export default function App() {
           };
           setActivationRequest(nextRequest);
           void persistDriverActivationRequest(nextRequest).catch(() => undefined);
-          const nextState = registrationStateFor(nextStatus.status, nextStatus.authorizationStatus);
+          const nextState = registrationStateFor(nextStatus.status, nextStatus.authorizationStatus, nextStatus.expiresAt);
           setRegistrationState(nextState);
           switch (nextState) {
             case "pending":
@@ -223,7 +227,7 @@ export default function App() {
               setStatus("Este dispositivo fue revocado. Solicita una revisión al supervisor.");
               break;
             case "expired":
-              setStatus("La solicitud venció. Puedes iniciar una nueva activación.");
+              setStatus("La aprobación venció. Solicita una nueva activación");
               break;
             case "rejected":
               setStatus("La solicitud fue rechazada. Puedes iniciar una nueva activación.");
@@ -267,6 +271,20 @@ export default function App() {
       if (driverStatusPollRef.current === poll) driverStatusPollRef.current = null;
     };
   }, [activationRequest?.id, installation?.id, registrationState]);
+
+  useEffect(() => {
+    if (!activationRequest || !["pending", "approved"].includes(registrationState)) return;
+    const expire = () => {
+      if (registrationStateFor(activationRequest.status, null, activationRequest.expiresAt) === "expired") {
+        setRegistrationState("expired");
+        setStatus("La aprobación venció. Solicita una nueva activación");
+      }
+    };
+    const remaining = Date.parse(activationRequest.expiresAt) - Date.now();
+    const timer = window.setTimeout(expire, Number.isFinite(remaining) ? Math.max(0, Math.min(remaining, 2147483647)) : 0);
+    document.addEventListener("visibilitychange", expire);
+    return () => { window.clearTimeout(timer); document.removeEventListener("visibilitychange", expire); };
+  }, [activationRequest, registrationState]);
 
   const refreshSupervisor = useCallback(async (source: "manual" | "poll" | "mutation" = "manual"): Promise<void> => {
     if (supervisorRefreshRef.current) {
@@ -564,9 +582,9 @@ export default function App() {
             <div className="grid gap-4 sm:grid-cols-2"><label className="text-sm font-semibold text-slate-700">Empresa<select className="mt-2 w-full rounded-xl border border-slate-300 bg-white p-3.5 outline-none transition focus:border-teal-600 focus:ring-4 focus:ring-teal-100" value={companyID} onChange={(event) => { setCompanyID(event.target.value); setOperationID(""); }}><option value="">Selecciona una empresa</option>{demoCompanies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label><label className="text-sm font-semibold text-slate-700">Operación <span className="font-normal text-slate-500">(opcional)</span><select className="mt-2 w-full rounded-xl border border-slate-300 bg-white p-3.5 outline-none transition focus:border-teal-600 focus:ring-4 focus:ring-teal-100" value={operationID} onChange={(event) => setOperationID(event.target.value)} disabled={!selectedCompany}><option value="">Acceso por empresa</option>{selectedCompany?.operations.map((operation) => <option key={operation.id} value={operation.id}>{operation.name}</option>)}</select></label></div>
             <p className="text-xs leading-5 text-slate-500">La demo muestra sólo datos sintéticos autorizados. La operación puede dejarse vacía para una solicitud de alcance empresarial.</p>
           </div>
-           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5"><p className="text-sm font-black text-slate-950">¿Qué quieres hacer?</p><div className="mt-4 grid gap-3"><button className="rounded-xl bg-slate-900 px-4 py-3.5 text-sm font-bold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={driverBusy !== null} onClick={() => void prepareInstallation()}>{driverBusy === "prepare" ? "Preparando…" : installationState === "ready" ? "Usar esta instalación" : "Preparar instalación"}</button><button className="rounded-xl bg-teal-700 px-4 py-3.5 text-sm font-bold text-white transition hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={driverBusy !== null} onClick={() => void activate()}>{driverBusy === "activate" ? "Enviando solicitud…" : "Activar este dispositivo"}</button><button className="rounded-xl bg-amber-700 px-4 py-3.5 text-sm font-bold text-white transition hover:bg-amber-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={!activationRequest || registrationState !== "approved" || driverBusy !== null} onClick={() => void registerApprovedPasskey()}>{driverBusy === "register" ? "Registrando…" : registrationState === "registered" ? "Passkey registrada" : "Registrar passkey"}</button><button className="rounded-xl bg-violet-700 px-4 py-3.5 text-sm font-bold text-white transition hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={driverBusy !== null} onClick={() => void recurringLogin()}>{driverBusy === "login" ? "Verificando…" : "Ingresar con passkey"}</button></div></div>
+           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5"><p className="text-sm font-black text-slate-950">¿Qué quieres hacer?</p><div className="mt-4 grid gap-3"><button className="rounded-xl bg-slate-900 px-4 py-3.5 text-sm font-bold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={driverBusy !== null} onClick={() => void prepareInstallation()}>{driverBusy === "prepare" ? "Preparando…" : installationState === "ready" ? "Usar esta instalación" : "Preparar instalación"}</button><button className="rounded-xl bg-teal-700 px-4 py-3.5 text-sm font-bold text-white transition hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={driverBusy !== null} onClick={() => void activate()}>{driverBusy === "activate" ? "Enviando solicitud…" : registrationState === "expired" ? "Solicitar nueva activación" : "Activar este dispositivo"}</button><button className="rounded-xl bg-amber-700 px-4 py-3.5 text-sm font-bold text-white transition hover:bg-amber-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={!activationRequest || registrationState !== "approved" || driverBusy !== null} onClick={() => void registerApprovedPasskey()}>{driverBusy === "register" ? "Registrando…" : registrationState === "registered" ? "Passkey registrada" : "Registrar passkey"}</button><button className="rounded-xl bg-violet-700 px-4 py-3.5 text-sm font-bold text-white transition hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={driverBusy !== null} onClick={() => void recurringLogin()}>{driverBusy === "login" ? "Verificando…" : "Ingresar con passkey"}</button></div></div>
         </div>
-        {activationRequest && <div className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950" aria-live="polite"><p className="font-bold">{registrationState === "pending" && "Esperando aprobación del supervisor"}{registrationState === "approved" && "Tu dispositivo fue aprobado"}{registrationState === "registering" && "Registro en curso"}{registrationState === "registered" && "Dispositivo autorizado"}{registrationState === "expired" && "La solicitud venció"}{registrationState === "rejected" && "La solicitud fue rechazada"}{registrationState === "revoked" && "Este dispositivo fue revocado"}</p><p className="mt-1">{registrationState === "pending" && `Expira el ${formatDate(activationRequest.expiresAt)}. La pantalla consultará el estado mientras esté visible.`}{registrationState === "approved" && "Ya puedes registrar la passkey con la interacción explícita del conductor."}{registrationState === "registering" && "No cierres esta pantalla mientras se completa la verificación."}{registrationState === "registered" && "Ya puedes usar Ingresar con passkey en este dispositivo."}{registrationState === "expired" && "Solicita una nueva activación; tu instalación local no se eliminó."}{registrationState === "rejected" && "Puedes iniciar una nueva activación mediante el proceso autorizado."}{registrationState === "revoked" && "No se ofrecerá una reactivación automática."}</p>{registrationState === "pending" && <button className="mt-3 rounded-xl border border-amber-300 bg-white px-3 py-2 text-xs font-bold text-amber-900 disabled:cursor-not-allowed disabled:opacity-50" disabled={driverStatusRefreshing} onClick={() => void driverStatusPollRef.current?.(true)}>{driverStatusRefreshing ? "Consultando…" : "Consultar estado"}</button>}<details className="mt-3 text-xs text-amber-900"><summary className="cursor-pointer font-bold">Detalles técnicos</summary><dl className="mt-2 grid gap-1 sm:grid-cols-2"><div><dt className="font-semibold">Código</dt><dd className="break-all">{activationRequest.correlationCode || "—"}</dd></div><div><dt className="font-semibold">Solicitud</dt><dd className="break-all">{activationRequest.id}</dd></div></dl></details></div>}
+        {activationRequest && <div className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950" aria-live="polite"><p className="font-bold">{registrationState === "pending" && "Esperando aprobación del supervisor"}{registrationState === "approved" && "Tu dispositivo fue aprobado"}{registrationState === "registering" && "Registro en curso"}{registrationState === "registered" && "Dispositivo autorizado"}{registrationState === "expired" && "La aprobación venció. Solicita una nueva activación"}{registrationState === "rejected" && "La solicitud fue rechazada"}{registrationState === "revoked" && "Este dispositivo fue revocado"}</p><p className="mt-1">{registrationState === "pending" && `Expira el ${formatDate(activationRequest.expiresAt)}. La pantalla consultará el estado mientras esté visible.`}{registrationState === "approved" && "Ya puedes registrar la passkey con la interacción explícita del conductor."}{registrationState === "registering" && "No cierres esta pantalla mientras se completa la verificación."}{registrationState === "registered" && "Ya puedes usar Ingresar con passkey en este dispositivo."}{registrationState === "expired" && "Conservamos tu instalación y su clave de seguridad. Usa Solicitar nueva activación después de volver a identificarte."}{registrationState === "rejected" && "Puedes iniciar una nueva activación mediante el proceso autorizado."}{registrationState === "revoked" && "No se ofrecerá una reactivación automática."}</p>{registrationState === "pending" && <button className="mt-3 rounded-xl border border-amber-300 bg-white px-3 py-2 text-xs font-bold text-amber-900 disabled:cursor-not-allowed disabled:opacity-50" disabled={driverStatusRefreshing} onClick={() => void driverStatusPollRef.current?.(true)}>{driverStatusRefreshing ? "Consultando…" : "Consultar estado"}</button>}<details className="mt-3 text-xs text-amber-900"><summary className="cursor-pointer font-bold">Detalles técnicos</summary><dl className="mt-2 grid gap-1 sm:grid-cols-2"><div><dt className="font-semibold">Código</dt><dd className="break-all">{activationRequest.correlationCode || "—"}</dd></div><div><dt className="font-semibold">Solicitud</dt><dd className="break-all">{activationRequest.id}</dd></div></dl></details></div>}
         <p className="mt-4 rounded-2xl bg-slate-100 p-4 text-sm text-slate-700" role="status">{status}</p>
       </section>
 
