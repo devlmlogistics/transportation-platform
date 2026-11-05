@@ -25,6 +25,11 @@ Clasificación: [D] procedimiento de validación para un entorno aislado. Los da
 - [ ] La segunda ejecución del fixture conserva una sola concesión COMPANY activa por permiso y no revierte la carga por una lectura bajo `tp_owner`.
 - [ ] La vista móvil separa activación de ingreso recurrente, recupera la instalación existente y mantiene los detalles técnicos ocultos hasta expandirlos.
 - [ ] La consola confirma aprobación/revocación, bloquea acciones concurrentes y conserva dispositivos REVOKED como historial.
+- [ ] La consola del supervisor consulta solicitudes y dispositivos cada 5 segundos sólo con la pestaña visible.
+- [ ] Una solicitud nueva se anuncia una sola vez por su identificador estable; las solicitudes presentes al abrir no generan aviso.
+- [ ] `Actualizar ahora` evita consultas superpuestas y refresca inmediatamente después de aprobar o revocar.
+- [ ] HTTP 401 detiene el polling y muestra que la sesión expiró; HTTP 403 detiene el polling por permisos.
+- [ ] Ocultar y volver a mostrar la pestaña pausa y reanuda las consultas; desmontar la vista limpia el temporizador.
 
 ## Pruebas negativas
 
