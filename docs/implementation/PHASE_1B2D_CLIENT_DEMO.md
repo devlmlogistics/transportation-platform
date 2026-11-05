@@ -52,7 +52,7 @@ docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml 
 docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml up -d platform
 ```
 
-Las migraciones de la demo llegan a `000020_demo_device_approved_requests.sql`; Goose debe quedar en `20`. No ejecutar `down`, `down --volumes`, `DROP`, `TRUNCATE` ni eliminar el volumen `demo-db-data`: las solicitudes de los conductores permanecen en la base y sólo se reemplazan las funciones de consulta al aplicar Goose UP.
+Las migraciones de la demo llegan a `000021_device_enrollment_deduplication.sql`; Goose debe quedar en `21`. No ejecutar `down`, `down --volumes`, `DROP`, `TRUNCATE` ni eliminar el volumen `demo-db-data`: las solicitudes de los conductores permanecen en la base y sólo se reemplazan funciones al aplicar Goose UP.
 
 Configurar roles y contraseñas sintéticas una sola vez:
 
@@ -71,7 +71,7 @@ docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml 
   run --rm migrate version
 ```
 
-La versión esperada es la última migración de `db/migrations` (`20` en esta rama). El servicio Go no ejecuta migraciones al iniciar. El DSN usa `PHASE_1B2D_MIGRATOR_DSN` y el usuario efectivo es `tp_migrator`.
+La versión esperada es la última migración de `db/migrations` (`21` en esta rama). El servicio Go no ejecuta migraciones al iniciar. El DSN usa `PHASE_1B2D_MIGRATOR_DSN` y el usuario efectivo es `tp_migrator`.
 
 `000017_demo_device_query_visibility.sql` corrige el listado de demo: una solicitud PENDING o una autorización existente se filtra por el scope de empresa/operación y el permiso vigente del supervisor, no por la membresía actual del conductor. La aprobación y la revocación conservan sus validaciones transaccionales de membresía del destinatario. Esto evita que una solicitud desaparezca de la consola antes de que pueda revisarse, sin ampliar el acceso entre empresas.
 
@@ -80,6 +80,8 @@ La versión esperada es la última migración de `db/migrations` (`20` en esta r
 La respuesta actual de estos endpoints Go serializa los campos de los DTO con nombres PascalCase (`ID`, `CompanyID`, `LegalName`, etc.). `web/src/supervisor.ts` mantiene una adaptación explícita y común para solicitudes y autorizaciones hacia el modelo TypeScript `snake_case`; no se cambia el contrato HTTP existente. Las acciones de aprobar y revocar validan el UUID normalizado antes de construir la URL, por lo que un identificador ausente nunca produce una ruta con `undefined`.
 
 `000020_demo_device_approved_requests.sql` amplía la lectura administrativa sin cambiar sus fronteras: `list_device_enrollment_requests` conserva la sesión administrativa vigente, el permiso `device.enrollment.approve`, la membresía/alcance de la empresa u operación y la ejecución mediante `tp_auth_runtime`. Ahora devuelve solicitudes no consumidas, incluyendo `APPROVED` mientras esperan el registro de passkey, junto con `approved_at`. Una solicitud `PENDING` o `APPROVED` cuya fecha de expiración ya pasó se presenta como `EXPIRED` sin mutar la fila. Las solicitudes `CONSUMED` no se repiten porque el dispositivo correspondiente aparece en la lista de autorizaciones. La migración es correctiva y no modifica `000001`–`000019`.
+
+`000021_device_enrollment_deduplication.sql` protege la creación de solicitudes contra carreras: dentro de la función `SECURITY DEFINER` se toma un advisory lock transaccional derivado únicamente de `installation_id` y se revisa el mismo alcance (`company_id` y `company_operation_id`) para estados `PENDING` o `APPROVED` todavía vigentes. El historial no se elimina ni se reescribe; una solicitud vencida permite una nueva. Un conflicto devuelve SQLSTATE interno y el repositorio lo traduce al error HTTP 409 estable `activation_request_exists`, sin revelar la identidad ni los datos de la solicitud existente. No se usa un índice parcial dependiente de `now()` ni se concede DML adicional a los roles runtime.
 
 ### Presentación UX/UI para la demo
 
@@ -91,7 +93,7 @@ La consola del supervisor muestra solicitudes pendientes, solicitudes aprobadas 
 
 La consola actualiza automáticamente las dos listas cada cinco segundos mientras la sesión está activa y la pestaña visible. El ciclo usa los endpoints autenticados existentes, mantiene una sola consulta en vuelo y compara `request_id` para anunciar sólo solicitudes nuevas; la carga inicial no genera una notificación. Al ocultar la pestaña se suspenden las consultas y se realiza una actualización inmediata al volver a hacerla visible. Las respuestas HTTP 401 cierran la vista y muestran que la sesión expiró; un 403 detiene el polling y deja disponible `Actualizar ahora` para un reintento explícito. Las acciones de aprobación y revocación bloquean el polling durante la mutación y fuerzan una actualización al terminar.
 
-La entrega UX/UI anterior fue exclusivamente frontend. Las correcciones posteriores agregan el contrato de lectura del estado de activación (`000019`) y la lectura administrativa de solicitudes aprobadas (`000020`); no cambian tablas, RLS, autenticación ni controles de autorización existentes.
+La entrega UX/UI anterior fue exclusivamente frontend. Las correcciones posteriores agregan el contrato de lectura del estado de activación (`000019`), la lectura administrativa de solicitudes aprobadas (`000020`) y la protección transaccional contra solicitudes activas duplicadas (`000021`); no cambian RLS, autenticación ni controles de autorización existentes.
 
 ### Consulta de estado de activación del conductor
 
@@ -107,7 +109,7 @@ Al reabrir la PWA, la identidad local se carga junto con la instalación existen
 
 Si la solicitud está pendiente, se informa que debe esperar. Si el endpoint rechaza el registro antes de expirar, la pantalla permite reintentar y recomienda verificar con el supervisor. Si expira, se solicita una nueva activación sin borrar la instalación local. La cancelación del diálogo biométrico/PIN no consume la solicitud. Un registro exitoso cambia el estado a autorizado y el siguiente paso es `Ingresar con passkey`.
 
-La corrección anterior de frontend y helpers WebAuthn no agregó migraciones. Las correcciones de backend agregan `000019_driver_activation_status.sql` y `000020_demo_device_approved_requests.sql`; si la instancia Linux está en Goose 18, hay que ejecutar únicamente Goose UP hasta 20 antes de reemplazar `platform`. No ejecutar DOWN ni reiniciar `db`.
+La corrección anterior de frontend y helpers WebAuthn no agregó migraciones. Las correcciones de backend agregan `000019_driver_activation_status.sql`, `000020_demo_device_approved_requests.sql` y `000021_device_enrollment_deduplication.sql`; si la instancia Linux está en Goose 18, hay que ejecutar únicamente Goose UP hasta 21 antes de reemplazar `platform`. No ejecutar DOWN ni reiniciar `db`.
 
 ## Fixture sintético
 
@@ -120,7 +122,7 @@ docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml 
 
 La imagen del fixture compila el helper Argon2id y utiliza el cliente `psql` dentro del contenedor. No requiere Go, PowerShell ni un puerto PostgreSQL en el host. La secuencia es idempotente para los identificadores sintéticos. Si falla, no continuar con la demo hasta revisar la salida y verificar la base aislada; no ejecutar el script contra otro proyecto Compose.
 
-Después de aplicar Goose 20, ejecutar de nuevo el fixture para agregar o revalidar los permisos COMPANY sintéticos del supervisor. La validación de empresa, operación, membresías y permisos se ejecuta mientras la sesión es `tp_runtime` con contexto `TENANT`; las credenciales se validan después bajo el contexto propietario interno. Esto evita que `FORCE ROW LEVEL SECURITY` haga aparecer cero permisos durante la comprobación. La carga no elimina solicitudes ni reinicia el volumen; sí vuelve a dejar los registros sintéticos bajo sus valores declarados, por lo que debe ejecutarse sólo sobre este proyecto Compose. Si falla, el `BEGIN`/`COMMIT` revierte toda la carga y el mensaje indica la condición faltante.
+Después de aplicar Goose 21, ejecutar de nuevo el fixture para agregar o revalidar los permisos COMPANY sintéticos del supervisor. La validación de empresa, operación, membresías y permisos se ejecuta mientras la sesión es `tp_runtime` con contexto `TENANT`; las credenciales se validan después bajo el contexto propietario interno. Esto evita que `FORCE ROW LEVEL SECURITY` haga aparecer cero permisos durante la comprobación. La carga no elimina solicitudes ni reinicia el volumen; sí vuelve a dejar los registros sintéticos bajo sus valores declarados, por lo que debe ejecutarse sólo sobre este proyecto Compose. Si falla, el `BEGIN`/`COMMIT` revierte toda la carga y el mensaje indica la condición faltante.
 
 Para validar todo el flujo sin tocar ninguna instalación persistente:
 
@@ -128,7 +130,7 @@ Para validar todo el flujo sin tocar ninguna instalación persistente:
 bash ./scripts/demo/test-e2e.sh
 ```
 
-Este test crea un proyecto Compose y volumen temporales, configura roles, aplica Goose 20, ejecuta bootstrap, carga el fixture, inicia la aplicación, verifica `/healthz` desde el contenedor y comprueba usuarios, empresa y privilegios. Al finalizar elimina únicamente sus recursos con el nombre de proyecto generado.
+Este test crea un proyecto Compose y volumen temporales, configura roles, aplica Goose 21, ejecuta bootstrap, carga el fixture, inicia la aplicación, verifica `/healthz` desde el contenedor y comprueba usuarios, empresa y privilegios. Al finalizar elimina únicamente sus recursos con el nombre de proyecto generado.
 
 En la validación local Windows de esta rama no había Bash/WSL disponible; se ejecutó el mismo flujo Compose por pasos desde PowerShell con nombres de proyecto, volumen y red temporales, y pasó. En Ubuntu ARM64 se debe ejecutar el script Bash anterior como la comprobación canónica.
 

@@ -10,10 +10,11 @@ import (
 )
 
 var (
-	ErrInvalidInput      = errors.New("invalid authentication input")
-	ErrInactiveAccount   = errors.New("authentication account is inactive")
-	ErrInvalidSession    = errors.New("authentication session is invalid")
-	ErrChallengeConsumed = errors.New("authentication challenge was already consumed")
+	ErrInvalidInput                    = errors.New("invalid authentication input")
+	ErrInactiveAccount                 = errors.New("authentication account is inactive")
+	ErrInvalidSession                  = errors.New("authentication session is invalid")
+	ErrChallengeConsumed               = errors.New("authentication challenge was already consumed")
+	ErrDeviceEnrollmentRequestConflict = errors.New("an active device enrollment request already exists")
 )
 
 type Principal struct {

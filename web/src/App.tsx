@@ -13,6 +13,7 @@ import {
   queryDriverActivationStatus,
   registerPasskey,
   requestDriverActivation,
+  DriverActivationRequestConflictError,
   DriverActivationStatusError,
   type DriverActivationRequest,
   type DriverActivationRequestStatus,
@@ -444,8 +445,10 @@ export default function App() {
       setRegistrationState("pending");
       setPassword("");
       setStatus("Solicitud creada. Espera la aprobación del supervisor antes de registrar la passkey.");
-    } catch {
-      setStatus("La activación fue rechazada. La respuesta no revela si el conductor existe.");
+    } catch (error) {
+      setStatus(error instanceof DriverActivationRequestConflictError
+        ? "Ya existe una solicitud de activación vigente para este dispositivo. Continúa con esa solicitud o consulta su estado."
+        : "La activación fue rechazada. La respuesta no revela si el conductor existe.");
     } finally {
       setDriverBusy(null);
     }

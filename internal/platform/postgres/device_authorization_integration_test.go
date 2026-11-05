@@ -3,10 +3,12 @@ package postgres
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"sync"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -60,6 +62,41 @@ func testDeviceAuthorizationBoundaries(t *testing.T, ctx context.Context, authPo
 			t.Fatal(err)
 		}
 		return sessionID
+	}
+
+	insertActivationSession := func(userID uuid.UUID, tokenHash []byte) uuid.UUID {
+		t.Helper()
+		sessionID := uuid.New()
+		var epoch int64
+		if err := adminPool.QueryRow(ctx, `SELECT session_epoch FROM platform.user_account WHERE id = $1`, userID).Scan(&epoch); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := adminPool.Exec(ctx, `
+			INSERT INTO platform.auth_session(
+				id, user_account_id, token_hash, csrf_secret_hash, status,
+				last_seen_at, idle_expires_at, absolute_expires_at, session_epoch,
+				session_policy)
+			VALUES ($1, $2, $3, $4, 'ACTIVE', clock_timestamp(),
+				clock_timestamp() + interval '15 minutes', clock_timestamp() + interval '1 hour', $5,
+				'DRIVER_ACTIVATION')
+		`, sessionID, userID, tokenHash, makeHash(byte(sessionID[0])), epoch); err != nil {
+			t.Fatal(err)
+		}
+		return sessionID
+	}
+
+	createActivationRequest := func(tokenHash []byte, requestID, companyID uuid.UUID, operationID *uuid.UUID, installationID uuid.UUID) error {
+		var operation any
+		if operationID != nil {
+			operation = *operationID
+		}
+		var returnedID uuid.UUID
+		return authPool.QueryRow(ctx, `
+			SELECT request_id
+			  FROM platform.create_device_enrollment_request(
+				$1, $2, $3, $4, $5, $6, $7, 'ECDSA_P256_SHA256', $8, clock_timestamp() + interval '10 minutes', $9)
+		`, tokenHash, requestID, requestID.String(), companyID, operation, installationID,
+			makeHash(byte(requestID[0])), makeHash(byte(requestID[1])), uuid.New()).Scan(&returnedID)
 	}
 
 	callDecision := func(functionName string, tokenHash []byte, targetID uuid.UUID) bool {
@@ -282,6 +319,105 @@ func testDeviceAuthorizationBoundaries(t *testing.T, ctx context.Context, authPo
 			 WHERE company_id = $1 AND company_operation_id = $2 AND person_id = $3
 		`, fixture.CompanyA, fixture.OperationA, fixture.PersonADriver); err != nil {
 			t.Fatal(err)
+		}
+	})
+
+	t.Run("activation_requests_are_deduplicated_per_installation_scope", func(t *testing.T) {
+		t.Helper()
+		if _, err := adminPool.Exec(ctx, `
+			INSERT INTO platform.driver_profile (id, person_id, status)
+			VALUES ($1, $2, 'ACTIVE')
+			ON CONFLICT (person_id) DO UPDATE SET status = 'ACTIVE'
+		`, uuid.New(), fixture.PersonADriver); err != nil {
+			t.Fatal(err)
+		}
+		token := newTokenHash()
+		insertActivationSession(fixture.UserADriver, token)
+		installationID := uuid.New()
+		firstRequestID := uuid.New()
+		if err := createActivationRequest(token, firstRequestID, fixture.CompanyA, &fixture.OperationA, installationID); err != nil {
+			t.Fatalf("first activation request: %v", err)
+		}
+
+		assertActiveConflict := func(err error) {
+			t.Helper()
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "P0001" || pgErr.ConstraintName != "device_enrollment_request_active_conflict" {
+				t.Fatalf("error = %v, want active-request conflict", err)
+			}
+		}
+		assertActiveConflict(createActivationRequest(token, uuid.New(), fixture.CompanyA, &fixture.OperationA, installationID))
+
+		if _, err := adminPool.Exec(ctx, `UPDATE platform.device_enrollment_request SET status = 'APPROVED', approved_at = clock_timestamp() WHERE id = $1`, firstRequestID); err != nil {
+			t.Fatal(err)
+		}
+		assertActiveConflict(createActivationRequest(token, uuid.New(), fixture.CompanyA, &fixture.OperationA, installationID))
+
+		if _, err := adminPool.Exec(ctx, `
+			UPDATE platform.device_enrollment_request
+			   SET requested_at = clock_timestamp() - interval '2 minutes',
+			       expires_at = clock_timestamp() - interval '1 second'
+			 WHERE id = $1
+		`, firstRequestID); err != nil {
+			t.Fatal(err)
+		}
+		if err := createActivationRequest(token, uuid.New(), fixture.CompanyA, &fixture.OperationA, installationID); err != nil {
+			t.Fatalf("request after expiry: %v", err)
+		}
+
+		if err := createActivationRequest(token, uuid.New(), fixture.CompanyA, nil, installationID); err != nil {
+			t.Fatalf("different scope on same installation: %v", err)
+		}
+		if err := createActivationRequest(token, uuid.New(), fixture.CompanyA, &fixture.OperationA, uuid.New()); err != nil {
+			t.Fatalf("different installation: %v", err)
+		}
+
+		otherDriverToken := newTokenHash()
+		insertActivationSession(fixture.UserShared, otherDriverToken)
+		if err := createActivationRequest(otherDriverToken, uuid.New(), fixture.CompanyB, &fixture.OperationB, uuid.New()); err != nil {
+			t.Fatalf("different driver and company: %v", err)
+		}
+
+		concurrentInstallationID := uuid.New()
+		results := make(chan error, 2)
+		var wg sync.WaitGroup
+		for range 2 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				results <- createActivationRequest(token, uuid.New(), fixture.CompanyA, &fixture.OperationA, concurrentInstallationID)
+			}()
+		}
+		wg.Wait()
+		close(results)
+		successes := 0
+		conflicts := 0
+		for err := range results {
+			if err == nil {
+				successes++
+				continue
+			}
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.ConstraintName == "device_enrollment_request_active_conflict" {
+				conflicts++
+				continue
+			}
+			t.Fatalf("concurrent activation request: %v", err)
+		}
+		if successes != 1 || conflicts != 1 {
+			t.Fatalf("concurrent results: successes=%d conflicts=%d, want 1/1", successes, conflicts)
+		}
+
+		var activeCount, historyCount int
+		if err := adminPool.QueryRow(ctx, `
+			SELECT count(*) FILTER (WHERE status IN ('PENDING', 'APPROVED') AND expires_at > clock_timestamp()), count(*)
+			  FROM platform.device_enrollment_request
+			 WHERE installation_id = $1 AND company_id = $2 AND company_operation_id = $3
+		`, installationID, fixture.CompanyA, fixture.OperationA).Scan(&activeCount, &historyCount); err != nil {
+			t.Fatal(err)
+		}
+		if activeCount != 1 || historyCount != 2 {
+			t.Fatalf("installation history: active=%d total=%d, want 1/2", activeCount, historyCount)
 		}
 	})
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"transportation-platform/internal/application/auth"
 	"transportation-platform/internal/platform/tenancy"
@@ -437,6 +438,10 @@ func (r *OnlineAuthRepository) CreateDeviceEnrollmentRequest(ctx context.Context
 	`, tokenHash, input.ID, input.CorrelationCode, input.CompanyID, nullableUUID(input.CompanyOperationID), input.InstallationID,
 		input.InstallationPublicKey, input.KeyAlgorithm, input.BindingHash, input.ExpiresAt.UTC(), input.AuditID).Scan(
 		&result.ID, &result.CorrelationCode, &result.CompanyID, &result.CompanyOperationID, &result.InstallationID, &result.Status, &result.ExpiresAt)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "P0001" && pgErr.ConstraintName == "device_enrollment_request_active_conflict" {
+		return auth.DeviceEnrollmentRequest{}, auth.ErrDeviceEnrollmentRequestConflict
+	}
 	return result, err
 }
 

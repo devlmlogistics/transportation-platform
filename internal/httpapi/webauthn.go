@@ -150,6 +150,10 @@ func (h *WebAuthnHandler) createDeviceRequest(w http.ResponseWriter, r *http.Req
 	}
 	result, err := h.Service.CreateDeviceEnrollmentRequest(r.Context(), token, session, companyID, operationID, installationID, publicKey, input.KeyAlgorithm)
 	if err != nil {
+		if errors.Is(err, applicationauth.ErrDeviceEnrollmentRequestConflict) {
+			writeError(w, r, http.StatusConflict, "activation_request_exists", "Ya existe una solicitud de activación vigente para este dispositivo.")
+			return
+		}
 		writeError(w, r, http.StatusForbidden, "device_request_rejected", "The device enrollment request was rejected.")
 		return
 	}

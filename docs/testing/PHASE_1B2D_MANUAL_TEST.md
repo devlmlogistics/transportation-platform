@@ -529,7 +529,7 @@ Las pruebas manuales y los scripts de reparación histórica no forman parte del
 6. Mensajes genéricos dificultaban diagnosticar el navegador; se agregaron diagnósticos de etapa sólo en desarrollo.
 7. El login recurrente requiere volver a introducir el identificador después de recargar; queda como mejora de experiencia, sin persistir tokens ni contraseñas.
 
-Las migraciones finales de esta fase son `000012_driver_mobile_auth.sql`, `000013_driver_auth_boundary.sql`, `000014_webauthn_device_authorization_uuid.sql` y `000015_device_authorization_expiry.sql`. Las migraciones previas permanecen inmutables.
+Las migraciones finales de esta fase son `000012_driver_mobile_auth.sql`, `000013_driver_auth_boundary.sql`, `000014_webauthn_device_authorization_uuid.sql`, `000015_device_authorization_expiry.sql` y `000021_device_enrollment_deduplication.sql`. Las migraciones previas permanecen inmutables; las correcciones de demo posteriores se aplican únicamente como nuevas migraciones Goose.
 
 ### Pendientes antes de producción
 

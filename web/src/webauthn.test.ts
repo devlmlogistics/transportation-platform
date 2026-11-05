@@ -65,8 +65,8 @@ const installCryptoAPI = () => {
   return { sign };
 };
 
-const response = (body: unknown, ok = true): Response =>
-  new Response(JSON.stringify(body), { status: ok ? 200 : 401, headers: { "Content-Type": "application/json" } });
+const response = (body: unknown, ok = true, status?: number): Response =>
+  new Response(JSON.stringify(body), { status: status ?? (ok ? 200 : 401), headers: { "Content-Type": "application/json" } });
 
 describe("driver WebAuthn browser boundary", () => {
   afterEach(() => {
@@ -183,6 +183,16 @@ describe("driver WebAuthn browser boundary", () => {
 
     fetchMock.mockResolvedValueOnce(response({ Status: "PENDING", ExpiresAt: "2026-11-04T20:01:23Z" }));
     await expect(requestDriverActivation("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", undefined, installation)).rejects.toThrow("request id");
+  });
+
+  it("surfaces the stable duplicate activation conflict without accepting a new request", async () => {
+    const installation = createInstallation();
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(response({
+      error: { code: "activation_request_exists", message: "Ya existe una solicitud de activación vigente para este dispositivo." },
+    }, false, 409));
+
+    await expect(requestDriverActivation("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", undefined, installation))
+      .rejects.toMatchObject({ name: "DriverActivationRequestConflictError" });
   });
 
   it("queries only the current activation request and normalizes its status", async () => {

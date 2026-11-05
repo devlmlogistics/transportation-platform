@@ -24,6 +24,25 @@ export class DriverActivationStatusError extends Error {
   }
 }
 
+export class DriverActivationRequestConflictError extends Error {
+  constructor() {
+    super("An active activation request already exists for this installation");
+    this.name = "DriverActivationRequestConflictError";
+  }
+}
+
+class HTTPRequestError extends Error {
+  readonly status: number;
+  readonly code: string | undefined;
+
+  constructor(status: number, code?: string) {
+    super(`HTTP request failed (${status})`);
+    this.name = "HTTPRequestError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
 type CeremonyCredential = {
   id: string;
   rawId: string;
@@ -100,7 +119,17 @@ const requestJSON = async (path: string, body: JSONValue): Promise<JSONValue> =>
     headers: { "Content-Type": "application/json", "X-CSRF-Token": readCSRFToken() },
     body: JSON.stringify(body),
   });
-  if (!response.ok) throw new Error("WebAuthn request was rejected");
+  if (!response.ok) {
+    let code: string | undefined;
+    try {
+      const payload = (await response.json()) as JSONValue;
+      const error = payload.error as Record<string, unknown> | undefined;
+      if (error && typeof error === "object" && !Array.isArray(error) && typeof error.code === "string") code = error.code;
+    } catch {
+      // Keep the public error generic when the response is not JSON.
+    }
+    throw new HTTPRequestError(response.status, code);
+  }
   return (await response.json()) as JSONValue;
 };
 
@@ -286,13 +315,21 @@ export async function createDriverInstallation(): Promise<DriverInstallation> {
 }
 
 export async function requestDriverActivation(companyID: string, operationID: string | undefined, installation: DriverInstallation, identifier?: string): Promise<DriverActivationRequest> {
-  const response = await requestJSON("/api/v1/auth/webauthn/device-enrollment-requests", {
-    company_id: companyID,
-    ...(operationID ? { company_operation_id: operationID } : {}),
-    installation_id: installation.id,
-    installation_public_key: installation.publicKeyEncoded,
-    key_algorithm: "ECDSA_P256_SHA256",
-  });
+  let response: JSONValue;
+  try {
+    response = await requestJSON("/api/v1/auth/webauthn/device-enrollment-requests", {
+      company_id: companyID,
+      ...(operationID ? { company_operation_id: operationID } : {}),
+      installation_id: installation.id,
+      installation_public_key: installation.publicKeyEncoded,
+      key_algorithm: "ECDSA_P256_SHA256",
+    });
+  } catch (error) {
+    if (error instanceof HTTPRequestError && error.status === 409 && error.code === "activation_request_exists") {
+      throw new DriverActivationRequestConflictError();
+    }
+    throw error;
+  }
   const request = normalizeDriverActivationRequest(response, installation.id);
   if (identifier?.trim()) request.identifier = normalizeDriverIdentifier(identifier);
   await persistDriverActivationRequest(request);
