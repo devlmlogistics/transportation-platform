@@ -4,6 +4,7 @@ import {
   driverLoginErrorMessage,
   loadDriverInstallation,
   loginDriverWithPasskey,
+  queryDriverActivationStatus,
   registerPasskey,
   requestDriverActivation,
   type DriverInstallation,
@@ -140,6 +141,29 @@ describe("driver WebAuthn browser boundary", () => {
 
   it("normalizes the activation response and rejects a response without an identifier", async () => {
     const installation = createInstallation();
+    const values = new Map<string, unknown>();
+    let transaction: { oncomplete?: () => void; onerror?: () => void };
+    const store = {
+      put: (value: { installationId: string }) => { values.set(value.installationId, value); setTimeout(() => transaction.oncomplete?.(), 0); },
+      get: (id: string) => ({ result: values.get(id) }),
+      delete: (id: string) => { values.delete(id); setTimeout(() => transaction.oncomplete?.(), 0); },
+    };
+    const database = {
+      objectStoreNames: { contains: () => true },
+      createObjectStore: vi.fn(),
+      close: vi.fn(),
+      transaction: () => {
+        transaction = { oncomplete: undefined, onerror: undefined };
+        return { objectStore: () => store, get oncomplete() { return transaction.oncomplete; }, set oncomplete(value: (() => void) | undefined) { transaction.oncomplete = value; }, get onerror() { return transaction.onerror; }, set onerror(value: (() => void) | undefined) { transaction.onerror = value; } };
+      },
+    };
+    vi.stubGlobal("indexedDB", { open: vi.fn(() => ({ result: database, onsuccess: undefined as (() => void) | undefined, onerror: undefined as (() => void) | undefined, onupgradeneeded: undefined as (() => void) | undefined })) });
+    const openRequest = vi.mocked(indexedDB.open);
+    openRequest.mockImplementation(() => {
+      const request: IDBOpenDBRequest = { result: database as unknown as IDBDatabase } as IDBOpenDBRequest;
+      setTimeout(() => request.onsuccess?.(new Event("success") as Event), 0);
+      return request;
+    });
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(response({
       ID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       CorrelationCode: "REQ-DEMO",
@@ -156,6 +180,33 @@ describe("driver WebAuthn browser boundary", () => {
 
     fetchMock.mockResolvedValueOnce(response({ Status: "PENDING", ExpiresAt: "2026-11-04T20:01:23Z" }));
     await expect(requestDriverActivation("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", undefined, installation)).rejects.toThrow("request id");
+  });
+
+  it("queries only the current activation request and normalizes its status", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(response({
+      request_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      correlation_code: "REQ-DEMO",
+      installation_id: "78f5e1f4-4f86-4e5f-8adf-955cb7d23337",
+      status: "APPROVED",
+      expires_at: "2026-11-04T20:01:23Z",
+      authorization_status: null,
+    }));
+
+    await expect(queryDriverActivationStatus("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "78f5e1f4-4f86-4e5f-8adf-955cb7d23337")).resolves.toMatchObject({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      installationId: "78f5e1f4-4f86-4e5f-8adf-955cb7d23337",
+      status: "APPROVED",
+      authorizationStatus: null,
+    });
+    const url = String(fetchMock.mock.calls[0]?.[0]);
+    expect(url).toContain("device_request_id=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    expect(url).toContain("installation_id=78f5e1f4-4f86-4e5f-8adf-955cb7d23337");
+    expect(fetchMock.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ credentials: "include" }));
+  });
+
+  it("does not turn a status HTTP failure into approval", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(response({ error: "expired" }, false));
+    await expect(queryDriverActivationStatus("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "78f5e1f4-4f86-4e5f-8adf-955cb7d23337")).rejects.toMatchObject({ status: 401 });
   });
 
   it("does not call registration finish when Android cancels the ceremony", async () => {

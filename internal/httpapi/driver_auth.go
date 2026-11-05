@@ -20,6 +20,7 @@ type DriverAuthHTTPService interface {
 	BeginLogin(context.Context, string, uuid.UUID) (uuid.UUID, *protocol.CredentialAssertion, error)
 	FinishLogin(context.Context, uuid.UUID, *http.Request, []byte, string, string) (applicationauth.LoginResult, error)
 	ResolveSession(context.Context, []byte) (applicationauth.AuthenticatedSession, error)
+	GetDriverActivationRequestStatus(context.Context, []byte, uuid.UUID, uuid.UUID) (applicationauth.DriverActivationRequestStatus, error)
 	Logout(context.Context, []byte, uuid.UUID) error
 	ListAuthorizedContexts(context.Context, []byte) ([]applicationauth.DriverAuthorizedContext, error)
 }
@@ -41,6 +42,8 @@ func (h *DriverAuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == "/activation/login" && r.Method == http.MethodPost:
 		h.activationLogin(w, r)
+	case path == "/activation/status" && r.Method == http.MethodGet:
+		h.activationStatus(w, r)
 	case path == "/webauthn/options" && r.Method == http.MethodPost:
 		h.options(w, r)
 	case path == "/webauthn/finish" && r.Method == http.MethodPost:
@@ -54,6 +57,42 @@ func (h *DriverAuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, r, http.StatusNotFound, "not_found", "Driver authentication endpoint not found.")
 	}
+}
+
+func (h *DriverAuthHandler) activationStatus(w http.ResponseWriter, r *http.Request) {
+	token, session, ok := h.Security.session(w, r)
+	if !ok {
+		return
+	}
+	if session.SessionPolicy != applicationauth.DriverActivationSession {
+		writeError(w, r, http.StatusForbidden, "activation_status_unavailable", "Activation status is unavailable.")
+		return
+	}
+	requestID, err := uuid.Parse(strings.TrimSpace(r.URL.Query().Get("device_request_id")))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", "A valid device request is required.")
+		return
+	}
+	installationID, err := uuid.Parse(strings.TrimSpace(r.URL.Query().Get("installation_id")))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", "A valid installation is required.")
+		return
+	}
+	status, err := h.Service.GetDriverActivationRequestStatus(r.Context(), token, requestID, installationID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "activation_status_unavailable", "Activation status is unavailable.")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"request_id":           status.RequestID,
+		"correlation_code":     status.CorrelationCode,
+		"company_id":           status.CompanyID,
+		"company_operation_id": status.CompanyOperationID,
+		"installation_id":      status.InstallationID,
+		"status":               status.Status,
+		"expires_at":           status.ExpiresAt,
+		"authorization_status": status.AuthorizationStatus,
+	})
 }
 
 func (h *DriverAuthHandler) activationLogin(w http.ResponseWriter, r *http.Request) {

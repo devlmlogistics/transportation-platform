@@ -30,6 +30,11 @@ Clasificación: [D] procedimiento de validación para un entorno aislado. Los da
 - [ ] `Actualizar ahora` evita consultas superpuestas y refresca inmediatamente después de aprobar o revocar.
 - [ ] HTTP 401 detiene el polling y muestra que la sesión expiró; HTTP 403 detiene el polling por permisos.
 - [ ] Ocultar y volver a mostrar la pestaña pausa y reanuda las consultas; desmontar la vista limpia el temporizador.
+- [ ] Una solicitud DRIVER `PENDING` se consulta cada 5 segundos sólo con la pestaña visible y ofrece `Consultar estado`.
+- [ ] `APPROVED` habilita `Registrar passkey` sin iniciar la ceremonia automáticamente; el polling se detiene.
+- [ ] `EXPIRED`, `REJECTED`, `CONSUMED` y una autorización `REVOKED` conservan la semántica del backend y no se convierten en aprobación.
+- [ ] La referencia de activación se recupera desde IndexedDB al reabrir la aplicación y conserva la asociación con la instalación.
+- [ ] HTTP 401/403/404 y errores de red muestran mensajes seguros; ninguno convierte una falla en aprobación.
 
 ## Pruebas negativas
 

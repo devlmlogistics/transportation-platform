@@ -180,6 +180,17 @@ func (s *OnlineAuthService) ResolveSession(ctx context.Context, token []byte) (A
 	return result, nil
 }
 
+func (s *OnlineAuthService) GetDriverActivationRequestStatus(ctx context.Context, token []byte, requestID, installationID uuid.UUID) (DriverActivationRequestStatus, error) {
+	if s == nil || s.Store == nil || len(token) != 32 || requestID == uuid.Nil || installationID == uuid.Nil {
+		return DriverActivationRequestStatus{}, ErrSessionNotFound
+	}
+	store, ok := s.Store.(DriverActivationStatusStore)
+	if !ok {
+		return DriverActivationRequestStatus{}, ErrSessionNotFound
+	}
+	return store.GetDriverActivationRequestStatus(ctx, HashSessionToken(token), requestID, installationID)
+}
+
 func PrincipalFromSession(session AuthenticatedSession) (Principal, error) {
 	if session.ID == uuid.Nil || session.UserAccountID == uuid.Nil || session.PersonID == uuid.Nil || session.Status != "ACTIVE" {
 		return Principal{}, ErrSessionNotFound

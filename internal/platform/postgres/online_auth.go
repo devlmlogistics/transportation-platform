@@ -466,6 +466,21 @@ func (r *OnlineAuthRepository) ListDeviceEnrollmentRequests(ctx context.Context,
 	return result, rows.Err()
 }
 
+func (r *OnlineAuthRepository) GetDriverActivationRequestStatus(ctx context.Context, tokenHash []byte, requestID, installationID uuid.UUID) (auth.DriverActivationRequestStatus, error) {
+	if r == nil || r.authPool == nil || len(tokenHash) != 32 || requestID == uuid.Nil || installationID == uuid.Nil {
+		return auth.DriverActivationRequestStatus{}, auth.ErrInvalidInput
+	}
+	var result auth.DriverActivationRequestStatus
+	err := r.authPool.QueryRow(ctx, `
+		SELECT request_id, correlation_code, company_id, company_operation_id,
+		       installation_id, status, expires_at, authorization_status
+		  FROM platform.get_driver_activation_request_status($1, $2, $3)
+	`, tokenHash, requestID, installationID).Scan(
+		&result.RequestID, &result.CorrelationCode, &result.CompanyID, &result.CompanyOperationID,
+		&result.InstallationID, &result.Status, &result.ExpiresAt, &result.AuthorizationStatus)
+	return result, err
+}
+
 func (r *OnlineAuthRepository) ListDeviceAuthorizations(ctx context.Context, tokenHash []byte) ([]auth.DeviceAuthorizationView, error) {
 	if r == nil || r.authPool == nil || len(tokenHash) != 32 {
 		return nil, auth.ErrInvalidInput
