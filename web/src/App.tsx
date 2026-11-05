@@ -52,7 +52,7 @@ const statusLabel = (status: string): string => {
     case "REVOKED": return "Revocado";
     case "PENDING": return "Pendiente";
     case "APPROVED": return "Aprobado";
-    case "EXPIRED": return "Vencido";
+    case "EXPIRED": return "Expirada";
     case "REJECTED": return "Rechazado";
     default: return status || "Sin estado";
   }
@@ -60,6 +60,11 @@ const statusLabel = (status: string): string => {
 
 const companyName = (id: string): string => findDemoCompany(id)?.name ?? "Empresa autorizada";
 const operationName = (id: string | null): string => id ? (findDemoOperation(id)?.name ?? "Operación autorizada") : "Alcance empresarial";
+const effectiveRequestStatus = (item: DeviceEnrollmentRequestView): string => {
+  const status = item.status.toUpperCase();
+  const expiresAt = Date.parse(item.expires_at);
+  return ["PENDING", "APPROVED"].includes(status) && (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) ? "EXPIRED" : status;
+};
 
 const registrationStateFor = (requestStatus: string, authorizationStatus: string | null = null): RegistrationState => {
   if (authorizationStatus?.toUpperCase() === "REVOKED") return "revoked";
@@ -120,6 +125,7 @@ export default function App() {
   const supervisorActionRef = useRef<string | null>(null);
   const supervisorPollingBlockedRef = useRef(false);
   const supervisorRefreshRef = useRef<Promise<void> | null>(null);
+  const supervisorAbortRef = useRef<AbortController | null>(null);
   const supervisorRefreshFailedRef = useRef(false);
   const supervisorRefreshSequenceRef = useRef(0);
   const supervisorSnapshotReadyRef = useRef(false);
@@ -138,9 +144,10 @@ export default function App() {
   const selectedCompany = useMemo(() => findDemoCompany(companyID), [companyID]);
   const activeAuthorizations = authorizations.filter((item) => item.status.toUpperCase() === "ACTIVE");
   const revokedAuthorizations = authorizations.filter((item) => item.status.toUpperCase() === "REVOKED");
-  const pendingRequests = requests.filter((item) => item.status.toUpperCase() === "PENDING");
-  const approvedRequests = requests.filter((item) => item.status.toUpperCase() === "APPROVED");
-  const closedRequests = requests.filter((item) => ["EXPIRED", "REJECTED"].includes(item.status.toUpperCase()));
+  const isExpired = (item: DeviceEnrollmentRequestView) => !Number.isFinite(Date.parse(item.expires_at)) || Date.parse(item.expires_at) <= Date.now();
+  const pendingRequests = requests.filter((item) => item.status.toUpperCase() === "PENDING" && !isExpired(item));
+  const approvedRequests = requests.filter((item) => item.status.toUpperCase() === "APPROVED" && !isExpired(item));
+  const closedRequests = requests.filter((item) => ["EXPIRED", "REJECTED"].includes(item.status.toUpperCase()) || (["PENDING", "APPROVED"].includes(item.status.toUpperCase()) && isExpired(item)));
 
   useEffect(() => {
     let mounted = true;
@@ -261,16 +268,21 @@ export default function App() {
   }, [activationRequest?.id, installation?.id, registrationState]);
 
   const refreshSupervisor = useCallback(async (source: "manual" | "poll" | "mutation" = "manual"): Promise<void> => {
-    if (supervisorRefreshRef.current) return supervisorRefreshRef.current;
+    if (supervisorRefreshRef.current) {
+      if (source !== "mutation") return supervisorRefreshRef.current;
+      supervisorAbortRef.current?.abort();
+    }
     if (source === "poll" && (document.visibilityState !== "visible" || supervisorActionRef.current !== null || supervisorPollingBlockedRef.current)) return;
 
     const sequence = supervisorRefreshSequenceRef.current + 1;
     supervisorRefreshSequenceRef.current = sequence;
+    const controller = new AbortController();
+    supervisorAbortRef.current = controller;
     supervisorRefreshFailedRef.current = false;
     setSupervisorRefreshing(true);
     const refresh = (async () => {
       try {
-        const [nextRequests, nextAuthorizations] = await Promise.all([listSupervisorDeviceRequests(), listSupervisorDeviceAuthorizations()]);
+        const [nextRequests, nextAuthorizations] = await Promise.all([listSupervisorDeviceRequests(controller.signal), listSupervisorDeviceAuthorizations(controller.signal)]);
         if (!mountedRef.current || supervisorRefreshSequenceRef.current !== sequence) return;
 
         const newRequestIDs = nextRequests
@@ -305,6 +317,7 @@ export default function App() {
       } finally {
         if (supervisorRefreshSequenceRef.current === sequence) {
           supervisorRefreshRef.current = null;
+          supervisorAbortRef.current = null;
           setSupervisorRefreshing(false);
         }
       }
@@ -335,6 +348,8 @@ export default function App() {
 
   useEffect(() => () => {
     mountedRef.current = false;
+    supervisorRefreshSequenceRef.current += 1;
+    supervisorAbortRef.current?.abort();
     if (supervisorNoticeTimerRef.current !== undefined) window.clearTimeout(supervisorNoticeTimerRef.current);
   }, []);
 
@@ -561,8 +576,9 @@ export default function App() {
         {supervisorNotice && <div className="mt-3 rounded-2xl border border-teal-200 bg-teal-50 p-4 text-sm font-semibold text-teal-900" role="status" aria-live="polite">{supervisorNotice}</div>}
         {supervisorPollingBlocked && supervisorLoggedIn && <p className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">La actualización automática está detenida por permisos. Puedes intentar «Actualizar ahora» después de corregir el acceso.</p>}
         {supervisorLoggedIn && <div className="mt-6">
-          <div className="grid gap-3 sm:grid-cols-3">
+          <div className="grid gap-3 sm:grid-cols-4">
             <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4"><p className="text-xs font-black uppercase tracking-wide text-amber-800">Pendientes</p><p className="mt-1 text-3xl font-black text-amber-950">{pendingRequests.length}</p></div>
+            <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4"><p className="text-xs font-black uppercase tracking-wide text-sky-800">Aprobadas esperando passkey</p><p className="mt-1 text-3xl font-black text-sky-950">{approvedRequests.length}</p></div>
             <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4"><p className="text-xs font-black uppercase tracking-wide text-emerald-800">Registrados activos</p><p className="mt-1 text-3xl font-black text-emerald-950">{activeAuthorizations.length}</p></div>
             <div className="rounded-2xl border border-slate-200 bg-slate-100 p-4"><p className="text-xs font-black uppercase tracking-wide text-slate-600">Historial revocado</p><p className="mt-1 text-3xl font-black text-slate-900">{revokedAuthorizations.length}</p></div>
           </div>
@@ -579,7 +595,7 @@ export default function App() {
                 </article>)}
               </div>
               {approvedRequests.length > 0 && <div className="mt-8"><h3 className="text-lg font-black text-slate-950">Aprobadas — esperando passkey</h3><div className="mt-3 space-y-3">{approvedRequests.map((item) => <article className="rounded-2xl border border-sky-200 bg-sky-50 p-4" key={item.request_id}><div className="flex items-start justify-between gap-3"><div><p className="font-bold text-slate-950">{item.legal_name || "Conductor de demo"}</p><p className="text-sm text-slate-600">{item.identifier || "Identidad verificada"}</p></div><span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-sky-800">Aprobado — esperando passkey</span></div><dl className="mt-4 grid gap-2 text-sm text-slate-700 sm:grid-cols-2"><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Empresa</dt><dd>{companyName(item.company_id)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Operación</dt><dd>{operationName(item.company_operation_id)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Aprobada</dt><dd>{formatDate(item.approved_at)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Expira</dt><dd>{formatDate(item.expires_at)}</dd></div></dl><details className="mt-3 text-xs text-slate-600"><summary className="cursor-pointer font-bold">Detalles técnicos</summary><dl className="mt-2 grid gap-1"><div><dt className="font-semibold">Solicitud</dt><dd className="break-all">{item.request_id}</dd></div><div><dt className="font-semibold">Instalación</dt><dd className="break-all">{item.installation_id}</dd></div></dl></details></article>)}</div></div>}
-              {closedRequests.length > 0 && <div className="mt-8"><h3 className="text-lg font-black text-slate-950">Solicitudes cerradas</h3><div className="mt-3 space-y-3">{closedRequests.map((item) => <article className="rounded-2xl border border-slate-200 bg-slate-50 p-4" key={item.request_id}><div className="flex items-start justify-between gap-3"><div><p className="font-bold text-slate-950">{item.legal_name || "Conductor de demo"}</p><p className="text-sm text-slate-600">{item.identifier || "Identidad verificada"}</p></div><span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-slate-700">{statusLabel(item.status)}</span></div><p className="mt-3 text-sm text-slate-600">Esta solicitud ya no puede aprobarse.</p></article>)}</div></div>}
+              {closedRequests.length > 0 && <div className="mt-8"><h3 className="text-lg font-black text-slate-950">Solicitudes cerradas</h3><div className="mt-3 space-y-3">{closedRequests.map((item) => <article className="rounded-2xl border border-slate-200 bg-slate-50 p-4" key={item.request_id}><div className="flex items-start justify-between gap-3"><div><p className="font-bold text-slate-950">{item.legal_name || "Conductor de demo"}</p><p className="text-sm text-slate-600">{item.identifier || "Identidad verificada"}</p></div><span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-slate-700">{statusLabel(effectiveRequestStatus(item))}</span></div><p className="mt-3 text-sm text-slate-600">Esta solicitud ya no puede aprobarse.</p></article>)}</div></div>}
             </div>
             <div><h3 className="text-lg font-black text-slate-950">Dispositivos registrados</h3><div className="mt-3 space-y-3">{authorizations.length === 0 && <p className="rounded-2xl border border-dashed border-slate-300 p-5 text-sm text-slate-500">Aún no hay dispositivos registrados.</p>}{authorizations.map((item) => <article className={["rounded-2xl", "border", "p-4", item.status.toUpperCase() === "REVOKED" ? "border-slate-300 bg-slate-100" : "border-emerald-200 bg-emerald-50"].join(" ")} key={item.authorization_id}><div className="flex items-start justify-between gap-3"><div><p className="font-bold text-slate-950">{item.legal_name || "Conductor de demo"}</p><p className="text-sm text-slate-600">{item.identifier || "Identidad verificada"}</p></div><span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-slate-700">{statusLabel(item.status)}</span></div><dl className="mt-4 grid gap-2 text-sm text-slate-700 sm:grid-cols-2"><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Empresa</dt><dd>{companyName(item.company_id)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Operación</dt><dd>{operationName(item.company_operation_id)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Autorizado</dt><dd>{formatDate(item.approved_at)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Revocado</dt><dd>{formatDate(item.revoked_at)}</dd></div></dl>{item.status.toUpperCase() === "ACTIVE" && <button className="mt-4 w-full rounded-xl bg-rose-700 px-3 py-3 text-sm font-bold text-white hover:bg-rose-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={!item.authorization_id || supervisorAction !== null} onClick={() => void revokeAuthorization(item.authorization_id)}>{supervisorAction === `revoke:${item.authorization_id}` ? "Revocando…" : "Revocar dispositivo"}</button>}<details className="mt-3 text-xs text-slate-600"><summary className="cursor-pointer font-bold">Detalles técnicos</summary><dl className="mt-2 grid gap-1"><div><dt className="font-semibold">Autorización</dt><dd className="break-all">{item.authorization_id}</dd></div><div><dt className="font-semibold">Instalación</dt><dd className="break-all">{item.installation_id}</dd></div><div><dt className="font-semibold">Empresa / operación</dt><dd className="break-all">{item.company_id} / {item.company_operation_id ?? "NULL"}</dd></div><div><dt className="font-semibold">Algoritmo</dt><dd>{item.key_algorithm || "—"}</dd></div></dl></details></article>)}</div></div>
           </div>

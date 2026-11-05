@@ -129,11 +129,11 @@ export async function loginSupervisor(identifier: string, password: string): Pro
   });
 }
 
-export const listSupervisorDeviceRequests = async (): Promise<DeviceEnrollmentRequestView[]> =>
-  (await request<unknown[]>("/api/v1/auth/webauthn/device-enrollment-requests")).map(normalizeDeviceEnrollmentRequest);
+export const listSupervisorDeviceRequests = async (signal?: AbortSignal): Promise<DeviceEnrollmentRequestView[]> =>
+  (await request<unknown[]>("/api/v1/auth/webauthn/device-enrollment-requests", { signal })).map(normalizeDeviceEnrollmentRequest);
 
-export const listSupervisorDeviceAuthorizations = async (): Promise<DeviceAuthorizationView[]> =>
-  (await request<unknown[]>("/api/v1/auth/webauthn/device-authorizations")).map(normalizeDeviceAuthorization);
+export const listSupervisorDeviceAuthorizations = async (signal?: AbortSignal): Promise<DeviceAuthorizationView[]> =>
+  (await request<unknown[]>("/api/v1/auth/webauthn/device-authorizations", { signal })).map(normalizeDeviceAuthorization);
 
 export const approveSupervisorDeviceRequest = async (requestID: string, reason: string): Promise<unknown> => {
   const validRequestID = requireUUID(requestID, "request");
