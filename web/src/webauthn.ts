@@ -5,7 +5,22 @@ export type DriverActivationRequest = {
   correlationCode: string;
   status: string;
   expiresAt: string;
+  installationId: string;
 };
+
+export type DriverActivationRequestStatus = DriverActivationRequest & {
+  authorizationStatus: string | null;
+};
+
+export class DriverActivationStatusError extends Error {
+  readonly status: number;
+
+  constructor(status: number) {
+    super(`Driver activation status request failed (${status})`);
+    this.name = "DriverActivationStatusError";
+    this.status = status;
+  }
+}
 
 type CeremonyCredential = {
   id: string;
@@ -92,16 +107,25 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3
 const activationField = (value: JSONValue, snakeCase: string, pascalCase: string): unknown =>
   value[snakeCase] ?? value[pascalCase];
 
-const normalizeDriverActivationRequest = (value: JSONValue): DriverActivationRequest => {
-  const id = String(activationField(value, "id", "ID") ?? "");
+const normalizeDriverActivationRequest = (value: JSONValue, installationId = ""): DriverActivationRequest => {
+  const id = String(value.request_id ?? value.RequestID ?? activationField(value, "id", "ID") ?? "");
   if (!UUID_PATTERN.test(id)) throw new Error("The activation request id was not returned by the server");
   return {
     id,
     correlationCode: String(activationField(value, "correlation_code", "CorrelationCode") ?? ""),
     status: String(activationField(value, "status", "Status") ?? "PENDING"),
     expiresAt: String(activationField(value, "expires_at", "ExpiresAt") ?? ""),
+    installationId: String(activationField(value, "installation_id", "InstallationID") ?? installationId),
   };
 };
+
+const normalizeDriverActivationStatus = (value: JSONValue): DriverActivationRequestStatus => ({
+  ...normalizeDriverActivationRequest(value),
+  authorizationStatus: (() => {
+    const status = activationField(value, "authorization_status", "AuthorizationStatus");
+    return status == null ? null : String(status);
+  })(),
+});
 
 const readCSRFToken = (): string => document.cookie.split(";").map((item) => item.trim()).find((item) => item.startsWith("tp_csrf="))?.slice("tp_csrf=".length) ?? "";
 
@@ -140,16 +164,20 @@ export type DriverInstallation = {
 
 const driverInstallationDBName = "transportation-platform-driver-auth";
 const driverInstallationStoreName = "installations";
+const driverActivationRequestStoreName = "activation-requests";
 
 type StoredDriverInstallation = DriverInstallation & { createdAt: number };
 
 const openDriverInstallationDB = (): Promise<IDBDatabase> => {
   if (typeof indexedDB === "undefined") throw new Error("IndexedDB is unavailable");
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(driverInstallationDBName, 1);
+    const request = indexedDB.open(driverInstallationDBName, 2);
     request.onupgradeneeded = () => {
       if (!request.result.objectStoreNames.contains(driverInstallationStoreName)) {
         request.result.createObjectStore(driverInstallationStoreName, { keyPath: "id" });
+      }
+      if (!request.result.objectStoreNames.contains(driverActivationRequestStoreName)) {
+        request.result.createObjectStore(driverActivationRequestStoreName, { keyPath: "installationId" });
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -189,6 +217,40 @@ export async function getOrCreateDriverInstallation(): Promise<DriverInstallatio
   return (await loadDriverInstallation()) ?? createDriverInstallation();
 }
 
+export async function loadDriverActivationRequest(installationId: string): Promise<DriverActivationRequest | undefined> {
+  const database = await openDriverInstallationDB();
+  const stored = await new Promise<DriverActivationRequest | undefined>((resolve, reject) => {
+    const transaction = database.transaction(driverActivationRequestStoreName, "readonly");
+    const request = transaction.objectStore(driverActivationRequestStoreName).get(installationId);
+    request.onsuccess = () => resolve(request.result as DriverActivationRequest | undefined);
+    request.onerror = () => reject(request.error ?? new Error("Activation request could not be loaded"));
+  });
+  database.close();
+  return stored;
+}
+
+export async function persistDriverActivationRequest(request: DriverActivationRequest): Promise<void> {
+  const database = await openDriverInstallationDB();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(driverActivationRequestStoreName, "readwrite");
+    transaction.objectStore(driverActivationRequestStoreName).put(request);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error("Activation request could not be persisted"));
+  });
+  database.close();
+}
+
+export async function clearDriverActivationRequest(installationId: string): Promise<void> {
+  const database = await openDriverInstallationDB();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(driverActivationRequestStoreName, "readwrite");
+    transaction.objectStore(driverActivationRequestStoreName).delete(installationId);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error("Activation request could not be cleared"));
+  });
+  database.close();
+}
+
 export async function createDriverInstallation(): Promise<DriverInstallation> {
   const id = crypto.randomUUID();
   const pair = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"])) as CryptoKeyPair;
@@ -206,7 +268,24 @@ export async function requestDriverActivation(companyID: string, operationID: st
     installation_public_key: installation.publicKeyEncoded,
     key_algorithm: "ECDSA_P256_SHA256",
   });
-  return normalizeDriverActivationRequest(response);
+  const request = normalizeDriverActivationRequest(response, installation.id);
+  await persistDriverActivationRequest(request);
+  return request;
+}
+
+export async function queryDriverActivationStatus(requestID: string, installationID: string): Promise<DriverActivationRequestStatus> {
+  const query = new URLSearchParams({ device_request_id: requestID, installation_id: installationID });
+  let response: Response;
+  try {
+    response = await fetch(`/api/v1/driver/auth/activation/status?${query.toString()}`, {
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+  } catch (error) {
+    throw error;
+  }
+  if (!response.ok) throw new DriverActivationStatusError(response.status);
+  return normalizeDriverActivationStatus((await response.json()) as JSONValue);
 }
 
 export async function loginDriverWithPassword(identifier: string, password: string): Promise<void> {

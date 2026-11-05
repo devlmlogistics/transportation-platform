@@ -89,7 +89,13 @@ La consola del supervisor muestra solicitudes pendientes, dispositivos activos y
 
 La consola actualiza automáticamente las dos listas cada cinco segundos mientras la sesión está activa y la pestaña visible. El ciclo usa los endpoints autenticados existentes, mantiene una sola consulta en vuelo y compara `request_id` para anunciar sólo solicitudes nuevas; la carga inicial no genera una notificación. Al ocultar la pestaña se suspenden las consultas y se realiza una actualización inmediata al volver a hacerla visible. Las respuestas HTTP 401 cierran la vista y muestran que la sesión expiró; un 403 detiene el polling y deja disponible `Actualizar ahora` para un reintento explícito. Las acciones de aprobación y revocación bloquean el polling durante la mutación y fuerzan una actualización al terminar.
 
-Esta entrega es exclusivamente de UX/UI y pruebas frontend: no agrega migraciones Goose, endpoints, tablas ni cambios en PostgreSQL.
+La entrega UX/UI anterior fue exclusivamente frontend. Esta corrección agrega únicamente el contrato de lectura del estado de activación descrito abajo y la migración Goose correspondiente; no cambia tablas, RLS, autenticación ni controles de autorización existentes.
+
+### Consulta de estado de activación del conductor
+
+La revisión de la prueba Android confirmó que no existía un endpoint de estado para el conductor: el listado de `device-enrollment-requests` está reservado a la consola de supervisor y `registration/options` crea un challenge WebAuthn, por lo que no se utiliza como polling. La migración `000019_driver_activation_status.sql` agrega sólo la lectura `GET /api/v1/driver/auth/activation/status`. La consulta exige una sesión vigente `DRIVER_ACTIVATION` y vincula dentro de una función `SECURITY DEFINER` el `device_request_id`, el `installation_id` y la cuenta derivada de la sesión; una discordancia devuelve una respuesta genérica sin enumerar solicitudes. No concede acceso directo a tablas ni cambia RLS, WebAuthn, ECDSA o permisos operativos.
+
+El estado de la solicitud se reporta con la semántica existente (`PENDING`, `APPROVED`, `REJECTED`, `EXPIRED`, `CONSUMED`). Si existe una autorización asociada a la instalación, el endpoint también devuelve su estado; una autorización `REVOKED` se presenta como dispositivo revocado. La expiración se calcula en la frontera SQL sin mutar la solicitud. La referencia de solicitud se conserva junto a la instalación en IndexedDB, sin contraseñas, tokens ni claves privadas exportadas. Al reabrir la PWA, una solicitud `PENDING` se revalida; la aprobación sólo habilita el botón de registro y nunca inicia WebAuthn automáticamente.
 
 ### Registro de passkey desde Android después de la aprobación
 

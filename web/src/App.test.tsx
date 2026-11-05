@@ -7,12 +7,84 @@ const jsonResponse = (body: unknown, status = 200): Response =>
 
 const requestID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const authorizationID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const driverInstallationID = "78f5e1f4-4f86-4e5f-8adf-955cb7d23337";
+const driverRequestID = "99999999-9999-4999-8999-999999999999";
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
   Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
 });
+
+const installDriverActivationDB = () => {
+  const values = new Map<string, unknown>([[driverInstallationID, {
+    id: driverInstallationID,
+    publicKey: {} as CryptoKey,
+    privateKey: {} as CryptoKey,
+    publicKeyEncoded: "public-key",
+    createdAt: Date.now(),
+  }]]);
+  const activationRequest = {
+    id: driverRequestID,
+    correlationCode: "REQ-DRIVER",
+    status: "PENDING",
+    expiresAt: "2099-01-01T00:00:00Z",
+    installationId: driverInstallationID,
+  };
+  values.set(driverInstallationID, { ...(values.get(driverInstallationID) as object), activationRequest });
+  const objectStore = (name: string, transaction: { oncomplete?: () => void; onerror?: () => void }) => ({
+    get: (id: string) => {
+      const request: { result?: unknown; onsuccess?: () => void } = {};
+      setTimeout(() => {
+        const value = values.get(id) as { activationRequest?: unknown } | undefined;
+        request.result = name === "installations" ? value : value?.activationRequest;
+        request.onsuccess?.();
+      }, 0);
+      return request;
+    },
+    getAll: () => {
+      const request: { result?: unknown[]; onsuccess?: () => void } = {};
+      setTimeout(() => {
+        request.result = [...values.values()].map((value) => {
+          const item = value as { id?: string; publicKey?: CryptoKey; privateKey?: CryptoKey; publicKeyEncoded?: string; createdAt?: number };
+          return item;
+        });
+        request.onsuccess?.();
+      }, 0);
+      return request;
+    },
+    put: (value: { installationId: string; status?: string }) => {
+      const existing = values.get(value.installationId) as { activationRequest?: unknown } | undefined;
+      values.set(value.installationId, { ...existing, activationRequest: value });
+      setTimeout(() => transaction.oncomplete?.(), 0);
+    },
+    delete: (id: string) => {
+      values.delete(id);
+      setTimeout(() => transaction.oncomplete?.(), 0);
+    },
+  });
+  const database = {
+    objectStoreNames: { contains: () => true },
+    createObjectStore: vi.fn(),
+    close: vi.fn(),
+    transaction: (name: string) => {
+      const transaction: { oncomplete?: () => void; onerror?: () => void; objectStore?: () => ReturnType<typeof objectStore> } = {};
+      transaction.objectStore = () => objectStore(name, transaction);
+      return transaction;
+    },
+  };
+  vi.stubGlobal("indexedDB", {
+    open: vi.fn(() => {
+      const request: { result?: typeof database; onsuccess?: () => void; onupgradeneeded?: () => void } = { result: database };
+      setTimeout(() => {
+        request.onupgradeneeded?.();
+        request.onsuccess?.();
+      }, 0);
+      return request;
+    }),
+  });
+};
 
 const enrollmentResponse = (id: string, legalName: string) => ({
   ID: id,
@@ -261,6 +333,76 @@ describe("platform shell", () => {
     });
     expect(requestCalls).toBe(callsAfterForbidden);
     expect(screen.queryByRole("button", { name: "Actualizar ahora" })).not.toBeInTheDocument();
+  });
+
+  it("polls a pending driver activation, enables registration after approval, and then stops", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    installDriverActivationDB();
+    let statusCalls = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.includes("/driver/auth/activation/status")) {
+        statusCalls += 1;
+        return jsonResponse({
+          request_id: driverRequestID,
+          correlation_code: "REQ-DRIVER",
+          installation_id: driverInstallationID,
+          status: statusCalls === 1 ? "PENDING" : "APPROVED",
+          expires_at: "2099-01-01T00:00:00Z",
+          authorization_status: null,
+        });
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    const view = render(<App />);
+    await waitFor(() => expect(screen.getByText("Esperando aprobación del supervisor")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Registrar passkey" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Consultar estado" })).toBeInTheDocument();
+    await waitFor(() => expect(statusCalls).toBe(1));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    await waitFor(() => expect(screen.getByText("Tu dispositivo fue aprobado")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Registrar passkey" })).toBeEnabled();
+    const callsAfterApproval = statusCalls;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+    expect(statusCalls).toBe(callsAfterApproval);
+    view.unmount();
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Tu dispositivo fue aprobado")).toBeInTheDocument());
+    expect(statusCalls).toBe(callsAfterApproval);
+  });
+
+  it("pauses driver activation polling while hidden and refreshes on visibility or manual request", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    installDriverActivationDB();
+    let statusCalls = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.includes("/driver/auth/activation/status")) {
+        statusCalls += 1;
+        return jsonResponse({ request_id: driverRequestID, correlation_code: "REQ-DRIVER", installation_id: driverInstallationID, status: "PENDING", expires_at: "2099-01-01T00:00:00Z", authorization_status: null });
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    render(<App />);
+    await waitFor(() => expect(statusCalls).toBe(1));
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+    expect(statusCalls).toBe(1);
+
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await waitFor(() => expect(statusCalls).toBe(2));
+    fireEvent.click(screen.getByRole("button", { name: "Consultar estado" }));
+    await waitFor(() => expect(statusCalls).toBe(3));
   });
 
   it("does not start a second refresh while the first one is pending and cleans up on unmount", async () => {

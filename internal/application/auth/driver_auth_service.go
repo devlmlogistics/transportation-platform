@@ -44,6 +44,13 @@ func (s *DriverAuthService) ResolveSession(ctx context.Context, token []byte) (A
 	return s.Activation.ResolveSession(ctx, token)
 }
 
+func (s *DriverAuthService) GetDriverActivationRequestStatus(ctx context.Context, token []byte, requestID, installationID uuid.UUID) (DriverActivationRequestStatus, error) {
+	if s == nil || s.Activation == nil {
+		return DriverActivationRequestStatus{}, ErrSessionNotFound
+	}
+	return s.Activation.GetDriverActivationRequestStatus(ctx, token, requestID, installationID)
+}
+
 func (s *DriverAuthService) Logout(ctx context.Context, token []byte, sessionID uuid.UUID) error {
 	if s == nil || s.Activation == nil {
 		return ErrSessionNotFound

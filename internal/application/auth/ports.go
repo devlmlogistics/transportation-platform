@@ -255,6 +255,17 @@ type DeviceEnrollmentRequest struct {
 	ExpiresAt          time.Time
 }
 
+type DriverActivationRequestStatus struct {
+	RequestID           uuid.UUID
+	CorrelationCode     string
+	CompanyID           uuid.UUID
+	CompanyOperationID  *uuid.UUID
+	InstallationID      uuid.UUID
+	Status              string
+	ExpiresAt           time.Time
+	AuthorizationStatus *string
+}
+
 type DeviceEnrollmentRequestView struct {
 	ID                 uuid.UUID
 	CorrelationCode    string
@@ -471,4 +482,8 @@ type OnlineAuthStore interface {
 type DriverActivationStore interface {
 	OnlineAuthStore
 	IssueDriverActivationSession(context.Context, LoginGrant, CreateSessionRequest, uuid.UUID) (SessionRecord, error)
+}
+
+type DriverActivationStatusStore interface {
+	GetDriverActivationRequestStatus(context.Context, []byte, uuid.UUID, uuid.UUID) (DriverActivationRequestStatus, error)
 }

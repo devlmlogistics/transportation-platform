@@ -1,13 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   driverLoginErrorMessage,
+  clearDriverActivationRequest,
   getOrCreateDriverInstallation,
+  loadDriverActivationRequest,
   loadDriverInstallation,
   loginDriverWithPasskey,
   loginDriverWithPassword,
+  persistDriverActivationRequest,
+  queryDriverActivationStatus,
   registerPasskey,
   requestDriverActivation,
+  DriverActivationStatusError,
   type DriverActivationRequest,
+  type DriverActivationRequestStatus,
   type DriverInstallation,
 } from "./webauthn";
 import {
@@ -29,7 +35,7 @@ const modules: ModuleCardProps[] = [
   { name: "Seguridad de acceso", description: "Passkeys, aprobación supervisada y revocación inmediata para proteger cada instalación.", status: "Disponible", accent: "border-violet-200 bg-violet-50" },
 ];
 
-type RegistrationState = "idle" | "pending" | "approved" | "registering" | "registered" | "expired";
+type RegistrationState = "idle" | "pending" | "approved" | "registering" | "registered" | "expired" | "rejected" | "revoked";
 type InstallationState = "checking" | "missing" | "ready" | "error";
 
 const formatDate = (value: string | null): string => {
@@ -50,6 +56,19 @@ const statusLabel = (status: string): string => {
 
 const companyName = (id: string): string => findDemoCompany(id)?.name ?? "Empresa autorizada";
 const operationName = (id: string | null): string => id ? (findDemoOperation(id)?.name ?? "Operación autorizada") : "Alcance empresarial";
+
+const registrationStateFor = (requestStatus: string, authorizationStatus: string | null = null): RegistrationState => {
+  if (authorizationStatus?.toUpperCase() === "REVOKED") return "revoked";
+  switch (requestStatus.toUpperCase()) {
+    case "APPROVED": return "approved";
+    case "CONSUMED": return "registered";
+    case "EXPIRED": return "expired";
+    case "REJECTED": return "rejected";
+    case "REVOKED": return "revoked";
+    case "PENDING": return "pending";
+    default: return "idle";
+  }
+};
 
 function ModuleCard({ name, description, status, accent }: ModuleCardProps) {
   return <article className={["rounded-2xl", "border", "p-5", accent].join(" ")}>
@@ -81,6 +100,7 @@ export default function App() {
   const [installationState, setInstallationState] = useState<InstallationState>("checking");
   const [activationRequest, setActivationRequest] = useState<DriverActivationRequest>();
   const [registrationState, setRegistrationState] = useState<RegistrationState>("idle");
+  const [driverStatusRefreshing, setDriverStatusRefreshing] = useState(false);
   const [status, setStatus] = useState("Listo para comenzar.");
   const [driverBusy, setDriverBusy] = useState<"prepare" | "activate" | "register" | "login" | null>(null);
   const [supervisorIdentifier, setSupervisorIdentifier] = useState("");
@@ -101,6 +121,9 @@ export default function App() {
   const supervisorSnapshotReadyRef = useRef(false);
   const knownRequestIDsRef = useRef(new Set<string>());
   const supervisorNoticeTimerRef = useRef<number | undefined>(undefined);
+  const driverStatusInFlightRef = useRef<Promise<void> | null>(null);
+  const driverStatusSequenceRef = useRef(0);
+  const driverStatusPollRef = useRef<((force?: boolean) => Promise<void>) | null>(null);
   const mountedRef = useRef(true);
 
   const updateSupervisorAction = (action: string | null) => {
@@ -119,7 +142,15 @@ export default function App() {
       if (stored) {
         setInstallation(stored);
         setInstallationState("ready");
-        setStatus("Instalación recuperada de forma segura. Puedes ingresar o solicitar una activación.");
+        void loadDriverActivationRequest(stored.id).then((savedRequest) => {
+          if (!mounted || !savedRequest) return;
+          setActivationRequest(savedRequest);
+          setRegistrationState(registrationStateFor(savedRequest.status));
+          setStatus("Instalación y solicitud recuperadas de forma segura.");
+        }).catch(() => {
+          if (mounted) setStatus("Instalación recuperada. No se pudo cargar la solicitud local.");
+        });
+        setStatus("Instalación recuperada de forma segura. Puedes ingresar o consultar tu activación.");
       } else {
         setInstallationState("missing");
       }
@@ -128,6 +159,97 @@ export default function App() {
     });
     return () => { mounted = false; };
   }, []);
+
+  useEffect(() => {
+    const installationID = installation?.id;
+    const requestID = activationRequest?.id;
+    if (!installationID || !requestID || registrationState !== "pending") {
+      driverStatusPollRef.current = null;
+      return;
+    }
+
+    let cancelled = false;
+    let stopAutomaticPolling = false;
+    const poll = async (force = false): Promise<void> => {
+      if (cancelled || !mountedRef.current || document.visibilityState !== "visible" || (!force && stopAutomaticPolling)) return;
+      if (driverStatusInFlightRef.current) return driverStatusInFlightRef.current;
+      const sequence = driverStatusSequenceRef.current + 1;
+      driverStatusSequenceRef.current = sequence;
+      setDriverStatusRefreshing(true);
+      const refresh = (async () => {
+        try {
+          const nextStatus: DriverActivationRequestStatus = await queryDriverActivationStatus(requestID, installationID);
+          if (cancelled || !mountedRef.current || driverStatusSequenceRef.current !== sequence) return;
+          const nextRequest: DriverActivationRequest = {
+            ...activationRequest,
+            id: nextStatus.id,
+            correlationCode: nextStatus.correlationCode,
+            status: nextStatus.authorizationStatus?.toUpperCase() === "REVOKED" ? "REVOKED" : nextStatus.status,
+            expiresAt: nextStatus.expiresAt,
+            installationId: installationID,
+          };
+          setActivationRequest(nextRequest);
+          void persistDriverActivationRequest(nextRequest).catch(() => undefined);
+          const nextState = registrationStateFor(nextStatus.status, nextStatus.authorizationStatus);
+          setRegistrationState(nextState);
+          switch (nextState) {
+            case "pending":
+              setStatus("Esperando aprobación del supervisor.");
+              break;
+            case "approved":
+              setStatus("Tu dispositivo fue aprobado. Ya puedes registrar la passkey.");
+              break;
+            case "registered":
+              setStatus("La activación fue completada. Ya puedes ingresar con passkey.");
+              break;
+            case "revoked":
+              setStatus("Este dispositivo fue revocado. Solicita una revisión al supervisor.");
+              break;
+            case "expired":
+              setStatus("La solicitud venció. Puedes iniciar una nueva activación.");
+              break;
+            case "rejected":
+              setStatus("La solicitud fue rechazada. Puedes iniciar una nueva activación.");
+              break;
+          }
+        } catch (error) {
+          if (cancelled || !mountedRef.current || driverStatusSequenceRef.current !== sequence) return;
+          if (error instanceof DriverActivationStatusError && (error.status === 401 || error.status === 403)) {
+            stopAutomaticPolling = true;
+            setStatus(error.status === 401
+              ? "La sesión de activación expiró. Ingresa nuevamente para consultar el estado."
+              : "No tienes permiso para consultar esta activación.");
+          } else if (error instanceof DriverActivationStatusError && error.status === 404) {
+            stopAutomaticPolling = true;
+            setStatus("No se pudo verificar esta solicitud. Inicia una nueva activación si corresponde.");
+          } else {
+            setStatus("No se pudo consultar el estado por un problema temporal de red. La solicitud no se considera aprobada.");
+          }
+        } finally {
+          if (driverStatusSequenceRef.current === sequence) {
+            driverStatusInFlightRef.current = null;
+            setDriverStatusRefreshing(false);
+          }
+        }
+      })();
+      driverStatusInFlightRef.current = refresh;
+      return refresh;
+    };
+
+    driverStatusPollRef.current = poll;
+    const intervalID = window.setInterval(() => void poll(), 5000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") void poll();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    void poll();
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalID);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      if (driverStatusPollRef.current === poll) driverStatusPollRef.current = null;
+    };
+  }, [activationRequest?.id, installation?.id, registrationState]);
 
   const refreshSupervisor = useCallback(async (source: "manual" | "poll" | "mutation" = "manual"): Promise<void> => {
     if (supervisorRefreshRef.current) return supervisorRefreshRef.current;
@@ -292,6 +414,10 @@ export default function App() {
       setStatus("Solicita primero la activación y espera la aprobación del supervisor.");
       return;
     }
+    if (registrationState !== "approved") {
+      setStatus("Espera la aprobación del supervisor antes de registrar la passkey.");
+      return;
+    }
     if (Date.parse(activationRequest.expiresAt) <= Date.now()) {
       setRegistrationState("expired");
       setStatus("La solicitud expiró. Solicita una nueva; tu instalación local se conserva.");
@@ -307,6 +433,7 @@ export default function App() {
           setStatus("Solicitud aprobada. Confirma ahora la biometría o el PIN.");
         }
       });
+      void clearDriverActivationRequest(installation.id).catch(() => undefined);
       setRegistrationState("registered");
       setStatus("Passkey registrada y dispositivo autorizado. Ya puedes ingresar con passkey.");
     } catch (error) {
@@ -366,9 +493,9 @@ export default function App() {
             <div className="grid gap-4 sm:grid-cols-2"><label className="text-sm font-semibold text-slate-700">Empresa<select className="mt-2 w-full rounded-xl border border-slate-300 bg-white p-3.5 outline-none transition focus:border-teal-600 focus:ring-4 focus:ring-teal-100" value={companyID} onChange={(event) => { setCompanyID(event.target.value); setOperationID(""); }}><option value="">Selecciona una empresa</option>{demoCompanies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label><label className="text-sm font-semibold text-slate-700">Operación <span className="font-normal text-slate-500">(opcional)</span><select className="mt-2 w-full rounded-xl border border-slate-300 bg-white p-3.5 outline-none transition focus:border-teal-600 focus:ring-4 focus:ring-teal-100" value={operationID} onChange={(event) => setOperationID(event.target.value)} disabled={!selectedCompany}><option value="">Acceso por empresa</option>{selectedCompany?.operations.map((operation) => <option key={operation.id} value={operation.id}>{operation.name}</option>)}</select></label></div>
             <p className="text-xs leading-5 text-slate-500">La demo muestra sólo datos sintéticos autorizados. La operación puede dejarse vacía para una solicitud de alcance empresarial.</p>
           </div>
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5"><p className="text-sm font-black text-slate-950">¿Qué quieres hacer?</p><div className="mt-4 grid gap-3"><button className="rounded-xl bg-slate-900 px-4 py-3.5 text-sm font-bold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={driverBusy !== null} onClick={() => void prepareInstallation()}>{driverBusy === "prepare" ? "Preparando…" : installationState === "ready" ? "Usar esta instalación" : "Preparar instalación"}</button><button className="rounded-xl bg-teal-700 px-4 py-3.5 text-sm font-bold text-white transition hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={driverBusy !== null} onClick={() => void activate()}>{driverBusy === "activate" ? "Enviando solicitud…" : "Activar este dispositivo"}</button><button className="rounded-xl bg-amber-700 px-4 py-3.5 text-sm font-bold text-white transition hover:bg-amber-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={!activationRequest || driverBusy !== null || registrationState === "registered"} onClick={() => void registerApprovedPasskey()}>{driverBusy === "register" ? "Registrando…" : registrationState === "registered" ? "Passkey registrada" : "Registrar passkey"}</button><button className="rounded-xl bg-violet-700 px-4 py-3.5 text-sm font-bold text-white transition hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={driverBusy !== null} onClick={() => void recurringLogin()}>{driverBusy === "login" ? "Verificando…" : "Ingresar con passkey"}</button></div></div>
+           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5"><p className="text-sm font-black text-slate-950">¿Qué quieres hacer?</p><div className="mt-4 grid gap-3"><button className="rounded-xl bg-slate-900 px-4 py-3.5 text-sm font-bold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={driverBusy !== null} onClick={() => void prepareInstallation()}>{driverBusy === "prepare" ? "Preparando…" : installationState === "ready" ? "Usar esta instalación" : "Preparar instalación"}</button><button className="rounded-xl bg-teal-700 px-4 py-3.5 text-sm font-bold text-white transition hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={driverBusy !== null} onClick={() => void activate()}>{driverBusy === "activate" ? "Enviando solicitud…" : "Activar este dispositivo"}</button><button className="rounded-xl bg-amber-700 px-4 py-3.5 text-sm font-bold text-white transition hover:bg-amber-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={!activationRequest || registrationState !== "approved" || driverBusy !== null} onClick={() => void registerApprovedPasskey()}>{driverBusy === "register" ? "Registrando…" : registrationState === "registered" ? "Passkey registrada" : "Registrar passkey"}</button><button className="rounded-xl bg-violet-700 px-4 py-3.5 text-sm font-bold text-white transition hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={driverBusy !== null} onClick={() => void recurringLogin()}>{driverBusy === "login" ? "Verificando…" : "Ingresar con passkey"}</button></div></div>
         </div>
-        {activationRequest && <div className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950" aria-live="polite"><p className="font-bold">{registrationState === "pending" && "Solicitud pendiente de aprobación"}{registrationState === "approved" && "Aprobación disponible"}{registrationState === "registering" && "Registro en curso"}{registrationState === "registered" && "Dispositivo autorizado"}{registrationState === "expired" && "Solicitud expirada"}</p><p className="mt-1">{registrationState === "pending" && `Expira el ${formatDate(activationRequest.expiresAt)}. Cuando el supervisor la apruebe, registra tu passkey.`}{registrationState === "approved" && "Completa la biometría o el PIN del dispositivo."}{registrationState === "registering" && "No cierres esta pantalla mientras se completa la verificación."}{registrationState === "registered" && "Ya puedes usar Ingresar con passkey en este dispositivo."}{registrationState === "expired" && "Solicita una nueva activación; tu instalación local no se eliminó."}</p><details className="mt-3 text-xs text-amber-900"><summary className="cursor-pointer font-bold">Detalles técnicos</summary><dl className="mt-2 grid gap-1 sm:grid-cols-2"><div><dt className="font-semibold">Código</dt><dd className="break-all">{activationRequest.correlationCode || "—"}</dd></div><div><dt className="font-semibold">Solicitud</dt><dd className="break-all">{activationRequest.id}</dd></div></dl></details></div>}
+        {activationRequest && <div className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950" aria-live="polite"><p className="font-bold">{registrationState === "pending" && "Esperando aprobación del supervisor"}{registrationState === "approved" && "Tu dispositivo fue aprobado"}{registrationState === "registering" && "Registro en curso"}{registrationState === "registered" && "Dispositivo autorizado"}{registrationState === "expired" && "La solicitud venció"}{registrationState === "rejected" && "La solicitud fue rechazada"}{registrationState === "revoked" && "Este dispositivo fue revocado"}</p><p className="mt-1">{registrationState === "pending" && `Expira el ${formatDate(activationRequest.expiresAt)}. La pantalla consultará el estado mientras esté visible.`}{registrationState === "approved" && "Ya puedes registrar la passkey con la interacción explícita del conductor."}{registrationState === "registering" && "No cierres esta pantalla mientras se completa la verificación."}{registrationState === "registered" && "Ya puedes usar Ingresar con passkey en este dispositivo."}{registrationState === "expired" && "Solicita una nueva activación; tu instalación local no se eliminó."}{registrationState === "rejected" && "Puedes iniciar una nueva activación mediante el proceso autorizado."}{registrationState === "revoked" && "No se ofrecerá una reactivación automática."}</p>{registrationState === "pending" && <button className="mt-3 rounded-xl border border-amber-300 bg-white px-3 py-2 text-xs font-bold text-amber-900 disabled:cursor-not-allowed disabled:opacity-50" disabled={driverStatusRefreshing} onClick={() => void driverStatusPollRef.current?.(true)}>{driverStatusRefreshing ? "Consultando…" : "Consultar estado"}</button>}<details className="mt-3 text-xs text-amber-900"><summary className="cursor-pointer font-bold">Detalles técnicos</summary><dl className="mt-2 grid gap-1 sm:grid-cols-2"><div><dt className="font-semibold">Código</dt><dd className="break-all">{activationRequest.correlationCode || "—"}</dd></div><div><dt className="font-semibold">Solicitud</dt><dd className="break-all">{activationRequest.id}</dd></div></dl></details></div>}
         <p className="mt-4 rounded-2xl bg-slate-100 p-4 text-sm text-slate-700" role="status">{status}</p>
       </section>
 
