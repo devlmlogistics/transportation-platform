@@ -6,6 +6,8 @@ export type DriverActivationRequest = {
   status: string;
   expiresAt: string;
   installationId: string;
+  /** Local metadata from the successful activation login; never an auth token. */
+  identifier?: string;
 };
 
 export type DriverActivationRequestStatus = DriverActivationRequest & {
@@ -160,6 +162,8 @@ export type DriverInstallation = {
   publicKey: CryptoKey;
   privateKey: CryptoKey;
   publicKeyEncoded: string;
+  /** Non-secret local association learned only after a verified driver flow. */
+  identifier?: string;
 };
 
 const driverInstallationDBName = "transportation-platform-driver-auth";
@@ -217,6 +221,27 @@ export async function getOrCreateDriverInstallation(): Promise<DriverInstallatio
   return (await loadDriverInstallation()) ?? createDriverInstallation();
 }
 
+const normalizeDriverIdentifier = (identifier: string): string => identifier.trim().toLowerCase();
+
+export async function associateDriverInstallationIdentifier(installationID: string, identifier: string): Promise<DriverInstallation> {
+  const normalized = normalizeDriverIdentifier(identifier);
+  if (!normalized) throw new Error("A driver identifier is required");
+  const installation = await loadDriverInstallation(installationID);
+  if (!installation) throw new Error("Driver installation could not be loaded");
+  const associated = { ...installation, identifier: normalized };
+  await persistDriverInstallation(associated);
+  return associated;
+}
+
+export async function clearDriverInstallationIdentifier(installationID: string): Promise<DriverInstallation> {
+  const installation = await loadDriverInstallation(installationID);
+  if (!installation) throw new Error("Driver installation could not be loaded");
+  const { identifier: _identifier, ...withoutIdentifier } = installation;
+  const cleared = withoutIdentifier as DriverInstallation;
+  await persistDriverInstallation(cleared);
+  return cleared;
+}
+
 export async function loadDriverActivationRequest(installationId: string): Promise<DriverActivationRequest | undefined> {
   const database = await openDriverInstallationDB();
   const stored = await new Promise<DriverActivationRequest | undefined>((resolve, reject) => {
@@ -260,7 +285,7 @@ export async function createDriverInstallation(): Promise<DriverInstallation> {
   return installation;
 }
 
-export async function requestDriverActivation(companyID: string, operationID: string | undefined, installation: DriverInstallation): Promise<DriverActivationRequest> {
+export async function requestDriverActivation(companyID: string, operationID: string | undefined, installation: DriverInstallation, identifier?: string): Promise<DriverActivationRequest> {
   const response = await requestJSON("/api/v1/auth/webauthn/device-enrollment-requests", {
     company_id: companyID,
     ...(operationID ? { company_operation_id: operationID } : {}),
@@ -269,6 +294,7 @@ export async function requestDriverActivation(companyID: string, operationID: st
     key_algorithm: "ECDSA_P256_SHA256",
   });
   const request = normalizeDriverActivationRequest(response, installation.id);
+  if (identifier?.trim()) request.identifier = normalizeDriverIdentifier(identifier);
   await persistDriverActivationRequest(request);
   return request;
 }

@@ -129,6 +129,23 @@ func testDeviceAuthorizationBoundaries(t *testing.T, ctx context.Context, authPo
 		if !callDecision("approve_device_enrollment_request", supervisorToken, companyScopedRequest) {
 			t.Fatal("company-scoped permission did not allow approval")
 		}
+		approvedRequest := companyOperationRequest(fixture.UserADriver, fixture.CompanyA, &fixture.OperationA)
+		if _, err := adminPool.Exec(ctx, `
+			UPDATE platform.device_enrollment_request
+			   SET status = 'APPROVED', approved_at = clock_timestamp()
+			 WHERE id = $1
+		`, approvedRequest); err != nil {
+			t.Fatal(err)
+		}
+		var approvedStatus string
+		if err := authPool.QueryRow(ctx, `
+			SELECT status FROM platform.list_device_enrollment_requests($1) WHERE request_id = $2
+		`, supervisorToken, approvedRequest).Scan(&approvedStatus); err != nil {
+			t.Fatal(err)
+		}
+		if approvedStatus != "APPROVED" {
+			t.Fatalf("approved request status = %q, want APPROVED", approvedStatus)
+		}
 		if _, err := adminPool.Exec(ctx, `
 			UPDATE platform.permission_grant
 			   SET lifecycle_status = 'REVOKED', revoked_at = clock_timestamp()
@@ -185,8 +202,16 @@ func testDeviceAuthorizationBoundaries(t *testing.T, ctx context.Context, authPo
 		`, supervisorToken, expiredRequest).Scan(&visibleRequests); err != nil {
 			t.Fatal(err)
 		}
-		if visibleRequests != 0 {
-			t.Fatalf("expired request was visible: %s", expiredRequest)
+		if visibleRequests != 1 {
+			t.Fatalf("expired request was not retained for status display: %s", expiredRequest)
+		}
+		if err := authPool.QueryRow(ctx, `
+			SELECT status FROM platform.list_device_enrollment_requests($1) WHERE request_id = $2
+		`, supervisorToken, expiredRequest).Scan(&approvedStatus); err != nil {
+			t.Fatal(err)
+		}
+		if approvedStatus != "EXPIRED" {
+			t.Fatalf("expired request status = %q, want EXPIRED", approvedStatus)
 		}
 
 		consumedRequest := companyOperationRequest(fixture.UserADriver, fixture.CompanyA, &fixture.OperationA)

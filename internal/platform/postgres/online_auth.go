@@ -446,7 +446,8 @@ func (r *OnlineAuthRepository) ListDeviceEnrollmentRequests(ctx context.Context,
 	}
 	rows, err := r.authPool.Query(ctx, `
 		SELECT request_id, correlation_code, user_account_id, identifier, legal_name,
-		       company_id, company_operation_id, installation_id, status, requested_at, expires_at
+		       company_id, company_operation_id, installation_id, status, requested_at,
+		       approved_at, expires_at
 		  FROM platform.list_device_enrollment_requests($1)
 		 ORDER BY requested_at DESC
 	`, tokenHash)
@@ -458,7 +459,8 @@ func (r *OnlineAuthRepository) ListDeviceEnrollmentRequests(ctx context.Context,
 	for rows.Next() {
 		var item auth.DeviceEnrollmentRequestView
 		if err := rows.Scan(&item.ID, &item.CorrelationCode, &item.UserAccountID, &item.Identifier, &item.LegalName,
-			&item.CompanyID, &item.CompanyOperationID, &item.InstallationID, &item.Status, &item.RequestedAt, &item.ExpiresAt); err != nil {
+			&item.CompanyID, &item.CompanyOperationID, &item.InstallationID, &item.Status, &item.RequestedAt,
+			&item.ApprovedAt, &item.ExpiresAt); err != nil {
 			return nil, err
 		}
 		result = append(result, item)

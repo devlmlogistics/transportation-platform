@@ -97,7 +97,7 @@ const enrollmentResponse = (id: string, legalName: string) => ({
   InstallationID: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
   Status: "PENDING",
   RequestedAt: "2026-01-01T00:00:00Z",
-  ExpiresAt: "2026-01-01T01:00:00Z",
+  ExpiresAt: "2099-01-01T01:00:00Z",
 });
 
 describe("platform shell", () => {
@@ -144,7 +144,7 @@ describe("platform shell", () => {
           InstallationID: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
           Status: "PENDING",
           RequestedAt: "2026-01-01T00:00:00Z",
-          ExpiresAt: "2026-01-01T01:00:00Z",
+          ExpiresAt: "2099-01-01T01:00:00Z",
         }]);
       }
       if (path.endsWith("/device-authorizations")) {
@@ -210,6 +210,189 @@ describe("platform shell", () => {
     expect(screen.getByText("Historial revocado")).toBeInTheDocument();
     expect(screen.getAllByText("Revocado")).toHaveLength(2);
     expect(screen.queryByRole("button", { name: "Revocar dispositivo" })).not.toBeInTheDocument();
+  });
+
+  it("keeps approved requests visible until the driver registers a passkey", async () => {
+    document.cookie = "tp_csrf=demo-csrf";
+    const approvedID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({}))
+      .mockResolvedValueOnce(jsonResponse([
+        enrollmentResponse(requestID, "Conductor pendiente"),
+        { ...enrollmentResponse(approvedID, "Conductor aprobado"), Status: "APPROVED", ApprovedAt: "2026-01-01T00:05:00Z" },
+      ]))
+      .mockResolvedValueOnce(jsonResponse([]));
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Ingresar supervisor" }));
+
+    expect(await screen.findByText("Aprobadas — esperando passkey")).toBeInTheDocument();
+    expect(screen.getByText("Conductor aprobado")).toBeInTheDocument();
+    expect(screen.getByText("Aprobado — esperando passkey")).toBeInTheDocument();
+    expect(screen.getByText("Pendientes").parentElement).toHaveTextContent("1");
+    expect(screen.getAllByRole("button", { name: "Aprobar instalación" })).toHaveLength(1);
+    expect(screen.getByText("Aprobada")).toBeInTheDocument();
+  });
+
+  it("does not offer approval for an expired pending request", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({}))
+      .mockResolvedValueOnce(jsonResponse([{ ...enrollmentResponse(requestID, "Conductor vencido"), ExpiresAt: "2020-01-01T00:00:00Z" }]))
+      .mockResolvedValueOnce(jsonResponse([]));
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Ingresar supervisor" }));
+    expect(await screen.findByText("Conductor vencido")).toBeInTheDocument();
+    expect(screen.getByText("Pendientes").parentElement).toHaveTextContent("0");
+    expect(screen.queryByRole("button", { name: "Aprobar instalación" })).not.toBeInTheDocument();
+    expect(screen.getByText("Solicitudes cerradas")).toBeInTheDocument();
+    expect(screen.getByText("Expirada")).toBeInTheDocument();
+  });
+
+  it("refreshes after approval even when an older poll is still in flight", async () => {
+    let calls = 0;
+    let release: ((response: Response) => void) | undefined;
+    let approved = false;
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.endsWith("/auth/login")) return jsonResponse({});
+      if (path.endsWith(`/device-enrollment-requests/${requestID}/approve`)) { approved = true; return jsonResponse({}); }
+      if (path.endsWith("/device-authorizations")) return jsonResponse([]);
+      if (path.endsWith("/device-enrollment-requests")) {
+        calls++;
+        if (calls === 2) return new Promise<Response>((resolve) => { release = resolve; });
+        return jsonResponse([{ ...enrollmentResponse(requestID, "Conductor"), Status: approved ? "APPROVED" : "PENDING" }]);
+      }
+      throw new Error("Unexpected endpoint");
+    });
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Ingresar supervisor" }));
+    await screen.findByRole("button", { name: "Aprobar instalación" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await waitFor(() => expect(calls).toBe(2));
+    fireEvent.click(screen.getByRole("button", { name: "Aprobar instalación" }));
+    await waitFor(() => expect(approved).toBe(true));
+    expect(await screen.findByText("Aprobado — esperando passkey")).toBeInTheDocument();
+    await act(async () => { release?.(jsonResponse([enrollmentResponse(requestID, "Conductor")])); });
+    expect(screen.getByText("Aprobado — esperando passkey")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Aprobar instalación" })).not.toBeInTheDocument();
+    expect(calls).toBe(3);
+  });
+
+  it("cancels an in-flight poll when revoking and refreshes the result", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let requestCalls = 0;
+    let authorizationCalls = 0;
+    let aborted = false;
+    const activeAuthorization = {
+      ID: authorizationID,
+      UserAccountID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      Identifier: "driver@example.test",
+      LegalName: "Conductor Activo",
+      CompanyID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      CompanyOperationID: null,
+      InstallationID: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      KeyAlgorithm: "ECDSA_P256_SHA256",
+      Status: "ACTIVE",
+      RequestedAt: "2099-01-01T00:00:00Z",
+      ApprovedAt: "2099-01-01T00:05:00Z",
+      ExpiresAt: null,
+    };
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path.endsWith("/auth/login")) return jsonResponse({});
+      if (path.endsWith(`/device-authorizations/${authorizationID}/revoke`)) return jsonResponse({ status: "REVOKED" });
+      if (path.endsWith("/device-enrollment-requests")) {
+        requestCalls += 1;
+        if (requestCalls === 2) return new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener("abort", () => { aborted = true; reject(new DOMException("aborted", "AbortError")); }, { once: true });
+        });
+        return jsonResponse([]);
+      }
+      if (path.endsWith("/device-authorizations")) {
+        authorizationCalls += 1;
+        return jsonResponse(authorizationCalls === 1 ? [activeAuthorization] : []);
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Ingresar supervisor" }));
+    await screen.findByRole("button", { name: "Revocar dispositivo" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    await waitFor(() => expect(requestCalls).toBe(2));
+    fireEvent.click(screen.getByRole("button", { name: "Revocar dispositivo" }));
+    await waitFor(() => expect(aborted).toBe(true));
+    await waitFor(() => expect(requestCalls).toBe(3));
+    expect(screen.queryByRole("button", { name: "Revocar dispositivo" })).not.toBeInTheDocument();
+  });
+
+  it("aborts polling on unmount without surfacing a cancellation error", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let requestCalls = 0;
+    let aborted = false;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path.endsWith("/auth/login")) return jsonResponse({});
+      if (path.endsWith("/device-enrollment-requests")) {
+        requestCalls += 1;
+        if (requestCalls === 2) return new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => { aborted = true; reject(new DOMException("aborted", "AbortError")); }, { once: true }));
+        return jsonResponse([]);
+      }
+      if (path.endsWith("/device-authorizations")) return jsonResponse([]);
+      throw new Error(`Unexpected path: ${path}`);
+    });
+    const view = render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Ingresar supervisor" }));
+    await waitFor(() => expect(requestCalls).toBe(1));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    await waitFor(() => expect(requestCalls).toBe(2));
+    view.unmount();
+    await waitFor(() => expect(aborted).toBe(true));
+    expect(screen.queryByText("No fue posible actualizar los estados del supervisor.")).not.toBeInTheDocument();
+  });
+
+  it("does not overlap manual refresh with an active poll", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let requestCalls = 0;
+    let release: (() => void) | undefined;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.endsWith("/auth/login")) return jsonResponse({});
+      if (path.endsWith("/device-enrollment-requests")) {
+        requestCalls += 1;
+        if (requestCalls === 2) return new Promise<Response>((resolve) => { release = () => resolve(jsonResponse([])); });
+        return jsonResponse([]);
+      }
+      if (path.endsWith("/device-authorizations")) return jsonResponse([]);
+      throw new Error(`Unexpected path: ${path}`);
+    });
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Ingresar supervisor" }));
+    await waitFor(() => expect(requestCalls).toBe(1));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    await waitFor(() => expect(requestCalls).toBe(2));
+    expect(screen.getByRole("button", { name: "Actualizando…" })).toBeDisabled();
+    expect(requestCalls).toBe(2);
+    release?.();
+    await act(async () => { await Promise.resolve(); });
+  });
+
+  it("keeps independent counters for pending, approved, closed, active and revoked records", async () => {
+    const expired = { ...enrollmentResponse("11111111-1111-4111-8111-111111111111", "Expirado"), ExpiresAt: "2020-01-01T00:00:00Z" };
+    const rejected = { ...enrollmentResponse("22222222-2222-4222-8222-222222222222", "Rechazado"), Status: "REJECTED" };
+    const approved = { ...enrollmentResponse("33333333-3333-4333-8333-333333333333", "Aprobado"), Status: "APPROVED", ApprovedAt: "2099-01-01T00:05:00Z" };
+    const active = { ID: authorizationID, UserAccountID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", Identifier: "driver@example.test", LegalName: "Activo", CompanyID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", CompanyOperationID: null, InstallationID: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", KeyAlgorithm: "ECDSA_P256_SHA256", Status: "ACTIVE", RequestedAt: "2099-01-01T00:00:00Z", ApprovedAt: "2099-01-01T00:05:00Z", ExpiresAt: null };
+    const revoked = { ...active, ID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", Status: "REVOKED", LegalName: "Revocado" };
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse({})).mockResolvedValueOnce(jsonResponse([enrollmentResponse(requestID, "Pendiente"), approved, expired, rejected])).mockResolvedValueOnce(jsonResponse([active, revoked]));
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Ingresar supervisor" }));
+    expect(await screen.findByText("Aprobadas — esperando passkey")).toBeInTheDocument();
+    expect(screen.getByText("Pendientes").parentElement).toHaveTextContent("1");
+    expect(screen.getByText("Aprobadas esperando passkey").parentElement).toHaveTextContent("1");
+    expect(screen.getByText("Registrados activos").parentElement).toHaveTextContent("1");
+    expect(screen.getByText("Historial revocado").parentElement).toHaveTextContent("1");
+    expect(screen.getAllByText("Expirada").length).toBeGreaterThan(0);
   });
 
   it("polls every five seconds, updates counters, and announces each new request once", async () => {

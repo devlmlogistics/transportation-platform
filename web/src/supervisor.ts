@@ -9,6 +9,7 @@ export type DeviceEnrollmentRequestView = {
   installation_id: string;
   status: string;
   requested_at: string;
+  approved_at: string | null;
   expires_at: string;
 };
 
@@ -69,6 +70,7 @@ const normalizeDeviceEnrollmentRequest = (value: unknown): DeviceEnrollmentReque
     installation_id: stringField(value, "installation_id", "InstallationID"),
     status: stringField(value, "status", "Status"),
     requested_at: stringField(value, "requested_at", "RequestedAt"),
+    approved_at: nullableStringField(value, "approved_at", "ApprovedAt"),
     expires_at: stringField(value, "expires_at", "ExpiresAt"),
   };
 };
@@ -127,11 +129,11 @@ export async function loginSupervisor(identifier: string, password: string): Pro
   });
 }
 
-export const listSupervisorDeviceRequests = async (): Promise<DeviceEnrollmentRequestView[]> =>
-  (await request<unknown[]>("/api/v1/auth/webauthn/device-enrollment-requests")).map(normalizeDeviceEnrollmentRequest);
+export const listSupervisorDeviceRequests = async (signal?: AbortSignal): Promise<DeviceEnrollmentRequestView[]> =>
+  (await request<unknown[]>("/api/v1/auth/webauthn/device-enrollment-requests", { signal })).map(normalizeDeviceEnrollmentRequest);
 
-export const listSupervisorDeviceAuthorizations = async (): Promise<DeviceAuthorizationView[]> =>
-  (await request<unknown[]>("/api/v1/auth/webauthn/device-authorizations")).map(normalizeDeviceAuthorization);
+export const listSupervisorDeviceAuthorizations = async (signal?: AbortSignal): Promise<DeviceAuthorizationView[]> =>
+  (await request<unknown[]>("/api/v1/auth/webauthn/device-authorizations", { signal })).map(normalizeDeviceAuthorization);
 
 export const approveSupervisorDeviceRequest = async (requestID: string, reason: string): Promise<unknown> => {
   const validRequestID = requireUUID(requestID, "request");

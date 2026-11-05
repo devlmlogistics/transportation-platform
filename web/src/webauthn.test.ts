@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  associateDriverInstallationIdentifier,
+  clearDriverInstallationIdentifier,
   createDriverInstallation,
   driverLoginErrorMessage,
   loadDriverInstallation,
@@ -171,10 +173,11 @@ describe("driver WebAuthn browser boundary", () => {
       ExpiresAt: "2026-11-04T20:01:23Z",
     }));
 
-    await expect(requestDriverActivation("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", undefined, installation)).resolves.toMatchObject({
+    await expect(requestDriverActivation("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", undefined, installation, " Driver@Example.Test ")).resolves.toMatchObject({
       id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       correlationCode: "REQ-DEMO",
       status: "PENDING",
+      identifier: "driver@example.test",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
@@ -276,6 +279,11 @@ describe("driver WebAuthn browser boundary", () => {
     const recovered = await loadDriverInstallation(created.id);
     expect(recovered?.id).toBe(created.id);
     expect(recovered?.privateKey).toBe(created.privateKey);
+    const associated = await associateDriverInstallationIdentifier(created.id, " Driver@Example.Test ");
+    expect(associated.identifier).toBe("driver@example.test");
+    expect((await loadDriverInstallation(created.id))?.identifier).toBe("driver@example.test");
+    const cleared = await clearDriverInstallationIdentifier(created.id);
+    expect(cleared.identifier).toBeUndefined();
     expect([...values.values()][0]).not.toHaveProperty("token");
   });
 });

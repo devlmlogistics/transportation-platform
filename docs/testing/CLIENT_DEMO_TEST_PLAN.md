@@ -6,12 +6,12 @@ Clasificación: [D] procedimiento de validación para un entorno aislado. Los da
 
 - [ ] `docker compose ... config --quiet` valida `compose.demo.yaml` usando el archivo privado `.env.demo`.
 - [ ] `bash ./scripts/demo/test-e2e.sh` crea un proyecto y volumen temporales sin puertos fijos.
-- [ ] El E2E confirma Goose 18, bootstrap completado, fixture y `/healthz`.
+- [ ] El E2E confirma Goose 20, bootstrap completado, fixture y `/healthz`.
 - [ ] Un supervisor con sesión administrativa sin contexto activo ve solicitudes de su operación; una membresía del conductor modificada no oculta la solicitud.
 - [ ] La imagen de aplicación se construye para `linux/arm64`.
 - [ ] `db` está saludable y no tiene `ports` publicados.
 - [ ] `scripts/demo/bootstrap-roles.sh` confirma los roles sin imprimir secretos.
-- [ ] Goose aplica UP hasta la versión 18; nunca ejecutar DOWN en la demo del cliente.
+- [ ] Goose aplica UP hasta la versión 20; nunca ejecutar DOWN en la demo del cliente.
 - [ ] El fixture crea exactamente una empresa, una operación, un supervisor y dos conductores.
 - [ ] Solicitudes vencidas/consumidas no aparecen; Empresa B y usuarios sin permiso permanecen aislados.
 - [ ] `ADMIN_HTTP_ENABLED=false` y `/api/v1/admin/` permanece cerrado.
@@ -32,6 +32,9 @@ Clasificación: [D] procedimiento de validación para un entorno aislado. Los da
 - [ ] Ocultar y volver a mostrar la pestaña pausa y reanuda las consultas; desmontar la vista limpia el temporizador.
 - [ ] Una solicitud DRIVER `PENDING` se consulta cada 5 segundos sólo con la pestaña visible y ofrece `Consultar estado`.
 - [ ] `APPROVED` habilita `Registrar passkey` sin iniciar la ceremonia automáticamente; el polling se detiene.
+- [ ] La consola del supervisor mantiene visibles las solicitudes `APPROVED` con fecha de aprobación y muestra `Aprobado — esperando passkey` hasta que el request pasa a `CONSUMED` y aparece la autorización.
+- [ ] Tras un registro o login móvil validado, la instalación recuperada conserva sólo el identificador normalizado del conductor; no conserva tokens ni contraseñas.
+- [ ] Una instalación antigua sin identificador permite fallback manual una vez y sólo guarda la asociación después de una autenticación exitosa.
 - [ ] `EXPIRED`, `REJECTED`, `CONSUMED` y una autorización `REVOKED` conservan la semántica del backend y no se convierten en aprobación.
 - [ ] La referencia de activación se recupera desde IndexedDB al reabrir la aplicación y conserva la asociación con la instalación.
 - [ ] HTTP 401/403/404 y errores de red muestran mensajes seguros; ninguno convierte una falla en aprobación.
