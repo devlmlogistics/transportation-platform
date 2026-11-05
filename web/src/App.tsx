@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   driverLoginErrorMessage,
+  associateDriverInstallationIdentifier,
   clearDriverActivationRequest,
+  clearDriverInstallationIdentifier,
   getOrCreateDriverInstallation,
   loadDriverActivationRequest,
   loadDriverInstallation,
@@ -50,6 +52,8 @@ const statusLabel = (status: string): string => {
     case "REVOKED": return "Revocado";
     case "PENDING": return "Pendiente";
     case "APPROVED": return "Aprobado";
+    case "EXPIRED": return "Vencido";
+    case "REJECTED": return "Rechazado";
     default: return status || "Sin estado";
   }
 };
@@ -134,6 +138,9 @@ export default function App() {
   const selectedCompany = useMemo(() => findDemoCompany(companyID), [companyID]);
   const activeAuthorizations = authorizations.filter((item) => item.status.toUpperCase() === "ACTIVE");
   const revokedAuthorizations = authorizations.filter((item) => item.status.toUpperCase() === "REVOKED");
+  const pendingRequests = requests.filter((item) => item.status.toUpperCase() === "PENDING");
+  const approvedRequests = requests.filter((item) => item.status.toUpperCase() === "APPROVED");
+  const closedRequests = requests.filter((item) => ["EXPIRED", "REJECTED"].includes(item.status.toUpperCase()));
 
   useEffect(() => {
     let mounted = true;
@@ -141,10 +148,12 @@ export default function App() {
       if (!mounted) return;
       if (stored) {
         setInstallation(stored);
+        if (stored.identifier) setIdentifier(stored.identifier);
         setInstallationState("ready");
         void loadDriverActivationRequest(stored.id).then((savedRequest) => {
           if (!mounted || !savedRequest) return;
           setActivationRequest(savedRequest);
+           if (!stored.identifier && savedRequest.identifier) setIdentifier(savedRequest.identifier);
           setRegistrationState(registrationStateFor(savedRequest.status));
           setStatus("Instalación y solicitud recuperadas de forma segura.");
         }).catch(() => {
@@ -389,6 +398,24 @@ export default function App() {
     }
   };
 
+  const changeDriverIdentity = async () => {
+    if (!installation || !window.confirm("¿Confirmas cambiar el conductor asociado a esta instalación? Deberás iniciar una nueva activación; la clave local no se exportará.")) return;
+    setDriverBusy("prepare");
+    try {
+      const cleared = await clearDriverInstallationIdentifier(installation.id);
+      await clearDriverActivationRequest(installation.id);
+      setInstallation(cleared);
+      setActivationRequest(undefined);
+      setRegistrationState("idle");
+      setIdentifier("");
+      setStatus("Identidad local eliminada. Prepara una nueva activación con el conductor autorizado.");
+    } catch {
+      setStatus("No se pudo cambiar la identidad local de esta instalación.");
+    } finally {
+      setDriverBusy(null);
+    }
+  };
+
   const activate = async () => {
     if (!identifier.trim() || !password || !installation || !companyID) {
       setStatus("Completa tu identificación, contraseña, empresa y prepara la instalación.");
@@ -397,7 +424,7 @@ export default function App() {
     setDriverBusy("activate");
     try {
       await loginDriverWithPassword(identifier, password);
-      const request = await requestDriverActivation(companyID, operationID || undefined, installation);
+       const request = await requestDriverActivation(companyID, operationID || undefined, installation, identifier);
       setActivationRequest(request);
       setRegistrationState("pending");
       setPassword("");
@@ -433,9 +460,19 @@ export default function App() {
           setStatus("Solicitud aprobada. Confirma ahora la biometría o el PIN.");
         }
       });
+      const candidateIdentifier = activationRequest.identifier ?? identifier.trim().toLowerCase();
+      if (candidateIdentifier && !installation.identifier) {
+        try {
+          const associated = await associateDriverInstallationIdentifier(installation.id, candidateIdentifier);
+          setInstallation(associated);
+          setIdentifier(candidateIdentifier);
+        } catch {
+          setStatus("Passkey registrada. No se pudo guardar la identidad local; usa tu identificador una vez para el próximo ingreso.");
+        }
+      }
       void clearDriverActivationRequest(installation.id).catch(() => undefined);
       setRegistrationState("registered");
-      setStatus("Passkey registrada y dispositivo autorizado. Ya puedes ingresar con passkey.");
+      if (!candidateIdentifier || installation.identifier) setStatus("Passkey registrada y dispositivo autorizado. Ya puedes ingresar con passkey.");
     } catch (error) {
       if (Date.parse(activationRequest.expiresAt) <= Date.now()) {
         setRegistrationState("expired");
@@ -459,7 +496,22 @@ export default function App() {
     }
     setDriverBusy("login");
     try {
-      await loginDriverWithPasskey(identifier, installation);
+      const effectiveIdentifier = installation.identifier ?? identifier.trim().toLowerCase();
+      if (!effectiveIdentifier) {
+        setStatus("Esta instalación no tiene una identidad local. Escribe tu identificador para el primer ingreso.");
+        return;
+      }
+      await loginDriverWithPasskey(effectiveIdentifier, installation);
+      if (!installation.identifier) {
+        try {
+          const associated = await associateDriverInstallationIdentifier(installation.id, effectiveIdentifier);
+          setInstallation(associated);
+          setIdentifier(effectiveIdentifier);
+        } catch {
+          setStatus("Acceso concedido. No se pudo guardar la identidad local; vuelve a usar tu identificador la próxima vez.");
+          return;
+        }
+      }
       setStatus("Acceso concedido. La passkey y la prueba de posesión validaron esta instalación.");
     } catch (error) {
       setStatus(driverLoginErrorMessage(error));
@@ -489,7 +541,8 @@ export default function App() {
         <div className="mt-6"><StepList registrationState={registrationState} installationState={installationState} /></div>
         <div className="mt-7 grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
           <div className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2"><label className="text-sm font-semibold text-slate-700">Identificación del conductor<input className="mt-2 w-full rounded-xl border border-slate-300 bg-white p-3.5 outline-none transition focus:border-teal-600 focus:ring-4 focus:ring-teal-100" value={identifier} onChange={(event) => setIdentifier(event.target.value)} autoComplete="username" placeholder="Tu usuario de demo" /></label><label className="text-sm font-semibold text-slate-700">Contraseña de activación<input className="mt-2 w-full rounded-xl border border-slate-300 bg-white p-3.5 outline-none transition focus:border-teal-600 focus:ring-4 focus:ring-teal-100" value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" placeholder="Sólo para la activación inicial" /></label></div>
+            <div className="grid gap-4 sm:grid-cols-2"><label className="text-sm font-semibold text-slate-700">Identificación del conductor<input className="mt-2 w-full rounded-xl border border-slate-300 bg-white p-3.5 outline-none transition focus:border-teal-600 focus:ring-4 focus:ring-teal-100 disabled:bg-slate-100" value={identifier} onChange={(event) => setIdentifier(event.target.value)} autoComplete="username" placeholder="Tu usuario de demo" disabled={Boolean(installation?.identifier)} /></label><label className="text-sm font-semibold text-slate-700">Contraseña de activación<input className="mt-2 w-full rounded-xl border border-slate-300 bg-white p-3.5 outline-none transition focus:border-teal-600 focus:ring-4 focus:ring-teal-100" value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" placeholder="Sólo para la activación inicial" /></label></div>
+            {installation?.identifier ? <div className="rounded-xl border border-teal-200 bg-teal-50 p-3 text-sm text-teal-900"><p>Conductor asociado a esta instalación: <strong>{installation.identifier}</strong></p><button className="mt-2 rounded-lg border border-teal-300 bg-white px-3 py-2 text-xs font-bold text-teal-900 hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-50" disabled={driverBusy !== null} onClick={() => void changeDriverIdentity()}>Cambiar conductor</button></div> : <p className="text-xs leading-5 text-slate-500">La identidad se guarda localmente sólo después de un enrolamiento o ingreso validado. Las instalaciones antiguas pueden usar este campo una vez como fallback.</p>}
             <div className="grid gap-4 sm:grid-cols-2"><label className="text-sm font-semibold text-slate-700">Empresa<select className="mt-2 w-full rounded-xl border border-slate-300 bg-white p-3.5 outline-none transition focus:border-teal-600 focus:ring-4 focus:ring-teal-100" value={companyID} onChange={(event) => { setCompanyID(event.target.value); setOperationID(""); }}><option value="">Selecciona una empresa</option>{demoCompanies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label><label className="text-sm font-semibold text-slate-700">Operación <span className="font-normal text-slate-500">(opcional)</span><select className="mt-2 w-full rounded-xl border border-slate-300 bg-white p-3.5 outline-none transition focus:border-teal-600 focus:ring-4 focus:ring-teal-100" value={operationID} onChange={(event) => setOperationID(event.target.value)} disabled={!selectedCompany}><option value="">Acceso por empresa</option>{selectedCompany?.operations.map((operation) => <option key={operation.id} value={operation.id}>{operation.name}</option>)}</select></label></div>
             <p className="text-xs leading-5 text-slate-500">La demo muestra sólo datos sintéticos autorizados. La operación puede dejarse vacía para una solicitud de alcance empresarial.</p>
           </div>
@@ -507,9 +560,27 @@ export default function App() {
         <p className="mt-4 rounded-2xl bg-slate-100 p-4 text-sm text-slate-700" aria-live="polite">{supervisorStatus}</p>
         {supervisorNotice && <div className="mt-3 rounded-2xl border border-teal-200 bg-teal-50 p-4 text-sm font-semibold text-teal-900" role="status" aria-live="polite">{supervisorNotice}</div>}
         {supervisorPollingBlocked && supervisorLoggedIn && <p className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">La actualización automática está detenida por permisos. Puedes intentar «Actualizar ahora» después de corregir el acceso.</p>}
-        {supervisorLoggedIn && <div className="mt-6"><div className="grid gap-3 sm:grid-cols-3"><div className="rounded-2xl border border-amber-200 bg-amber-50 p-4"><p className="text-xs font-black uppercase tracking-wide text-amber-800">Pendientes</p><p className="mt-1 text-3xl font-black text-amber-950">{requests.length}</p></div><div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4"><p className="text-xs font-black uppercase tracking-wide text-emerald-800">Registrados activos</p><p className="mt-1 text-3xl font-black text-emerald-950">{activeAuthorizations.length}</p></div><div className="rounded-2xl border border-slate-200 bg-slate-100 p-4"><p className="text-xs font-black uppercase tracking-wide text-slate-600">Historial revocado</p><p className="mt-1 text-3xl font-black text-slate-900">{revokedAuthorizations.length}</p></div></div>
+        {supervisorLoggedIn && <div className="mt-6">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4"><p className="text-xs font-black uppercase tracking-wide text-amber-800">Pendientes</p><p className="mt-1 text-3xl font-black text-amber-950">{pendingRequests.length}</p></div>
+            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4"><p className="text-xs font-black uppercase tracking-wide text-emerald-800">Registrados activos</p><p className="mt-1 text-3xl font-black text-emerald-950">{activeAuthorizations.length}</p></div>
+            <div className="rounded-2xl border border-slate-200 bg-slate-100 p-4"><p className="text-xs font-black uppercase tracking-wide text-slate-600">Historial revocado</p><p className="mt-1 text-3xl font-black text-slate-900">{revokedAuthorizations.length}</p></div>
+          </div>
           <div className="mt-6 grid gap-6 lg:grid-cols-2">
-            <div><h3 className="text-lg font-black text-slate-950">Solicitudes pendientes</h3><div className="mt-3 space-y-3">{requests.length === 0 && <p className="rounded-2xl border border-dashed border-slate-300 p-5 text-sm text-slate-500">No hay solicitudes visibles en tu alcance.</p>}{requests.map((item) => <article className="rounded-2xl border border-amber-200 bg-amber-50 p-4" key={item.request_id}><div className="flex items-start justify-between gap-3"><div><p className="font-bold text-slate-950">{item.legal_name || "Conductor de demo"}</p><p className="text-sm text-slate-600">{item.identifier || "Identidad verificada"}</p></div><span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-amber-800">{statusLabel(item.status)}</span></div><dl className="mt-4 grid gap-2 text-sm text-slate-700 sm:grid-cols-2"><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Empresa</dt><dd>{companyName(item.company_id)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Operación</dt><dd>{operationName(item.company_operation_id)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Solicitada</dt><dd>{formatDate(item.requested_at)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Expira</dt><dd>{formatDate(item.expires_at)}</dd></div></dl><button className="mt-4 w-full rounded-xl bg-amber-700 px-3 py-3 text-sm font-bold text-white hover:bg-amber-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={!item.request_id || supervisorAction !== null} onClick={() => void approveRequest(item.request_id)}>{supervisorAction === `approve:${item.request_id}` ? "Aprobando…" : "Aprobar instalación"}</button><details className="mt-3 text-xs text-slate-600"><summary className="cursor-pointer font-bold">Detalles técnicos</summary><dl className="mt-2 grid gap-1"><div><dt className="font-semibold">Solicitud</dt><dd className="break-all">{item.request_id}</dd></div><div><dt className="font-semibold">Código</dt><dd>{item.correlation_code || "—"}</dd></div><div><dt className="font-semibold">Instalación</dt><dd className="break-all">{item.installation_id}</dd></div><div><dt className="font-semibold">Empresa / operación</dt><dd className="break-all">{item.company_id} / {item.company_operation_id ?? "NULL"}</dd></div></dl></details></article>)}</div></div>
+            <div>
+              <h3 className="text-lg font-black text-slate-950">Solicitudes pendientes</h3>
+              <div className="mt-3 space-y-3">
+                {pendingRequests.length === 0 && <p className="rounded-2xl border border-dashed border-slate-300 p-5 text-sm text-slate-500">No hay solicitudes pendientes visibles en tu alcance.</p>}
+                {pendingRequests.map((item) => <article className="rounded-2xl border border-amber-200 bg-amber-50 p-4" key={item.request_id}>
+                  <div className="flex items-start justify-between gap-3"><div><p className="font-bold text-slate-950">{item.legal_name || "Conductor de demo"}</p><p className="text-sm text-slate-600">{item.identifier || "Identidad verificada"}</p></div><span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-amber-800">{statusLabel(item.status)}</span></div>
+                  <dl className="mt-4 grid gap-2 text-sm text-slate-700 sm:grid-cols-2"><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Empresa</dt><dd>{companyName(item.company_id)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Operación</dt><dd>{operationName(item.company_operation_id)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Solicitada</dt><dd>{formatDate(item.requested_at)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Expira</dt><dd>{formatDate(item.expires_at)}</dd></div></dl>
+                  <button className="mt-4 w-full rounded-xl bg-amber-700 px-3 py-3 text-sm font-bold text-white hover:bg-amber-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={!item.request_id || supervisorAction !== null} onClick={() => void approveRequest(item.request_id)}>{supervisorAction === `approve:${item.request_id}` ? "Aprobando…" : "Aprobar instalación"}</button>
+                  <details className="mt-3 text-xs text-slate-600"><summary className="cursor-pointer font-bold">Detalles técnicos</summary><dl className="mt-2 grid gap-1"><div><dt className="font-semibold">Solicitud</dt><dd className="break-all">{item.request_id}</dd></div><div><dt className="font-semibold">Código</dt><dd>{item.correlation_code || "—"}</dd></div><div><dt className="font-semibold">Instalación</dt><dd className="break-all">{item.installation_id}</dd></div><div><dt className="font-semibold">Empresa / operación</dt><dd className="break-all">{item.company_id} / {item.company_operation_id ?? "NULL"}</dd></div></dl></details>
+                </article>)}
+              </div>
+              {approvedRequests.length > 0 && <div className="mt-8"><h3 className="text-lg font-black text-slate-950">Aprobadas — esperando passkey</h3><div className="mt-3 space-y-3">{approvedRequests.map((item) => <article className="rounded-2xl border border-sky-200 bg-sky-50 p-4" key={item.request_id}><div className="flex items-start justify-between gap-3"><div><p className="font-bold text-slate-950">{item.legal_name || "Conductor de demo"}</p><p className="text-sm text-slate-600">{item.identifier || "Identidad verificada"}</p></div><span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-sky-800">Aprobado — esperando passkey</span></div><dl className="mt-4 grid gap-2 text-sm text-slate-700 sm:grid-cols-2"><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Empresa</dt><dd>{companyName(item.company_id)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Operación</dt><dd>{operationName(item.company_operation_id)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Aprobada</dt><dd>{formatDate(item.approved_at)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Expira</dt><dd>{formatDate(item.expires_at)}</dd></div></dl><details className="mt-3 text-xs text-slate-600"><summary className="cursor-pointer font-bold">Detalles técnicos</summary><dl className="mt-2 grid gap-1"><div><dt className="font-semibold">Solicitud</dt><dd className="break-all">{item.request_id}</dd></div><div><dt className="font-semibold">Instalación</dt><dd className="break-all">{item.installation_id}</dd></div></dl></details></article>)}</div></div>}
+              {closedRequests.length > 0 && <div className="mt-8"><h3 className="text-lg font-black text-slate-950">Solicitudes cerradas</h3><div className="mt-3 space-y-3">{closedRequests.map((item) => <article className="rounded-2xl border border-slate-200 bg-slate-50 p-4" key={item.request_id}><div className="flex items-start justify-between gap-3"><div><p className="font-bold text-slate-950">{item.legal_name || "Conductor de demo"}</p><p className="text-sm text-slate-600">{item.identifier || "Identidad verificada"}</p></div><span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-slate-700">{statusLabel(item.status)}</span></div><p className="mt-3 text-sm text-slate-600">Esta solicitud ya no puede aprobarse.</p></article>)}</div></div>}
+            </div>
             <div><h3 className="text-lg font-black text-slate-950">Dispositivos registrados</h3><div className="mt-3 space-y-3">{authorizations.length === 0 && <p className="rounded-2xl border border-dashed border-slate-300 p-5 text-sm text-slate-500">Aún no hay dispositivos registrados.</p>}{authorizations.map((item) => <article className={["rounded-2xl", "border", "p-4", item.status.toUpperCase() === "REVOKED" ? "border-slate-300 bg-slate-100" : "border-emerald-200 bg-emerald-50"].join(" ")} key={item.authorization_id}><div className="flex items-start justify-between gap-3"><div><p className="font-bold text-slate-950">{item.legal_name || "Conductor de demo"}</p><p className="text-sm text-slate-600">{item.identifier || "Identidad verificada"}</p></div><span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-slate-700">{statusLabel(item.status)}</span></div><dl className="mt-4 grid gap-2 text-sm text-slate-700 sm:grid-cols-2"><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Empresa</dt><dd>{companyName(item.company_id)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Operación</dt><dd>{operationName(item.company_operation_id)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Autorizado</dt><dd>{formatDate(item.approved_at)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Revocado</dt><dd>{formatDate(item.revoked_at)}</dd></div></dl>{item.status.toUpperCase() === "ACTIVE" && <button className="mt-4 w-full rounded-xl bg-rose-700 px-3 py-3 text-sm font-bold text-white hover:bg-rose-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={!item.authorization_id || supervisorAction !== null} onClick={() => void revokeAuthorization(item.authorization_id)}>{supervisorAction === `revoke:${item.authorization_id}` ? "Revocando…" : "Revocar dispositivo"}</button>}<details className="mt-3 text-xs text-slate-600"><summary className="cursor-pointer font-bold">Detalles técnicos</summary><dl className="mt-2 grid gap-1"><div><dt className="font-semibold">Autorización</dt><dd className="break-all">{item.authorization_id}</dd></div><div><dt className="font-semibold">Instalación</dt><dd className="break-all">{item.installation_id}</dd></div><div><dt className="font-semibold">Empresa / operación</dt><dd className="break-all">{item.company_id} / {item.company_operation_id ?? "NULL"}</dd></div><div><dt className="font-semibold">Algoritmo</dt><dd>{item.key_algorithm || "—"}</dd></div></dl></details></article>)}</div></div>
           </div>
         </div>}

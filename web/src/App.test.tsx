@@ -212,6 +212,28 @@ describe("platform shell", () => {
     expect(screen.queryByRole("button", { name: "Revocar dispositivo" })).not.toBeInTheDocument();
   });
 
+  it("keeps approved requests visible until the driver registers a passkey", async () => {
+    document.cookie = "tp_csrf=demo-csrf";
+    const approvedID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({}))
+      .mockResolvedValueOnce(jsonResponse([
+        enrollmentResponse(requestID, "Conductor pendiente"),
+        { ...enrollmentResponse(approvedID, "Conductor aprobado"), Status: "APPROVED", ApprovedAt: "2026-01-01T00:05:00Z" },
+      ]))
+      .mockResolvedValueOnce(jsonResponse([]));
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Ingresar supervisor" }));
+
+    expect(await screen.findByText("Aprobadas — esperando passkey")).toBeInTheDocument();
+    expect(screen.getByText("Conductor aprobado")).toBeInTheDocument();
+    expect(screen.getByText("Aprobado — esperando passkey")).toBeInTheDocument();
+    expect(screen.getByText("Pendientes").parentElement).toHaveTextContent("1");
+    expect(screen.getAllByRole("button", { name: "Aprobar instalación" })).toHaveLength(1);
+    expect(screen.getByText("Aprobada")).toBeInTheDocument();
+  });
+
   it("polls every five seconds, updates counters, and announces each new request once", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const firstRequestID = "11111111-1111-4111-8111-111111111111";

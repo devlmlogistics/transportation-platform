@@ -47,6 +47,7 @@ describe("supervisor device demo API", () => {
         InstallationID: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
         Status: "PENDING",
         RequestedAt: "2026-01-01T00:00:00Z",
+        ApprovedAt: null,
         ExpiresAt: "2026-01-01T01:00:00Z",
       }]))
       .mockResolvedValueOnce(jsonResponse([{
@@ -68,6 +69,7 @@ describe("supervisor device demo API", () => {
     const authorizations = await listSupervisorDeviceAuthorizations();
 
     expect(requests[0]).toMatchObject({ request_id: requestID, legal_name: "Conductor Demo", correlation_code: "REQ-DEMO" });
+    expect(requests[0]?.approved_at).toBeNull();
     expect(authorizations[0]).toMatchObject({ authorization_id: authorizationID, company_operation_id: "ffffffff-ffff-4fff-8fff-ffffffffffff" });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });

@@ -9,6 +9,7 @@ export type DeviceEnrollmentRequestView = {
   installation_id: string;
   status: string;
   requested_at: string;
+  approved_at: string | null;
   expires_at: string;
 };
 
@@ -69,6 +70,7 @@ const normalizeDeviceEnrollmentRequest = (value: unknown): DeviceEnrollmentReque
     installation_id: stringField(value, "installation_id", "InstallationID"),
     status: stringField(value, "status", "Status"),
     requested_at: stringField(value, "requested_at", "RequestedAt"),
+    approved_at: nullableStringField(value, "approved_at", "ApprovedAt"),
     expires_at: stringField(value, "expires_at", "ExpiresAt"),
   };
 };

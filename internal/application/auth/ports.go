@@ -277,6 +277,7 @@ type DeviceEnrollmentRequestView struct {
 	InstallationID     uuid.UUID
 	Status             string
 	RequestedAt        time.Time
+	ApprovedAt         *time.Time
 	ExpiresAt          time.Time
 }
 
