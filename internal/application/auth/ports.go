@@ -464,6 +464,91 @@ type Invitation struct {
 	ExpiresAt time.Time
 }
 
+type DriverEnrollmentInvitation struct {
+	ID                 uuid.UUID
+	UserAccountID      uuid.UUID
+	PersonID           uuid.UUID
+	Identifier         string
+	LegalName          string
+	CompanyID          uuid.UUID
+	CompanyOperationID *uuid.UUID
+	Status             string
+	CreatedAt          time.Time
+	ExpiresAt          time.Time
+	ConsumedAt         *time.Time
+	RevokedAt          *time.Time
+}
+
+type DriverEnrollmentCandidate struct {
+	UserAccountID uuid.UUID
+	PersonID      uuid.UUID
+	Identifier    string
+	LegalName     string
+}
+
+type DriverEnrollmentInvitationPreview struct {
+	ID                 uuid.UUID
+	UserAccountID      uuid.UUID
+	PersonID           uuid.UUID
+	Identifier         string
+	LegalName          string
+	CompanyID          uuid.UUID
+	CompanyName        string
+	CompanyOperationID *uuid.UUID
+	OperationName      *string
+	ExpiresAt          time.Time
+}
+
+type DriverEnrollmentInvitationInput struct {
+	PersonID           uuid.UUID
+	CompanyID          uuid.UUID
+	CompanyOperationID *uuid.UUID
+	ExpiresSeconds     int
+}
+
+type DriverEnrollmentInvitationCreateRequest struct {
+	TokenHash        []byte
+	ConfirmationHash []byte
+	InvitationID     uuid.UUID
+	AuditID          uuid.UUID
+	Input            DriverEnrollmentInvitationInput
+}
+
+type DriverEnrollmentConsumeInput struct {
+	Token                 []byte
+	ConfirmationCode      string
+	InstallationID        uuid.UUID
+	InstallationPublicKey []byte
+	KeyAlgorithm          string
+	UserAgent             string
+	RemoteAddr            string
+}
+
+type DriverEnrollmentConsumeRequest struct {
+	TokenHash             []byte
+	ConfirmationHash      []byte
+	SessionID             uuid.UUID
+	SessionTokenHash      []byte
+	CSRFSecretHash        []byte
+	UserAgentHash         []byte
+	IPPrefix              string
+	RequestID             uuid.UUID
+	CorrelationCode       string
+	InstallationID        uuid.UUID
+	InstallationPublicKey []byte
+	KeyAlgorithm          string
+	BindingHash           []byte
+	InvitationAuditID     uuid.UUID
+	RequestAuditID        uuid.UUID
+	SessionAuditID        uuid.UUID
+	LoginAuditID          uuid.UUID
+}
+
+type DriverEnrollmentActivation struct {
+	LoginResult
+	Request DeviceEnrollmentRequest
+}
+
 type OnlineAuthStore interface {
 	ResolveLoginCredential(context.Context, string) (LoginCredential, error)
 	ConsumeRateLimit(context.Context, []byte, string, int, int) (bool, error)
@@ -479,6 +564,15 @@ type OnlineAuthStore interface {
 	PrepareBootstrapRequest(context.Context, uuid.UUID, []byte, []byte, string, string, string, json.RawMessage, int) error
 	CompleteBootstrapRequest(context.Context, []byte, []byte, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID) (uuid.UUID, uuid.UUID, error)
 	RecordLoginFailure(context.Context, uuid.UUID, string) error
+}
+
+type DriverEnrollmentInvitationStore interface {
+	CreateDriverEnrollmentInvitation(context.Context, []byte, DriverEnrollmentInvitationCreateRequest) (DriverEnrollmentInvitation, error)
+	ListDriverEnrollmentInvitations(context.Context, []byte) ([]DriverEnrollmentInvitation, error)
+	ListDriverEnrollmentCandidates(context.Context, []byte, uuid.UUID, *uuid.UUID) ([]DriverEnrollmentCandidate, error)
+	RevokeDriverEnrollmentInvitation(context.Context, []byte, uuid.UUID, string) error
+	ResolveDriverEnrollmentInvitation(context.Context, []byte) (DriverEnrollmentInvitationPreview, error)
+	ConsumeDriverEnrollmentInvitation(context.Context, DriverEnrollmentConsumeRequest) (DriverEnrollmentActivation, error)
 }
 
 type DriverActivationStore interface {

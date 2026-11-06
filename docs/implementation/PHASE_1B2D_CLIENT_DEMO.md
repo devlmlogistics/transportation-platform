@@ -58,7 +58,7 @@ docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml 
 docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml up -d platform
 ```
 
-Las migraciones de la demo llegan a `000021_device_enrollment_deduplication.sql`; Goose debe quedar en `21`. No ejecutar `down`, `down --volumes`, `DROP`, `TRUNCATE` ni eliminar el volumen `demo-db-data`: las solicitudes de los conductores permanecen en la base y sólo se reemplazan funciones al aplicar Goose UP.
+Las migraciones de la demo llegan a `000022_driver_enrollment_invitations.sql`; Goose debe quedar en `22`. No ejecutar `down`, `down --volumes`, `DROP`, `TRUNCATE` ni eliminar el volumen `demo-db-data`: las solicitudes de los conductores permanecen en la base y sólo se reemplazan funciones al aplicar Goose UP.
 
 Configurar roles y contraseñas sintéticas una sola vez:
 
@@ -77,7 +77,7 @@ docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml 
   run --rm migrate version
 ```
 
-La versión esperada es la última migración de `db/migrations` (`21` en esta rama). El servicio Go no ejecuta migraciones al iniciar. El DSN usa `PHASE_1B2D_MIGRATOR_DSN` y el usuario efectivo es `tp_migrator`.
+La versión esperada es la última migración de `db/migrations` (`22` en esta rama). El servicio Go no ejecuta migraciones al iniciar. El DSN usa `PHASE_1B2D_MIGRATOR_DSN` y el usuario efectivo es `tp_migrator`.
 
 `000017_demo_device_query_visibility.sql` corrige el listado de demo: una solicitud PENDING o una autorización existente se filtra por el scope de empresa/operación y el permiso vigente del supervisor, no por la membresía actual del conductor. La aprobación y la revocación conservan sus validaciones transaccionales de membresía del destinatario. Esto evita que una solicitud desaparezca de la consola antes de que pueda revisarse, sin ampliar el acceso entre empresas.
 
@@ -101,6 +101,18 @@ La consola actualiza automáticamente las dos listas cada cinco segundos mientra
 
 La entrega UX/UI anterior fue exclusivamente frontend. Las correcciones posteriores agregan el contrato de lectura del estado de activación (`000019`), la lectura administrativa de solicitudes aprobadas (`000020`) y la protección transaccional contra solicitudes activas duplicadas (`000021`); no cambian RLS, autenticación ni controles de autorización existentes.
 
+### Invitación remota de conductor por WhatsApp manual
+
+`000022_driver_enrollment_invitations.sql` agrega una frontera separada para el enrolamiento remoto. El supervisor autenticado selecciona un conductor existente y un alcance autorizado, genera una invitación de un solo uso y comparte manualmente el enlace y el código de confirmación por canales separados. No existe integración con la API de WhatsApp y `ADMIN_HTTP_ENABLED` no cambia.
+
+El enlace usa un token aleatorio de 32 bytes; sólo se guarda su hash en PostgreSQL. La interfaz React lo recibe en el fragmento `#driver-invite=...`, lo elimina inmediatamente de la barra de direcciones y no lo persiste en `localStorage` ni IndexedDB. La validación pública devuelve sólo metadatos no secretos. El consumo requiere además el código de confirmación, una instalación ECDSA preparada y una solicitud vinculada al conductor, empresa, operación e invitación derivados del registro bloqueado. El token se consume dentro de la misma transacción y los reintentos o consumos concurrentes fallan de forma genérica.
+
+El consumo crea únicamente una sesión `DRIVER_ACTIVATION` de 15 minutos de inactividad y una hora absoluta. `INVITATION_CODE` es un nivel de autenticación distinto de `PASSWORD` y `WEBAUTHN_STEP_UP`; la resolución conserva la política de activación y no la trata como sesión operacional `DRIVER`. La sesión no recibe autorización de dispositivo hasta que el supervisor aprueba la solicitud y el conductor completa el registro WebAuthn. Las funciones SQL sólo son ejecutables por `tp_auth_runtime`; no se otorga DML directo sobre la tabla de invitaciones a los roles runtime.
+
+Los endpoints preparados son `GET/POST /api/v1/auth/webauthn/driver-invitations`, `GET /candidates`, `POST /{id}/revoke`, y los endpoints públicos `POST /api/v1/driver/invitations/validate` y `/consume`. Las rutas públicas permanecen detrás de la frontera de origen permitida y devuelven errores genéricos. Las rutas administrativas requieren una sesión administrativa vigente; no aceptan UUID de actor ni identidad desde headers. La UI muestra el enlace y el código sólo en la respuesta de creación para que el supervisor los comparta manualmente.
+
+La prueba PostgreSQL efímera cubre candidatos por alcance, conflicto de invitación activa, vista previa, código incorrecto, consumo válido, enlace de solicitud, replay, cruce de tenant, expiración, revocación y dos consumos concurrentes. También verifica que `tp_auth_runtime` no tenga SELECT directo sobre la tabla nueva. La migración 000022 se valida con `up/down/up`; no se aplica a ninguna base persistente en esta entrega.
+
 ### Consulta de estado de activación del conductor
 
 La revisión de la prueba Android confirmó que no existía un endpoint de estado para el conductor: el listado de `device-enrollment-requests` está reservado a la consola de supervisor y `registration/options` crea un challenge WebAuthn, por lo que no se utiliza como polling. La migración `000019_driver_activation_status.sql` agrega sólo la lectura `GET /api/v1/driver/auth/activation/status`. La consulta exige una sesión vigente `DRIVER_ACTIVATION` y vincula dentro de una función `SECURITY DEFINER` el `device_request_id`, el `installation_id` y la cuenta derivada de la sesión; una discordancia devuelve una respuesta genérica sin enumerar solicitudes. No concede acceso directo a tablas ni cambia RLS, WebAuthn, ECDSA o permisos operativos.
@@ -115,7 +127,7 @@ Al reabrir la PWA, la identidad local se carga junto con la instalación existen
 
 Si la solicitud está pendiente, se informa que debe esperar. Si el endpoint rechaza el registro antes de expirar, la pantalla permite reintentar y recomienda verificar con el supervisor. Si expira, se solicita una nueva activación sin borrar la instalación local. La cancelación del diálogo biométrico/PIN no consume la solicitud. Un registro exitoso cambia el estado a autorizado y el siguiente paso es `Ingresar con passkey`.
 
-La corrección anterior de frontend y helpers WebAuthn no agregó migraciones. Las correcciones de backend agregan `000019_driver_activation_status.sql`, `000020_demo_device_approved_requests.sql` y `000021_device_enrollment_deduplication.sql`; si la instancia Linux está en Goose 18, hay que ejecutar únicamente Goose UP hasta 21 antes de reemplazar `platform`. No ejecutar DOWN ni reiniciar `db`.
+La corrección anterior de frontend y helpers WebAuthn no agregó migraciones. Las correcciones de backend agregan `000019_driver_activation_status.sql`, `000020_demo_device_approved_requests.sql`, `000021_device_enrollment_deduplication.sql` y `000022_driver_enrollment_invitations.sql`; si la instancia Linux está en Goose 18, hay que ejecutar únicamente Goose UP hasta 22 antes de reemplazar `platform`. No ejecutar DOWN ni reiniciar `db`.
 
 ## Fixture sintético
 
@@ -128,7 +140,7 @@ docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml 
 
 La imagen del fixture compila el helper Argon2id y utiliza el cliente `psql` dentro del contenedor. No requiere Go, PowerShell ni un puerto PostgreSQL en el host. La secuencia es idempotente para los identificadores sintéticos. Si falla, no continuar con la demo hasta revisar la salida y verificar la base aislada; no ejecutar el script contra otro proyecto Compose.
 
-Después de aplicar Goose 21, ejecutar de nuevo el fixture para agregar o revalidar los permisos COMPANY sintéticos del supervisor. La validación de empresa, operación, membresías y permisos se ejecuta mientras la sesión es `tp_runtime` con contexto `TENANT`; las credenciales se validan después bajo el contexto propietario interno. Esto evita que `FORCE ROW LEVEL SECURITY` haga aparecer cero permisos durante la comprobación. La carga no elimina solicitudes ni reinicia el volumen; sí vuelve a dejar los registros sintéticos bajo sus valores declarados, por lo que debe ejecutarse sólo sobre este proyecto Compose. Si falla, el `BEGIN`/`COMMIT` revierte toda la carga y el mensaje indica la condición faltante.
+Después de aplicar Goose 22, ejecutar de nuevo el fixture para agregar o revalidar los permisos COMPANY sintéticos del supervisor. La validación de empresa, operación, membresías y permisos se ejecuta mientras la sesión es `tp_runtime` con contexto `TENANT`; las credenciales se validan después bajo el contexto propietario interno. Esto evita que `FORCE ROW LEVEL SECURITY` haga aparecer cero permisos durante la comprobación. La carga no elimina solicitudes ni reinicia el volumen; sí vuelve a dejar los registros sintéticos bajo sus valores declarados, por lo que debe ejecutarse sólo sobre este proyecto Compose. Si falla, el `BEGIN`/`COMMIT` revierte toda la carga y el mensaje indica la condición faltante.
 
 Para validar todo el flujo sin tocar ninguna instalación persistente:
 
@@ -136,7 +148,7 @@ Para validar todo el flujo sin tocar ninguna instalación persistente:
 bash ./scripts/demo/test-e2e.sh
 ```
 
-Este test crea un proyecto Compose y volumen temporales, configura roles, aplica Goose 21, ejecuta bootstrap, carga el fixture, inicia la aplicación, verifica `/healthz` desde el contenedor y comprueba usuarios, empresa y privilegios. Al finalizar elimina únicamente sus recursos con el nombre de proyecto generado.
+Este test crea un proyecto Compose y volumen temporales, configura roles, aplica Goose 22, ejecuta bootstrap, carga el fixture, inicia la aplicación, verifica `/healthz` desde el contenedor y comprueba usuarios, empresa y privilegios. Al finalizar elimina únicamente sus recursos con el nombre de proyecto generado.
 
 En la validación local Windows de esta rama no había Bash/WSL disponible; se ejecutó el mismo flujo Compose por pasos desde PowerShell con nombres de proyecto, volumen y red temporales, y pasó. En Ubuntu ARM64 se debe ejecutar el script Bash anterior como la comprobación canónica.
 

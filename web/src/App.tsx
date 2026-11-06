@@ -29,6 +29,17 @@ import {
   type DeviceAuthorizationView,
   type DeviceEnrollmentRequestView,
 } from "./supervisor";
+import {
+  consumeDriverInvitation,
+  readInvitationTokenFromLocation,
+  validateDriverInvitation,
+  type DriverInvitationPreview,
+} from "./driverInvitation";
+import {
+  createDriverEnrollmentInvitation,
+  listDriverEnrollmentCandidates,
+  type DriverEnrollmentCandidate,
+} from "./supervisor";
 import { demoCompanies, findDemoCompany, findDemoOperation } from "./demoCatalog";
 
 type ModuleCardProps = { name: string; description: string; status: "Disponible" | "Próximamente"; accent: string };
@@ -127,6 +138,15 @@ export default function App() {
   const [requests, setRequests] = useState<DeviceEnrollmentRequestView[]>([]);
   const [authorizations, setAuthorizations] = useState<DeviceAuthorizationView[]>([]);
   const [supervisorAction, setSupervisorAction] = useState<string | null>(null);
+  const [driverInviteToken, setDriverInviteToken] = useState<string | null>(null);
+  const [driverInvitePreview, setDriverInvitePreview] = useState<DriverInvitationPreview | null>(null);
+  const [driverInviteCode, setDriverInviteCode] = useState("");
+  const [driverInviteStatus, setDriverInviteStatus] = useState<string | null>(null);
+  const [driverInviteBusy, setDriverInviteBusy] = useState(false);
+  const [supervisorCandidates, setSupervisorCandidates] = useState<DriverEnrollmentCandidate[]>([]);
+  const [selectedInviteDriverID, setSelectedInviteDriverID] = useState("");
+  const [issuedInviteLink, setIssuedInviteLink] = useState<string | null>(null);
+  const [issuedInviteCode, setIssuedInviteCode] = useState<string | null>(null);
   const supervisorActionRef = useRef<string | null>(null);
   const supervisorPollingBlockedRef = useRef(false);
   const supervisorRefreshRef = useRef<Promise<void> | null>(null);
@@ -180,6 +200,33 @@ export default function App() {
     });
     return () => { mounted = false; };
   }, []);
+
+  useEffect(() => {
+    const token = readInvitationTokenFromLocation();
+    if (!token) return;
+    setDriverInviteToken(token);
+    setDriverInviteStatus("Validando invitación segura…");
+    void validateDriverInvitation(token).then((preview) => {
+      if (!mountedRef.current) return;
+      setDriverInvitePreview(preview);
+      setCompanyID(preview.company_id);
+      if (preview.company_operation_id) setOperationID(preview.company_operation_id);
+      setDriverInviteStatus("Invitación válida. Confirma el código recibido por el supervisor.");
+    }).catch(() => {
+      if (mountedRef.current) setDriverInviteStatus("La invitación no es válida, ya fue usada o venció.");
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!supervisorLoggedIn || !companyID) return;
+    void listDriverEnrollmentCandidates(companyID, operationID || undefined).then((candidates) => {
+      if (!mountedRef.current) return;
+      setSupervisorCandidates(candidates);
+      setSelectedInviteDriverID((current) => current && candidates.some((item) => item.person_id === current) ? current : candidates[0]?.person_id ?? "");
+    }).catch(() => {
+      if (mountedRef.current) setSupervisorCandidates([]);
+    });
+  }, [companyID, operationID, supervisorLoggedIn]);
 
   useEffect(() => {
     const installationID = installation?.id;
@@ -389,6 +436,57 @@ export default function App() {
     }
   };
 
+  const issueDriverInvitation = async () => {
+    if (!selectedInviteDriverID || !companyID) {
+      setSupervisorStatus("Selecciona un conductor y una empresa autorizados.");
+      return;
+    }
+    setSupervisorAction("issue-invitation");
+    try {
+      const issued = await createDriverEnrollmentInvitation({
+        person_id: selectedInviteDriverID,
+        company_id: companyID,
+        ...(operationID ? { company_operation_id: operationID } : {}),
+        expires_seconds: 900,
+      });
+      const link = `${window.location.origin}${window.location.pathname}#driver-invite=${issued.token}`;
+      setIssuedInviteLink(link);
+      setIssuedInviteCode(issued.confirmation_code);
+      setSupervisorStatus("Invitación creada. Comparte el enlace y el código por canales separados.");
+    } catch {
+      setSupervisorStatus("No fue posible crear la invitación; revisa el alcance autorizado o si ya existe una activa.");
+    } finally {
+      updateSupervisorAction(null);
+    }
+  };
+
+  const consumeDriverInvitationRequest = async () => {
+    if (!driverInviteToken || !driverInvitePreview || !driverInviteCode.trim()) {
+      setDriverInviteStatus("Ingresa el código de confirmación entregado por el supervisor.");
+      return;
+    }
+    setDriverInviteBusy(true);
+    try {
+      const currentInstallation = installation ?? await getOrCreateDriverInstallation();
+      if (!installation) {
+        setInstallation(currentInstallation);
+        setInstallationState("ready");
+      }
+      const request = await consumeDriverInvitation(driverInviteToken, driverInviteCode.trim(), currentInstallation);
+      const associated = await associateDriverInstallationIdentifier(currentInstallation.id, driverInvitePreview.identifier);
+      setInstallation(associated);
+      setIdentifier(driverInvitePreview.identifier);
+      setActivationRequest(request);
+      setRegistrationState(registrationStateFor(request.status, null, request.expiresAt));
+      setDriverInviteStatus("Activación iniciada. Espera la aprobación del supervisor para registrar tu passkey.");
+      await persistDriverActivationRequest(request);
+    } catch {
+      setDriverInviteStatus("No se pudo iniciar la activación. El enlace puede haber vencido, sido usado o no corresponder a esta instalación.");
+    } finally {
+      setDriverInviteBusy(false);
+    }
+  };
+
   const approveRequest = async (requestID: string) => {
     if (!window.confirm("¿Confirmas aprobar esta instalación? El conductor podrá registrar su passkey.")) return;
     updateSupervisorAction(`approve:${requestID}`);
@@ -572,6 +670,17 @@ export default function App() {
         </div>
       </header>
 
+      {driverInviteToken && <section className="mt-6 rounded-[2rem] border-2 border-violet-200 bg-violet-50 p-5 shadow-xl sm:p-8" aria-label="Invitación de activación de conductor">
+        <p className="text-xs font-black uppercase tracking-[0.18em] text-violet-700">Enrolamiento remoto</p>
+        <h2 className="mt-2 text-2xl font-black text-slate-950">Invitación para activar tu dispositivo</h2>
+        {driverInvitePreview ? <>
+          <p className="mt-3 text-sm leading-6 text-slate-700">Conductor: <strong>{driverInvitePreview.legal_name || driverInvitePreview.identifier}</strong>. Empresa: <strong>{driverInvitePreview.company_name}</strong>. Operación: <strong>{driverInvitePreview.operation_name || "Alcance empresarial"}</strong>.</p>
+          <p className="mt-2 text-xs text-slate-600">El enlace por sí solo no autoriza el acceso. Ingresa el código de confirmación entregado por el supervisor y prepara esta instalación.</p>
+          <div className="mt-5 grid gap-4 sm:grid-cols-[1fr_auto]"><label className="text-sm font-semibold text-slate-700">Código de confirmación<input className="mt-2 w-full rounded-xl border border-violet-300 bg-white p-3.5 tracking-[0.3em] outline-none focus:border-violet-700 focus:ring-4 focus:ring-violet-100" value={driverInviteCode} onChange={(event) => setDriverInviteCode(event.target.value.replace(/\D/g, "").slice(0, 8))} inputMode="numeric" autoComplete="one-time-code" placeholder="8 dígitos" /></label><button className="self-end rounded-xl bg-violet-700 px-4 py-3.5 text-sm font-bold text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={driverInviteBusy || driverInviteCode.length !== 8} onClick={() => void consumeDriverInvitationRequest()}>{driverInviteBusy ? "Validando…" : "Iniciar activación"}</button></div>
+        </> : <p className="mt-4 rounded-xl bg-white p-4 text-sm text-violet-900" role="status">{driverInviteStatus}</p>}
+        {driverInviteStatus && driverInvitePreview && <p className="mt-4 rounded-xl bg-white p-4 text-sm text-violet-900" role="status">{driverInviteStatus}</p>}
+      </section>}
+
       <section className="mt-6 rounded-[2rem] bg-white p-5 shadow-2xl shadow-slate-950/20 sm:p-8" aria-label="Acceso móvil de conductor">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between"><div><p className="text-xs font-black uppercase tracking-[0.18em] text-teal-700">Vista de conductor</p><h2 className="mt-2 text-2xl font-black text-slate-950 sm:text-3xl">Activar o ingresar con passkey</h2><p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">Usa tu identidad una sola vez para habilitar este dispositivo. Después, la passkey será tu forma habitual de ingreso.</p></div><div className={["rounded-2xl border px-4 py-3 text-sm", installationState === "ready" ? "border-teal-200 bg-teal-50 text-teal-900" : "border-slate-200 bg-slate-50 text-slate-600"].join(" ")}><p className="font-bold">{installationState === "ready" ? "Dispositivo preparado" : "Dispositivo sin activar"}</p><p className="mt-1">{installationState === "ready" ? "Instalación recuperada o lista para usar." : "Prepara la instalación para comenzar."}</p></div></div>
         <div className="mt-6"><StepList registrationState={registrationState} installationState={installationState} /></div>
@@ -594,6 +703,7 @@ export default function App() {
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between"><div><p className="text-xs font-black uppercase tracking-[0.18em] text-amber-700">Vista de supervisor</p><h2 className="mt-2 text-2xl font-black text-slate-950 sm:text-3xl">Control de dispositivos</h2><p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">Revisa solicitudes, aprueba nuevas instalaciones y revoca accesos sin salir de esta consola.</p></div>{supervisorLoggedIn && <button className="rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={supervisorRefreshing || supervisorAction !== null} onClick={() => void refreshSupervisor()}>{supervisorRefreshing ? "Actualizando…" : "Actualizar ahora"}</button>}</div>
         <div className="mt-6 grid gap-4 md:grid-cols-[1fr_1fr_auto]"><label className="text-sm font-semibold text-slate-700">Usuario supervisor<input className="mt-2 w-full rounded-xl border border-slate-300 bg-white p-3.5 outline-none transition focus:border-amber-600 focus:ring-4 focus:ring-amber-100" value={supervisorIdentifier} onChange={(event) => setSupervisorIdentifier(event.target.value)} autoComplete="username" placeholder="Usuario de demo" /></label><label className="text-sm font-semibold text-slate-700">Contraseña<input className="mt-2 w-full rounded-xl border border-slate-300 bg-white p-3.5 outline-none transition focus:border-amber-600 focus:ring-4 focus:ring-amber-100" value={supervisorPassword} onChange={(event) => setSupervisorPassword(event.target.value)} type="password" autoComplete="current-password" placeholder="Contraseña de demo" /></label><button className="self-end rounded-xl bg-slate-900 px-4 py-3.5 text-sm font-bold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={supervisorRefreshing || supervisorAction !== null} onClick={() => void supervisorLogin()}>{supervisorRefreshing ? "Cargando…" : "Ingresar supervisor"}</button></div>
         <p className="mt-4 rounded-2xl bg-slate-100 p-4 text-sm text-slate-700" aria-live="polite">{supervisorStatus}</p>
+        {supervisorLoggedIn && <div className="mt-5 rounded-2xl border border-violet-200 bg-violet-50 p-4"><div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"><div><h3 className="font-black text-violet-950">Activación remota por WhatsApp</h3><p className="mt-1 text-xs leading-5 text-violet-900">Genera un enlace de un solo uso y comparte el código de confirmación por separado. La plataforma no envía WhatsApp.</p></div><button className="rounded-xl bg-violet-700 px-4 py-2.5 text-sm font-bold text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-50" disabled={supervisorAction !== null || supervisorCandidates.length === 0} onClick={() => void issueDriverInvitation()}>Generar invitación</button></div><div className="mt-4 grid gap-4 sm:grid-cols-2"><label className="text-sm font-semibold text-violet-950">Conductor<select className="mt-2 w-full rounded-xl border border-violet-300 bg-white p-3" value={selectedInviteDriverID} onChange={(event) => setSelectedInviteDriverID(event.target.value)}><option value="">Selecciona un conductor</option>{supervisorCandidates.map((candidate) => <option key={candidate.person_id} value={candidate.person_id}>{candidate.legal_name || candidate.identifier || candidate.person_id}</option>)}</select></label><div className="rounded-xl bg-white p-3 text-sm text-violet-950"><p className="font-semibold">Alcance</p><p className="mt-1">{companyName(companyID)} · {operationName(operationID || null)}</p></div></div>{issuedInviteLink && <div className="mt-4 grid gap-3 rounded-xl bg-white p-3 text-sm text-violet-950"><p className="font-semibold">Enlace para compartir manualmente</p><code className="break-all text-xs">{issuedInviteLink}</code><p><span className="font-semibold">Código separado:</span> <code className="tracking-[0.3em]">{issuedInviteCode}</code></p><p className="text-xs">El token sólo se muestra en esta respuesta y no se guarda en el navegador.</p></div>}</div>}
         {supervisorNotice && <div className="mt-3 rounded-2xl border border-teal-200 bg-teal-50 p-4 text-sm font-semibold text-teal-900" role="status" aria-live="polite">{supervisorNotice}</div>}
         {supervisorPollingBlocked && supervisorLoggedIn && <p className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">La actualización automática está detenida por permisos. Puedes intentar «Actualizar ahora» después de corregir el acceso.</p>}
         {supervisorLoggedIn && <div className="mt-6">

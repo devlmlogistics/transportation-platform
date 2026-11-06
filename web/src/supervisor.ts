@@ -29,6 +29,28 @@ export type DeviceAuthorizationView = {
   revoked_at: string | null;
 };
 
+export type DriverEnrollmentCandidate = {
+  user_account_id: string;
+  person_id: string;
+  identifier: string;
+  legal_name: string;
+};
+
+export type DriverEnrollmentInvitationView = {
+  invitation_id: string;
+  user_account_id: string;
+  person_id: string;
+  identifier: string;
+  legal_name: string;
+  company_id: string;
+  company_operation_id: string | null;
+  status: string;
+  created_at: string;
+  expires_at: string;
+  consumed_at: string | null;
+  revoked_at: string | null;
+};
+
 type JSONRecord = Record<string, unknown>;
 
 export class SupervisorRequestError extends Error {
@@ -94,6 +116,34 @@ const normalizeDeviceAuthorization = (value: unknown): DeviceAuthorizationView =
   };
 };
 
+const normalizeDriverEnrollmentCandidate = (value: unknown): DriverEnrollmentCandidate => {
+  if (!isJSONRecord(value)) throw new Error("Invalid driver candidate response");
+  return {
+    user_account_id: stringField(value, "user_account_id", "UserAccountID"),
+    person_id: stringField(value, "person_id", "PersonID"),
+    identifier: stringField(value, "identifier", "Identifier"),
+    legal_name: stringField(value, "legal_name", "LegalName"),
+  };
+};
+
+const normalizeDriverEnrollmentInvitation = (value: unknown): DriverEnrollmentInvitationView => {
+  if (!isJSONRecord(value)) throw new Error("Invalid driver invitation response");
+  return {
+    invitation_id: stringField(value, "invitation_id", "InvitationID"),
+    user_account_id: stringField(value, "user_account_id", "UserAccountID"),
+    person_id: stringField(value, "person_id", "PersonID"),
+    identifier: stringField(value, "identifier", "Identifier"),
+    legal_name: stringField(value, "legal_name", "LegalName"),
+    company_id: stringField(value, "company_id", "CompanyID"),
+    company_operation_id: nullableStringField(value, "company_operation_id", "CompanyOperationID"),
+    status: stringField(value, "status", "Status"),
+    created_at: stringField(value, "created_at", "CreatedAt"),
+    expires_at: stringField(value, "expires_at", "ExpiresAt"),
+    consumed_at: nullableStringField(value, "consumed_at", "ConsumedAt"),
+    revoked_at: nullableStringField(value, "revoked_at", "RevokedAt"),
+  };
+};
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const requireUUID = (value: string, resource: string): string => {
@@ -146,6 +196,31 @@ export const approveSupervisorDeviceRequest = async (requestID: string, reason: 
 export const revokeSupervisorDevice = async (authorizationID: string, reason: string): Promise<unknown> => {
   const validAuthorizationID = requireUUID(authorizationID, "authorization");
   return request(`/api/v1/auth/webauthn/device-authorizations/${encodeURIComponent(validAuthorizationID)}/revoke`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
+};
+
+export const listDriverEnrollmentCandidates = async (companyID: string, operationID?: string): Promise<DriverEnrollmentCandidate[]> =>
+  (await request<unknown[]>(`/api/v1/auth/webauthn/driver-invitations/candidates?company_id=${encodeURIComponent(requireUUID(companyID, "company"))}${operationID ? `&company_operation_id=${encodeURIComponent(requireUUID(operationID, "operation"))}` : ""}`)).map(normalizeDriverEnrollmentCandidate);
+
+export const createDriverEnrollmentInvitation = async (input: {
+  person_id: string;
+  company_id: string;
+  company_operation_id?: string;
+  expires_seconds?: number;
+}): Promise<{ invitation_id: string; expires_at: string; token: string; confirmation_code: string }> =>
+  await request(`/api/v1/auth/webauthn/driver-invitations`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+
+export const listDriverEnrollmentInvitations = async (): Promise<DriverEnrollmentInvitationView[]> =>
+  (await request<unknown[]>("/api/v1/auth/webauthn/driver-invitations")).map(normalizeDriverEnrollmentInvitation);
+
+export const revokeDriverEnrollmentInvitation = async (invitationID: string, reason: string): Promise<unknown> => {
+  const validInvitationID = requireUUID(invitationID, "invitation");
+  return request(`/api/v1/auth/webauthn/driver-invitations/${encodeURIComponent(validInvitationID)}/revoke`, {
     method: "POST",
     body: JSON.stringify({ reason }),
   });

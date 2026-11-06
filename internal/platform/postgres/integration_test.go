@@ -97,14 +97,21 @@ func TestPostgres16Foundation(t *testing.T) {
 	t.Run("owner_force_rls", func(t *testing.T) { testOwnerForceRLS(t, ctx, migratorDSN) })
 	t.Run("pool_context_a_b_a", func(t *testing.T) { testPoolContextSequence(t, ctx, runtimePool, fixture) })
 	t.Run("auth_foundation", func(t *testing.T) { testAuthFoundation(t, ctx, runtimePool, authPool, adminDSN, fixture) })
+	t.Run("driver_enrollment_invitations", func(t *testing.T) {
+		repository, err := NewOnlineAuthRepository(runtimePool, authPool, driverAuthPool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		testDriverEnrollmentInvitations(t, ctx, repository, authPool, adminDSN, fixture)
+	})
 	t.Run("online_authentication", func(t *testing.T) { testOnlineAuth(t, ctx, runtimePool, authPool, driverAuthPool, adminDSN, fixture) })
 	t.Run("device_authorization_boundaries", func(t *testing.T) {
 		testDeviceAuthorizationBoundaries(t, ctx, authPool, adminDSN, fixture)
 	})
 
 	version, err := migrations.Version(ctx, migratorDB)
-	if err != nil || version != 21 {
-		t.Fatalf("expected migration version 21 after integration suite, version=%d err=%v", version, err)
+	if err != nil || version != 22 {
+		t.Fatalf("expected migration version 22 after integration suite, version=%d err=%v", version, err)
 	}
 }
 
@@ -121,8 +128,8 @@ func prepareSchema(t *testing.T, ctx context.Context, db *sql.DB, adminDSN strin
 		t.Fatalf("migrations up: %v", err)
 	}
 	version, err := migrations.Version(ctx, db)
-	if err != nil || version != 21 {
-		t.Fatalf("expected version 21 after up, version=%d err=%v", version, err)
+	if err != nil || version != 22 {
+		t.Fatalf("expected version 22 after up, version=%d err=%v", version, err)
 	}
 	if err := migrations.DownTo(ctx, db, directory, 0); err != nil {
 		t.Fatalf("migrations down: %v", err)
@@ -147,6 +154,7 @@ func clearSyntheticData(t *testing.T, ctx context.Context, adminDSN string) {
 			platform.recovery_request,
 			platform.auth_session,
 			platform.auth_challenge,
+			platform.driver_enrollment_invitation,
 			platform.device_enrollment_request,
 			platform.device_authorization,
 			platform.authenticator_credential,

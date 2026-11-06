@@ -12,10 +12,11 @@ func NewRouter(cfg config.Config, logger *slog.Logger) (http.Handler, error) {
 }
 
 type RouterDependencies struct {
-	Auth     OnlineAuthHTTPService
-	Driver   DriverAuthHTTPService
-	Admin    AdminService
-	WebAuthn WebAuthnHTTPService
+	Auth              OnlineAuthHTTPService
+	Driver            DriverAuthHTTPService
+	Admin             AdminService
+	WebAuthn          WebAuthnHTTPService
+	DriverInvitations DriverInvitationHTTPService
 }
 
 func NewRouterWithDependencies(cfg config.Config, logger *slog.Logger, dependencies RouterDependencies) (http.Handler, error) {
@@ -48,6 +49,20 @@ func NewRouterWithDependencies(cfg config.Config, logger *slog.Logger, dependenc
 		webauthnHandler = configured
 	}
 	mux.Handle("/api/v1/auth/webauthn/", webauthnHandler)
+	if cfg.WebAuthnEnabled && dependencies.DriverInvitations != nil && authSecurity != nil {
+		configured, err := NewDriverInvitationHandler(dependencies.DriverInvitations, authSecurity, false)
+		if err != nil {
+			return nil, err
+		}
+		mux.Handle("/api/v1/auth/webauthn/driver-invitations/", configured)
+		publicConfigured, err := NewDriverInvitationHandler(dependencies.DriverInvitations, authSecurity, true)
+		if err != nil {
+			return nil, err
+		}
+		mux.Handle("/api/v1/driver/invitations/", publicConfigured)
+	} else {
+		mux.Handle("/api/v1/driver/invitations/", ClosedWebAuthnHandler())
+	}
 	driverHandler := http.Handler(ClosedWebAuthnHandler())
 	if cfg.WebAuthnEnabled && dependencies.Driver != nil && authSecurity != nil {
 		configured, err := NewDriverAuthHandler(dependencies.Driver, authSecurity)

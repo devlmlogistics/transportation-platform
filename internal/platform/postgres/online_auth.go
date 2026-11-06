@@ -268,6 +268,143 @@ func (r *OnlineAuthRepository) CreateAdminInvitation(ctx context.Context, sessio
 	return result, err
 }
 
+func (r *OnlineAuthRepository) CreateDriverEnrollmentInvitation(ctx context.Context, sessionTokenHash []byte, request auth.DriverEnrollmentInvitationCreateRequest) (auth.DriverEnrollmentInvitation, error) {
+	if r == nil || r.authPool == nil || len(sessionTokenHash) != 32 || request.InvitationID == uuid.Nil || len(request.TokenHash) != 32 || len(request.ConfirmationHash) != 32 || request.Input.PersonID == uuid.Nil || request.Input.CompanyID == uuid.Nil || request.AuditID == uuid.Nil {
+		return auth.DriverEnrollmentInvitation{}, auth.ErrInvalidInput
+	}
+	var result auth.DriverEnrollmentInvitation
+	err := r.authPool.QueryRow(ctx, `
+		SELECT invitation_id, expires_at
+		  FROM platform.create_driver_enrollment_invitation($1,$2,$3,$4,$5,$6,$7,$8,$9)
+	`, sessionTokenHash, request.InvitationID, request.TokenHash, request.ConfirmationHash,
+		request.Input.PersonID, request.Input.CompanyID, request.Input.CompanyOperationID,
+		request.Input.ExpiresSeconds, request.AuditID).Scan(&result.ID, &result.ExpiresAt)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "P0001" && pgErr.ConstraintName == "driver_invitation_active_conflict" {
+			return auth.DriverEnrollmentInvitation{}, auth.ErrDriverInvitationConflict
+		}
+		return auth.DriverEnrollmentInvitation{}, err
+	}
+	result.UserAccountID = uuid.Nil
+	result.PersonID = request.Input.PersonID
+	result.CompanyID = request.Input.CompanyID
+	result.CompanyOperationID = request.Input.CompanyOperationID
+	result.Status = "PENDING"
+	return result, nil
+}
+
+func (r *OnlineAuthRepository) ListDriverEnrollmentInvitations(ctx context.Context, sessionTokenHash []byte) ([]auth.DriverEnrollmentInvitation, error) {
+	if r == nil || r.authPool == nil || len(sessionTokenHash) != 32 {
+		return nil, auth.ErrInvalidInput
+	}
+	rows, err := r.authPool.Query(ctx, `
+		SELECT invitation_id, user_account_id, person_id, identifier, legal_name,
+		       company_id, company_operation_id, status, created_at, expires_at,
+		       consumed_at, revoked_at
+		  FROM platform.list_driver_enrollment_invitations($1)
+	`, sessionTokenHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]auth.DriverEnrollmentInvitation, 0)
+	for rows.Next() {
+		var item auth.DriverEnrollmentInvitation
+		if err := rows.Scan(&item.ID, &item.UserAccountID, &item.PersonID, &item.Identifier, &item.LegalName,
+			&item.CompanyID, &item.CompanyOperationID, &item.Status, &item.CreatedAt, &item.ExpiresAt,
+			&item.ConsumedAt, &item.RevokedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (r *OnlineAuthRepository) ListDriverEnrollmentCandidates(ctx context.Context, sessionTokenHash []byte, companyID uuid.UUID, operationID *uuid.UUID) ([]auth.DriverEnrollmentCandidate, error) {
+	if r == nil || r.authPool == nil || len(sessionTokenHash) != 32 || companyID == uuid.Nil {
+		return nil, auth.ErrInvalidInput
+	}
+	rows, err := r.authPool.Query(ctx, `
+		SELECT user_account_id, person_id, identifier, legal_name
+		  FROM platform.list_driver_enrollment_candidates($1,$2,$3)
+	`, sessionTokenHash, companyID, operationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]auth.DriverEnrollmentCandidate, 0)
+	for rows.Next() {
+		var item auth.DriverEnrollmentCandidate
+		if err := rows.Scan(&item.UserAccountID, &item.PersonID, &item.Identifier, &item.LegalName); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (r *OnlineAuthRepository) RevokeDriverEnrollmentInvitation(ctx context.Context, sessionTokenHash []byte, invitationID uuid.UUID, reason string) error {
+	if r == nil || r.authPool == nil || len(sessionTokenHash) != 32 || invitationID == uuid.Nil {
+		return auth.ErrInvalidInput
+	}
+	var changed bool
+	if err := r.authPool.QueryRow(ctx, `
+		SELECT platform.revoke_driver_enrollment_invitation($1,$2,$3,$4)
+	`, sessionTokenHash, invitationID, reason, uuid.New()).Scan(&changed); err != nil {
+		return err
+	} else if !changed {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+func (r *OnlineAuthRepository) ResolveDriverEnrollmentInvitation(ctx context.Context, tokenHash []byte) (auth.DriverEnrollmentInvitationPreview, error) {
+	if r == nil || r.authPool == nil || len(tokenHash) != 32 {
+		return auth.DriverEnrollmentInvitationPreview{}, auth.ErrInvalidInput
+	}
+	var result auth.DriverEnrollmentInvitationPreview
+	err := r.authPool.QueryRow(ctx, `
+		SELECT invitation_id, user_account_id, person_id, identifier, legal_name,
+		       company_id, company_name, company_operation_id, operation_name, expires_at
+		  FROM platform.resolve_driver_enrollment_invitation($1)
+	`, tokenHash).Scan(&result.ID, &result.UserAccountID, &result.PersonID, &result.Identifier,
+		&result.LegalName, &result.CompanyID, &result.CompanyName, &result.CompanyOperationID,
+		&result.OperationName, &result.ExpiresAt)
+	return result, err
+}
+
+func (r *OnlineAuthRepository) ConsumeDriverEnrollmentInvitation(ctx context.Context, request auth.DriverEnrollmentConsumeRequest) (auth.DriverEnrollmentActivation, error) {
+	if r == nil || r.authPool == nil || len(request.TokenHash) != 32 || len(request.ConfirmationHash) != 32 || request.SessionID == uuid.Nil || len(request.SessionTokenHash) != 32 || len(request.CSRFSecretHash) != 32 || request.RequestID == uuid.Nil || len(request.InstallationPublicKey) < 16 || len(request.BindingHash) != 32 {
+		return auth.DriverEnrollmentActivation{}, auth.ErrInvalidInput
+	}
+	var result auth.DriverEnrollmentActivation
+	var session auth.SessionRecord
+	var req auth.DeviceEnrollmentRequest
+	err := r.authPool.QueryRow(ctx, `
+		SELECT session_id, user_account_id, session_epoch, session_status,
+		       created_at, last_seen_at, idle_expires_at, absolute_expires_at,
+		       request_id, correlation_code, company_id, company_operation_id,
+		       installation_id, request_status, request_expires_at
+		  FROM platform.consume_driver_enrollment_invitation(
+			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+	`, request.TokenHash, request.ConfirmationHash, request.SessionID, request.SessionTokenHash,
+		request.CSRFSecretHash, request.UserAgentHash, request.IPPrefix, request.RequestID,
+		request.CorrelationCode, request.InstallationID, request.InstallationPublicKey,
+		request.KeyAlgorithm, request.BindingHash, request.InvitationAuditID, request.RequestAuditID,
+		request.SessionAuditID, request.LoginAuditID).Scan(
+		&session.ID, &session.UserAccountID, &session.SessionEpoch, &session.Status,
+		&session.CreatedAt, &session.LastSeenAt, &session.IdleExpiresAt, &session.AbsoluteExpiresAt,
+		&req.ID, &req.CorrelationCode, &req.CompanyID, &req.CompanyOperationID,
+		&req.InstallationID, &req.Status, &req.ExpiresAt)
+	if err != nil {
+		return auth.DriverEnrollmentActivation{}, err
+	}
+	result.Session = session
+	result.Request = req
+	return result, nil
+}
+
 func (r *OnlineAuthRepository) ConsumeAdminInvitation(ctx context.Context, tokenHash []byte, passwordHash string, parameters json.RawMessage, personID, accountID, credentialID, auditID uuid.UUID) (uuid.UUID, uuid.UUID, string, error) {
 	if r == nil || r.authPool == nil || len(tokenHash) != 32 {
 		return uuid.Nil, uuid.Nil, "", auth.ErrInvalidInput
