@@ -14,6 +14,12 @@ La demo expone únicamente:
 
 No se habilita `/api/v1/admin`, no se implementan formularios, GPS, operaciones de Drayage/Transportation, recuperación ni offline. `ADMIN_HTTP_ENABLED=false` es obligatorio.
 
+## Validación de aislamiento de la suite Go/PostgreSQL
+
+**[V] Etapa 1 de cierre — 2026-11-05:** `go test ./... -count=1` pasó completamente con PostgreSQL 16 efímero propio, incluyendo Goose `up/down/up`, pruebas de sesiones DRIVER, revocación de credenciales y autorizaciones, RLS y aislamiento multiempresa. Una repetición con `go test ./... -count=2 -shuffle=on` también pasó. No se modificó PostgreSQL persistente ni se alteraron los fixtures productivos.
+
+La ejecución usa el harness verificable de `internal/platform/testdb`; cada corrida crea su propio contenedor y volumen temporal y limpia únicamente recursos que llevan la marca del harness. Las pruebas de revocación conservan la semántica de credencial individual: revocar una credencial no invalida otra credencial activa de la misma cuenta; revocar todas las credenciales activas sí impide iniciar un login DRIVER. No se eliminaron ni deshabilitaron pruebas para obtener una suite verde.
+
 ## Requisitos previos
 
 1. Docker Engine/Compose en el servidor de la demo. Go y PowerShell no son necesarios en el host: los helpers de migración, bootstrap y fixture se ejecutan en imágenes Docker.
