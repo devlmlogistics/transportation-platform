@@ -103,7 +103,7 @@ La entrega UX/UI anterior fue exclusivamente frontend. Las correcciones posterio
 
 ### Invitación remota de conductor por WhatsApp manual
 
-`000022_driver_enrollment_invitations.sql` agrega una frontera separada para el enrolamiento remoto. El supervisor autenticado selecciona un conductor existente y un alcance autorizado, genera una invitación de un solo uso y comparte manualmente el enlace y el código de confirmación por canales separados. No existe integración con la API de WhatsApp y `ADMIN_HTTP_ENABLED` no cambia.
+`000022_driver_enrollment_invitations.sql` agrega una frontera separada para el enrolamiento remoto. El supervisor autenticado selecciona un conductor existente y un alcance autorizado, genera una invitación de un solo uso y comparte el enlace y el código de confirmación por canales separados. La consola ofrece abrir un mensaje preparado en `wa.me`, pero el supervisor selecciona el contacto y confirma el envío manualmente; no existe integración con la API de WhatsApp y `ADMIN_HTTP_ENABLED` no cambia.
 
 El enlace usa un token aleatorio de 32 bytes; sólo se guarda su hash en PostgreSQL. La interfaz React lo recibe en el fragmento `#driver-invite=...`, lo elimina inmediatamente de la barra de direcciones y no lo persiste en `localStorage` ni IndexedDB. La validación pública devuelve sólo metadatos no secretos. El consumo requiere además el código de confirmación, una instalación ECDSA preparada y una solicitud vinculada al conductor, empresa, operación e invitación derivados del registro bloqueado. El token se consume dentro de la misma transacción y los reintentos o consumos concurrentes fallan de forma genérica.
 
@@ -126,6 +126,12 @@ El teléfono conserva el identificador de la solicitud en memoria de la pantalla
 Al reabrir la PWA, la identidad local se carga junto con la instalación existente. Si existe, el campo se muestra sólo como referencia y el botón principal usa esa identidad automáticamente; si no existe, se conserva el fallback manual. Borrar los datos del sitio o cambiar de teléfono elimina esta asociación y la clave local, por lo que se debe repetir la activación. IndexedDB no se presenta como garantía de hardware.
 
 Si la solicitud está pendiente, se informa que debe esperar. Si el endpoint rechaza el registro antes de expirar, la pantalla permite reintentar y recomienda verificar con el supervisor. Si expira, se solicita una nueva activación sin borrar la instalación local. La cancelación del diálogo biométrico/PIN no consume la solicitud. Un registro exitoso cambia el estado a autorizado y el siguiente paso es `Ingresar con passkey`.
+
+### Acceso recurrente simplificado
+
+Cuando la instalación recuperada contiene la identidad local canónica, la vista del conductor muestra `Bienvenido de nuevo` y prioriza `Ingresar con passkey`. La identificación queda bloqueada como referencia de la instalación; la contraseña se conserva únicamente como fallback visible para una nueva activación explícita. No se crean solicitudes automáticamente ni se guardan tokens o contraseñas en el navegador.
+
+`Solicitar nueva activación` permanece disponible como acción secundaria para el caso en que el conductor deba volver a obtener aprobación. Cambiar de conductor elimina la asociación local y la solicitud pendiente, pero conserva la `CryptoKey` no exportable; la nueva activación vuelve a exigir las validaciones del backend. La passkey no sustituye la prueba de posesión de instalación ni la autorización vigente.
 
 La corrección anterior de frontend y helpers WebAuthn no agregó migraciones. Las correcciones de backend agregan `000019_driver_activation_status.sql`, `000020_demo_device_approved_requests.sql`, `000021_device_enrollment_deduplication.sql` y `000022_driver_enrollment_invitations.sql`; si la instancia Linux está en Goose 18, hay que ejecutar únicamente Goose UP hasta 22 antes de reemplazar `platform`. No ejecutar DOWN ni reiniciar `db`.
 

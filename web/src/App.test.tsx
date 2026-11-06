@@ -17,12 +17,13 @@ afterEach(() => {
   Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
 });
 
-const installDriverActivationDB = (status = "PENDING", expiresAt = "2099-01-01T00:00:00Z") => {
+const installDriverActivationDB = (status = "PENDING", expiresAt = "2099-01-01T00:00:00Z", identifier?: string) => {
   const values = new Map<string, unknown>([[driverInstallationID, {
     id: driverInstallationID,
     publicKey: {} as CryptoKey,
     privateKey: {} as CryptoKey,
     publicKeyEncoded: "public-key",
+    ...(identifier ? { identifier } : {}),
     createdAt: Date.now(),
   }]]);
   const activationRequest = {
@@ -139,6 +140,20 @@ describe("platform shell", () => {
     expect(screen.getByRole("option", { name: "Drayage" })).toBeInTheDocument();
     expect(screen.queryByPlaceholderText("UUID autorizado")).not.toBeInTheDocument();
     expect(screen.getByText("Dispositivo sin activar")).toBeInTheDocument();
+  });
+
+  it("recognizes an associated installation and makes passkey the primary recurring access", async () => {
+    installDriverActivationDB("APPROVED", "2099-01-01T00:00:00Z", "driver@example.test");
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Bienvenido de nuevo" })).toBeInTheDocument();
+    expect(screen.getByText(/Esta instalación ya está asociada a tu identidad/)).toBeInTheDocument();
+    expect(screen.getByText("(sólo fallback)")).toBeInTheDocument();
+    const passkey = screen.getByRole("button", { name: "Ingresar con passkey" });
+    const fallback = screen.getByRole("button", { name: "Solicitar nueva activación" });
+    expect(passkey).toBeInTheDocument();
+    expect(fallback).toBeInTheDocument();
+    expect(passkey.compareDocumentPosition(fallback) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("renders the backend PascalCase response and approves the real request UUID", async () => {
