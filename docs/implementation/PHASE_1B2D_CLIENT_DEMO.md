@@ -1,5 +1,7 @@
 # Fase 1B.2-D — Demo controlada para cliente
 
+[V] Extensión 2026-11-06: la gestión de conductores requiere Goose **24** y concesión explícita de `driver.manage` COMPANY. Ver [diseño, validaciones y despliegue de gestión de conductores](DRIVER_MANAGEMENT.md). Para una instancia ya utilizada en Goose 23, ejecutar únicamente UP y reemplazar platform: **omitir fixture y bootstrap**. Las secciones históricas inferiores describen entregas anteriores.
+
 Estado de este documento: [D] procedimiento propuesto para revisión. No ejecuta bootstrap, no despliega servicios y no modifica `transportation_platform_dev`, la base manual anterior ni `lmlogistics`.
 
 ## Alcance
