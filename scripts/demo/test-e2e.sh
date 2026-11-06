@@ -90,7 +90,7 @@ version_before="$("${compose[@]}" run --rm migrate version | tail -n 1 | tr -d '
 [[ "$version_before" == 0 ]] || { echo "expected Goose version 0 before up, got $version_before" >&2; exit 1; }
 "${compose[@]}" run --rm migrate up >/dev/null
 version_after="$("${compose[@]}" run --rm migrate version | tail -n 1 | tr -d '\r')"
-[[ "$version_after" == 20 ]] || { echo "expected Goose version 20 after up, got $version_after" >&2; exit 1; }
+[[ "$version_after" == 22 ]] || { echo "expected Goose version 22 after up, got $version_after" >&2; exit 1; }
 "${compose[@]}" run --rm bootstrap >/dev/null
 "${compose[@]}" run --rm fixture >/dev/null
 "${compose[@]}" up -d platform >/dev/null
