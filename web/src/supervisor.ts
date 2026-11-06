@@ -159,7 +159,7 @@ const csrfToken = (): string =>
     .find((item) => item.startsWith("tp_csrf="))
     ?.slice("tp_csrf=".length) ?? "";
 
-const request = async <T>(path: string, init: RequestInit = {}): Promise<T> => {
+export const request = async <T>(path: string, init: RequestInit = {}): Promise<T> => {
   const method = (init.method ?? "GET").toUpperCase();
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
