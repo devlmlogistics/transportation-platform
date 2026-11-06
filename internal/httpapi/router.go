@@ -17,6 +17,7 @@ type RouterDependencies struct {
 	Admin             AdminService
 	WebAuthn          WebAuthnHTTPService
 	DriverInvitations DriverInvitationHTTPService
+	DriverManagement  DriverManagementHTTPService
 }
 
 func NewRouterWithDependencies(cfg config.Config, logger *slog.Logger, dependencies RouterDependencies) (http.Handler, error) {
@@ -40,6 +41,11 @@ func NewRouterWithDependencies(cfg config.Config, logger *slog.Logger, dependenc
 		authSecurity = configured
 	}
 	mux.Handle("/api/v1/auth/", authHandler)
+	if cfg.AuthOnlineEnabled && dependencies.DriverManagement != nil && authSecurity != nil {
+		mux.Handle("/api/v1/supervisor/drivers", DriverManagementHandler{Service: dependencies.DriverManagement, Security: authSecurity})
+	} else {
+		mux.Handle("/api/v1/supervisor/drivers", ClosedAdminHandler())
+	}
 	webauthnHandler := http.Handler(ClosedWebAuthnHandler())
 	if cfg.WebAuthnEnabled && dependencies.Auth != nil && dependencies.WebAuthn != nil && authSecurity != nil {
 		configured, err := NewWebAuthnHandler(dependencies.Auth, dependencies.WebAuthn, cfg.AllowedOrigins, cfg.AuthCookieSecure)
