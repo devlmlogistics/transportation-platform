@@ -179,6 +179,69 @@ func testDriverMobileAuth(t *testing.T, ctx context.Context, repository *OnlineA
 	if err := repository.ApproveDeviceEnrollmentRequest(ctx, applicationauth.HashSessionToken(supervisorToken), enrollment.ID, "test approval"); err != nil {
 		t.Fatalf("approved enrollment request was not accepted: %v", err)
 	}
+	makeApprovedRegistration := func(label string) (uuid.UUID, uuid.UUID, applicationauth.WebAuthnChallenge, []byte) {
+		t.Helper()
+		request, err := webauthnService.CreateDeviceEnrollmentRequest(ctx, activation.Token, resolvedActivation,
+			fixture.CompanyA, &fixture.OperationA, uuid.New(), activationPublicKey, "ECDSA_P256_SHA256")
+		if err != nil {
+			t.Fatalf("%s enrollment: %v", label, err)
+		}
+		if err := repository.ApproveDeviceEnrollmentRequest(ctx, applicationauth.HashSessionToken(supervisorToken), request.ID, label); err != nil {
+			t.Fatalf("%s approval: %v", label, err)
+		}
+		challengeID, _, err := webauthnService.BeginRegistration(ctx, activation.Token, resolvedActivation, label, &request.ID)
+		if err != nil {
+			t.Fatalf("%s challenge: %v", label, err)
+		}
+		challenge, err := repository.GetWebAuthnChallenge(ctx, applicationauth.HashSessionToken(activation.Token), challengeID, applicationauth.RegistrationChallenge)
+		if err != nil {
+			t.Fatalf("%s challenge load: %v", label, err)
+		}
+		payload := validRegistrationPayloadForCredential(t, challenge.SessionData, newTestAssertionCredential(t))
+		return request.ID, challengeID, challenge, payload
+	}
+	approvedExpiredRequestID, approvedExpiredChallengeID, _, approvedExpiredPayload := makeApprovedRegistration("expired approval")
+	if _, err := adminPool.Exec(ctx, `
+		UPDATE platform.device_enrollment_request
+		   SET requested_at = clock_timestamp() - interval '20 minutes',
+		       expires_at = clock_timestamp() - interval '1 second'
+		 WHERE id = $1
+	`, approvedExpiredRequestID); err != nil {
+		t.Fatal(err)
+	}
+	if err := webauthnService.FinishRegistration(ctx, activation.Token, resolvedActivation, approvedExpiredChallengeID,
+		httptest.NewRequest(http.MethodPost, "/api/v1/auth/webauthn/registration/finish", bytes.NewReader(approvedExpiredPayload)),
+		"expired approval"); err == nil {
+		t.Fatal("expired APPROVED request was consumed")
+	}
+	var requestStatus string
+	if err := adminPool.QueryRow(ctx, `SELECT status FROM platform.device_enrollment_request WHERE id = $1`, approvedExpiredRequestID).Scan(&requestStatus); err != nil {
+		t.Fatal(err)
+	}
+	if requestStatus != "APPROVED" {
+		t.Fatalf("expired approved request status=%s, want APPROVED history", requestStatus)
+	}
+
+	challengeExpiredRequestID, challengeExpiredID, _, challengeExpiredPayload := makeApprovedRegistration("expired challenge")
+	if _, err := adminPool.Exec(ctx, `
+		UPDATE platform.auth_challenge
+		   SET created_at = clock_timestamp() - interval '10 minutes',
+		       expires_at = clock_timestamp() - interval '1 second'
+		 WHERE id = $1
+	`, challengeExpiredID); err != nil {
+		t.Fatal(err)
+	}
+	if err := webauthnService.FinishRegistration(ctx, activation.Token, resolvedActivation, challengeExpiredID,
+		httptest.NewRequest(http.MethodPost, "/api/v1/auth/webauthn/registration/finish", bytes.NewReader(challengeExpiredPayload)),
+		"expired challenge"); err == nil {
+		t.Fatal("expired WebAuthn challenge completed registration")
+	}
+	if err := adminPool.QueryRow(ctx, `SELECT status FROM platform.device_enrollment_request WHERE id = $1`, challengeExpiredRequestID).Scan(&requestStatus); err != nil {
+		t.Fatal(err)
+	}
+	if requestStatus != "APPROVED" {
+		t.Fatalf("challenge-expired request status=%s, want APPROVED history", requestStatus)
+	}
 	registrationChallengeID, _, err := webauthnService.BeginRegistration(ctx, activation.Token, resolvedActivation, "registered driver passkey", &enrollment.ID)
 	if err != nil {
 		t.Fatalf("begin approved device registration: %v", err)
@@ -365,6 +428,16 @@ func testDriverMobileAuth(t *testing.T, ctx context.Context, repository *OnlineA
 	if _, _, err := driverService.BeginLogin(ctx, identifier, activationInstallationID); err == nil {
 		t.Fatal("expired device authorization produced driver login options")
 	}
+	if _, err := adminPool.Exec(ctx, `
+		UPDATE platform.device_authorization
+		   SET status = 'REVOKED', reason = 'manual-security-test'
+		 WHERE id = $1 AND status = 'ACTIVE'
+	`, registeredDeviceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := driverService.BeginLogin(ctx, identifier, activationInstallationID); err == nil {
+		t.Fatal("revoked device authorization produced driver login options")
+	}
 	if err := activationService.Logout(ctx, recurrent.Token, recurrent.Session.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -490,8 +563,24 @@ func testDriverMobileAuth(t *testing.T, ctx context.Context, repository *OnlineA
 	if _, err := adminPool.Exec(ctx, `UPDATE platform.authenticator_credential SET status = 'REVOKED', revoked_at = clock_timestamp() WHERE id = $1`, credential.RecordID); err != nil {
 		t.Fatal(err)
 	}
+	if _, _, err := driverService.BeginLogin(ctx, identifier, installationID); err != nil {
+		t.Fatalf("active second credential did not preserve driver login: %v", err)
+	}
+	if _, err := adminPool.Exec(ctx, `UPDATE platform.authenticator_credential SET status = 'REVOKED', revoked_at = clock_timestamp() WHERE credential_id = $1`, registeredCredential.CredentialID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminPool.Exec(ctx, `UPDATE platform.authenticator_credential SET status = 'REVOKED', revoked_at = clock_timestamp() WHERE credential_id = $1`, companyCredential.CredentialID); err != nil {
+		t.Fatal(err)
+	}
+	var activeCredentialCount int
+	if err := adminPool.QueryRow(ctx, `SELECT count(*) FROM platform.authenticator_credential WHERE user_account_id = $1 AND status = 'ACTIVE'`, fixture.UserADriver).Scan(&activeCredentialCount); err != nil {
+		t.Fatal(err)
+	}
+	if activeCredentialCount != 0 {
+		t.Fatalf("expected all driver credentials revoked, active count=%d", activeCredentialCount)
+	}
 	if _, _, err := driverService.BeginLogin(ctx, identifier, installationID); err == nil {
-		t.Fatal("revoked credential produced driver login options")
+		t.Fatal("all revoked credentials produced driver login options")
 	}
 	if _, err := adminPool.Exec(ctx, `UPDATE platform.authenticator_credential SET status = 'ACTIVE', revoked_at = NULL WHERE id = $1`, credential.RecordID); err != nil {
 		t.Fatal(err)

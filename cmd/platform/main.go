@@ -64,6 +64,11 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 			return err
 		}
 		dependencies.Auth = authService
+		invitationService, err := applicationauth.NewDriverEnrollmentInvitationService(repository)
+		if err != nil {
+			return err
+		}
+		dependencies.DriverInvitations = invitationService
 		if cfg.WebAuthnEnabled {
 			webauthnService, err := applicationauth.NewWebAuthnService(repository, applicationauth.WebAuthnConfig{
 				RPID: cfg.WebAuthnRPID, RPDisplayName: cfg.WebAuthnDisplayName, RPOrigins: cfg.WebAuthnOrigins,
