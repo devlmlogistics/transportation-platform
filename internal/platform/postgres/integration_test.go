@@ -110,8 +110,8 @@ func TestPostgres16Foundation(t *testing.T) {
 	})
 
 	version, err := migrations.Version(ctx, migratorDB)
-	if err != nil || version != 22 {
-		t.Fatalf("expected migration version 22 after integration suite, version=%d err=%v", version, err)
+	if err != nil || version != 23 {
+		t.Fatalf("expected migration version 23 after integration suite, version=%d err=%v", version, err)
 	}
 }
 
@@ -128,8 +128,8 @@ func prepareSchema(t *testing.T, ctx context.Context, db *sql.DB, adminDSN strin
 		t.Fatalf("migrations up: %v", err)
 	}
 	version, err := migrations.Version(ctx, db)
-	if err != nil || version != 22 {
-		t.Fatalf("expected version 22 after up, version=%d err=%v", version, err)
+	if err != nil || version != 23 {
+		t.Fatalf("expected version 23 after up, version=%d err=%v", version, err)
 	}
 	if err := migrations.DownTo(ctx, db, directory, 0); err != nil {
 		t.Fatalf("migrations down: %v", err)

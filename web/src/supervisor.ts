@@ -144,10 +144,11 @@ const normalizeDriverEnrollmentInvitation = (value: unknown): DriverEnrollmentIn
   };
 };
 
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// PostgreSQL UUIDs also include the fixed synthetic IDs, without RFC version bits.
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const requireUUID = (value: string, resource: string): string => {
-  if (!UUID_PATTERN.test(value.trim())) throw new Error(`Invalid ${resource} id`);
+  if (!UUID_PATTERN.test(value.trim()) || value.trim() === "00000000-0000-0000-0000-000000000000") throw new Error(`Invalid ${resource} id`);
   return value.trim();
 };
 
@@ -201,8 +202,8 @@ export const revokeSupervisorDevice = async (authorizationID: string, reason: st
   });
 };
 
-export const listDriverEnrollmentCandidates = async (companyID: string, operationID?: string): Promise<DriverEnrollmentCandidate[]> =>
-  (await request<unknown[]>(`/api/v1/auth/webauthn/driver-invitations/candidates?company_id=${encodeURIComponent(requireUUID(companyID, "company"))}${operationID ? `&company_operation_id=${encodeURIComponent(requireUUID(operationID, "operation"))}` : ""}`)).map(normalizeDriverEnrollmentCandidate);
+export const listDriverEnrollmentCandidates = async (companyID: string, operationID?: string, signal?: AbortSignal): Promise<DriverEnrollmentCandidate[]> =>
+  (await request<unknown[]>(`/api/v1/auth/webauthn/driver-invitations/candidates?company_id=${encodeURIComponent(requireUUID(companyID, "company"))}${operationID ? `&company_operation_id=${encodeURIComponent(requireUUID(operationID, "operation"))}` : ""}`, { signal })).map(normalizeDriverEnrollmentCandidate);
 
 export const createDriverEnrollmentInvitation = async (input: {
   person_id: string;
@@ -210,13 +211,13 @@ export const createDriverEnrollmentInvitation = async (input: {
   company_operation_id?: string;
   expires_seconds?: number;
 }): Promise<{ invitation_id: string; expires_at: string; token: string; confirmation_code: string }> =>
-  await request(`/api/v1/auth/webauthn/driver-invitations`, {
+  await request(`/api/v1/auth/webauthn/driver-invitations/`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 
 export const listDriverEnrollmentInvitations = async (): Promise<DriverEnrollmentInvitationView[]> =>
-  (await request<unknown[]>("/api/v1/auth/webauthn/driver-invitations")).map(normalizeDriverEnrollmentInvitation);
+  (await request<unknown[]>("/api/v1/auth/webauthn/driver-invitations/")).map(normalizeDriverEnrollmentInvitation);
 
 export const revokeDriverEnrollmentInvitation = async (invitationID: string, reason: string): Promise<unknown> => {
   const validInvitationID = requireUUID(invitationID, "invitation");

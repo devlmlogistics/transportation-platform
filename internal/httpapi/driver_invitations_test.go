@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,7 +35,8 @@ func (invitationHTTPAuthStub) AcceptInvitation(context.Context, []byte, string) 
 }
 
 type invitationHTTPServiceStub struct {
-	preview applicationauth.DriverEnrollmentInvitationPreview
+	preview        applicationauth.DriverEnrollmentInvitationPreview
+	candidateError error
 }
 
 func (s invitationHTTPServiceStub) Create(context.Context, []byte, applicationauth.AuthenticatedSession, applicationauth.DriverEnrollmentInvitationInput) (applicationauth.IssuedDriverEnrollmentInvitation, error) {
@@ -44,7 +46,7 @@ func (s invitationHTTPServiceStub) List(context.Context, []byte, applicationauth
 	return nil, nil
 }
 func (s invitationHTTPServiceStub) Candidates(context.Context, []byte, applicationauth.AuthenticatedSession, uuid.UUID, *uuid.UUID) ([]applicationauth.DriverEnrollmentCandidate, error) {
-	return nil, nil
+	return nil, s.candidateError
 }
 func (s invitationHTTPServiceStub) Revoke(context.Context, []byte, applicationauth.AuthenticatedSession, uuid.UUID, string) error {
 	return nil
@@ -55,7 +57,7 @@ func (s invitationHTTPServiceStub) Resolve(context.Context, []byte) (application
 func (s invitationHTTPServiceStub) Consume(context.Context, applicationauth.DriverEnrollmentConsumeInput) (applicationauth.DriverEnrollmentActivation, error) {
 	return applicationauth.DriverEnrollmentActivation{
 		LoginResult: applicationauth.LoginResult{Token: make([]byte, 32), CSRFToken: make([]byte, 32)},
-		Request: applicationauth.DeviceEnrollmentRequest{ID: uuid.New(), CorrelationCode: "REQ-TEST", Status: "PENDING", ExpiresAt: time.Now().Add(time.Minute)},
+		Request:     applicationauth.DeviceEnrollmentRequest{ID: uuid.New(), CorrelationCode: "REQ-TEST", Status: "PENDING", ExpiresAt: time.Now().Add(time.Minute)},
 	}, nil
 }
 
@@ -110,5 +112,30 @@ func TestDriverInvitationConsumeSetsSessionCookiesWithoutExposingTokenInResponse
 	}
 	if cookies := response.Header().Values("Set-Cookie"); len(cookies) < 2 {
 		t.Fatalf("expected session and csrf cookies, got %v", cookies)
+	}
+}
+
+func TestDriverCandidatesRequiresSessionAndReturnsSafePermissionError(t *testing.T) {
+	security, err := NewAuthHandler(invitationHTTPAuthStub{}, []string{"https://demo.test"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewDriverInvitationHandler(invitationHTTPServiceStub{candidateError: errors.New("internal SQL permission detail")}, security, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/v1/auth/webauthn/driver-invitations/candidates?company_id=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	for _, authenticated := range []bool{false, true} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		want := http.StatusUnauthorized
+		if authenticated {
+			request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: base64.RawURLEncoding.EncodeToString(make([]byte, 32))})
+			want = http.StatusForbidden
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != want || strings.Contains(response.Body.String(), "internal SQL") {
+			t.Fatalf("candidate response status=%d want=%d body=%s", response.Code, want, response.Body.String())
+		}
 	}
 }

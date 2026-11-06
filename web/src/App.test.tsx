@@ -102,6 +102,41 @@ const enrollmentResponse = (id: string, legalName: string) => ({
 });
 
 describe("platform shell", () => {
+  it("loads the two existing drivers and creates an invitation for the selected person", async () => {
+    document.cookie = "tp_csrf=demo-csrf";
+    const personID = "aaaaaaaa-aaaa-aaaa-aaaa-100000000004";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path.endsWith("/auth/login")) return jsonResponse({});
+      if (path.endsWith("/device-enrollment-requests") || path.endsWith("/device-authorizations")) return jsonResponse([]);
+      if (path.includes("/driver-invitations/candidates?")) return jsonResponse([
+        { PersonID: "aaaaaaaa-aaaa-aaaa-aaaa-100000000003", Identifier: "driver-test@example.test", LegalName: "" },
+        { PersonID: personID, Identifier: "driver-two-test@example.test", LegalName: "" },
+      ]);
+      if (path.endsWith("/driver-invitations/") && init?.method === "POST") return jsonResponse({ invitation_id: requestID, token: "test-invitation", confirmation_code: "12345678" }, 201);
+      throw new Error("Unexpected endpoint");
+    });
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Ingresar supervisor" }));
+    await screen.findByRole("option", { name: "driver-two-test@example.test" });
+    expect(screen.getByRole("option", { name: "driver-test@example.test" })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("combobox", { name: "Conductor" }), { target: { value: personID } });
+    fireEvent.click(screen.getByRole("button", { name: "Generar invitación" }));
+    await screen.findByText("Enlace para compartir manualmente");
+    const creation = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/driver-invitations/"));
+    expect(JSON.parse(String(creation?.[1]?.body))).toMatchObject({ person_id: personID, company_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" });
+  });
+
+  it("shows candidate permission failures instead of silently showing an empty selector", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).includes("/driver-invitations/candidates?")) return jsonResponse({}, 403);
+      return jsonResponse(String(input).endsWith("/auth/login") ? {} : []);
+    });
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Ingresar supervisor" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("No tienes permisos para consultar conductores en este alcance.");
+    expect(screen.getByRole("button", { name: "Generar invitación" })).toBeDisabled();
+  });
   it.each(["PENDING", "APPROVED"])("recovers expired %s without enabling passkey registration", async (status) => {
     installDriverActivationDB(status, "2020-01-01T00:00:00Z");
     render(<App />);

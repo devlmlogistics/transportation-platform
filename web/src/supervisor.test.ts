@@ -4,6 +4,8 @@ import {
   listSupervisorDeviceAuthorizations,
   listSupervisorDeviceRequests,
   loginSupervisor,
+  listDriverEnrollmentCandidates,
+  createDriverEnrollmentInvitation,
   revokeSupervisorDevice,
 } from "./supervisor";
 
@@ -15,6 +17,24 @@ const authorizationID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 describe("supervisor device demo API", () => {
   afterEach(() => vi.restoreAllMocks());
+
+  it("loads candidates using the actual synthetic PostgreSQL UUIDs", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse([{
+      UserAccountID: "aaaaaaaa-aaaa-aaaa-aaaa-200000000003",
+      PersonID: "aaaaaaaa-aaaa-aaaa-aaaa-100000000003",
+      Identifier: "driver-test@example.test", LegalName: "Manual Driver",
+    }]));
+    const candidates = await listDriverEnrollmentCandidates("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "aaaaaaaa-aaaa-aaaa-aaaa-000000000001");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(candidates[0]).toMatchObject({ person_id: "aaaaaaaa-aaaa-aaaa-aaaa-100000000003", identifier: "driver-test@example.test" });
+  });
+
+  it("posts invitations to the canonical collection without a redirect", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({}));
+    await createDriverEnrollmentInvitation({ person_id: "aaaaaaaa-aaaa-aaaa-aaaa-100000000003", company_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/auth/webauthn/driver-invitations/");
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("POST");
+  });
 
   it("logs in without storing credentials and sends CSRF on mutations", async () => {
     document.cookie = "tp_csrf=demo-csrf";

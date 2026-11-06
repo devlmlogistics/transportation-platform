@@ -137,6 +137,32 @@ La corrección anterior de frontend y helpers WebAuthn no agregó migraciones. L
 
 ## Fixture sintético
 
+### [V] Corrección del selector de invitaciones — 2026-11-06
+
+El catálogo existente se consulta en `GET /api/v1/auth/webauthn/driver-invitations/candidates` con empresa y operación. El selector vacío se reprodujo con los UUID reales del catálogo sintético: el validador React exigía versión/variante RFC y rechazaba la empresa antes de ejecutar `fetch`. El catch ocultaba el fallo. La validación ahora acepta el formato UUID de PostgreSQL, rechaza UUID cero y mantiene la autorización en SQL. La UI muestra errores de carga o permisos y cancela/ignora consultas de un alcance anterior. El POST de creación y el GET de invitaciones usan la ruta canónica terminada en `/` para evitar la redirección del router.
+
+La migración correctiva `000023_driver_invitation_candidates.sql` mantiene el contrato y privilegios de la función existente, agrega `Person.status = ACTIVE` y devuelve un error de permisos para un alcance no autorizado en vez de una lista vacía. `CREATE OR REPLACE` conserva ownership y ACL; no modifica filas, RLS ni autorizaciones existentes. No hay endpoints nuevos. Tener un dispositivo ACTIVE no excluye al conductor: puede recibir una invitación para otra instalación, que vuelve a requerir aprobación y WebAuthn.
+
+Validación ejecutada: dos regresiones frontend fallaron con la implementación anterior (UUID sintético y URL no canónica); con la corrección pasan las 44 pruebas React, typecheck y build. La suite Go completa, vet y build pasan. Las pruebas PostgreSQL usan su harness efímero y validan candidatos autorizados, aislamiento A/B, alcances COMPANY/OPERATION, falta de permisos, persona/perfil suspendidos e invitación con dispositivo existente; incluyen migraciones up/down/up. No se ejecutó fixture ni se conectó PostgreSQL persistente.
+
+Para actualizar una instancia existente en Goose 22, omitir **fixture y bootstrap**. Desde `/home/ubuntu/transportation-demo`, guardar respaldo según el procedimiento de operación, conservar `.env.demo`, comprobar el commit y ejecutar:
+
+```bash
+git fetch origin
+git switch feature/testing-client-demo
+git pull --ff-only origin feature/testing-client-demo
+compose=(docker compose --env-file .env.demo -p transportation-demo -f compose.demo.yaml)
+"${compose[@]}" config --quiet
+"${compose[@]}" build migrate platform
+"${compose[@]}" run --rm --no-deps migrate version  # debe indicar 22
+"${compose[@]}" stop platform
+"${compose[@]}" run --rm --no-deps migrate up
+"${compose[@]}" run --rm --no-deps migrate version  # debe indicar 23
+"${compose[@]}" up -d --no-deps platform
+```
+
+Si una comprobación falla, detener la secuencia. No ejecutar DOWN ni recrear db/volumen. En el navegador, recargar la aplicación, ingresar como supervisor y comprobar el GET `candidates` y las opciones del selector. Generar una invitación de prueba sólo mediante acción explícita. Estas instrucciones sustituyen la recomendación anterior de reejecutar el fixture después de Goose 22 para una demo ya utilizada.
+
 El fixture crea una empresa, una operación DRAYAGE, un supervisor y dos conductores. La carga usa una cuenta temporal de fixture con los roles existentes, y la elimina al terminar. No se cambian las políticas RLS productivas ni se otorga `BYPASSRLS`.
 
 ```bash

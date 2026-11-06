@@ -60,6 +60,69 @@ func testDriverEnrollmentInvitations(t *testing.T, ctx context.Context, reposito
 		t.Fatalf("unexpected driver candidate: %+v", candidates[0])
 	}
 
+	// SQL runs as tp_auth_runtime through the real repository, including RLS.
+	if rows, err := service.Candidates(ctx, supervisorToken, supervisorSession, fixture.CompanyB, &fixture.OperationB); err == nil || len(rows) != 0 {
+		t.Fatal("supervisor could list another company's drivers")
+	}
+	if rows, err := service.Candidates(ctx, supervisorToken, supervisorSession, fixture.CompanyA, &fixture.OperationB); err == nil || len(rows) != 0 {
+		t.Fatal("supervisor could list drivers from a mismatched operation")
+	}
+	if rows, err := service.Candidates(ctx, supervisorToken, supervisorSession, fixture.CompanyA, nil); err == nil || len(rows) != 0 {
+		t.Fatal("operation-only supervisor could list company-scope drivers")
+	}
+	otherTenantToken := makeHash(0xE3)
+	if _, err := createSyntheticSession(ctx, adminPool, applicationauth.CreateSessionRequest{
+		ID: uuid.New(), UserAccountID: fixture.UserBAdmin,
+		TokenHash: applicationauth.HashSessionToken(otherTenantToken), Policy: policy,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := repository.ListDriverEnrollmentCandidates(ctx, applicationauth.HashSessionToken(otherTenantToken), fixture.CompanyA, &fixture.OperationA); err == nil || len(rows) != 0 {
+		t.Fatal("company B actor could list company A drivers")
+	}
+	unprivilegedToken := makeHash(0xE2)
+	if _, err := createSyntheticSession(ctx, adminPool, applicationauth.CreateSessionRequest{
+		ID: uuid.New(), UserAccountID: fixture.UserADriver,
+		TokenHash: applicationauth.HashSessionToken(unprivilegedToken), Policy: policy,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := repository.ListDriverEnrollmentCandidates(ctx, applicationauth.HashSessionToken(unprivilegedToken), fixture.CompanyA, &fixture.OperationA); err == nil || len(rows) != 0 {
+		t.Fatal("account without permission could enumerate drivers")
+	}
+	for _, query := range []string{
+		`UPDATE platform.person SET status = 'SUSPENDED' WHERE id = $1`,
+		`UPDATE platform.driver_profile SET status = 'SUSPENDED' WHERE person_id = $1`,
+	} {
+		if _, err := adminPool.Exec(ctx, query, fixture.PersonADriver); err != nil {
+			t.Fatal(err)
+		}
+		rows, err := service.Candidates(ctx, supervisorToken, supervisorSession, fixture.CompanyA, &fixture.OperationA)
+		if err != nil || len(rows) != 0 {
+			t.Fatalf("suspended driver remained eligible: rows=%d err=%v", len(rows), err)
+		}
+		if _, err := adminPool.Exec(ctx, `UPDATE platform.person SET status = 'ACTIVE' WHERE id = $1;`, fixture.PersonADriver); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := adminPool.Exec(ctx, `UPDATE platform.driver_profile SET status = 'ACTIVE' WHERE person_id = $1;`, fixture.PersonADriver); err != nil {
+			t.Fatal(err)
+		}
+	}
+	existingAuthorization := uuid.New()
+	if _, err := adminPool.Exec(ctx, `INSERT INTO platform.device_authorization (
+		id, installation_id, user_account_id, company_id, company_operation_id,
+		installation_public_key, key_algorithm, status, expires_at)
+		VALUES ($1,$2,$3,$4,$5,$6,'ES256','ACTIVE', clock_timestamp() + interval '1 hour')`,
+		existingAuthorization, uuid.New(), fixture.UserADriver, fixture.CompanyA, fixture.OperationA, makeHash(0xC3)); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = adminPool.Exec(ctx, `DELETE FROM platform.device_authorization WHERE id = $1`, existingAuthorization)
+	}()
+	if rows, err := service.Candidates(ctx, supervisorToken, supervisorSession, fixture.CompanyA, &fixture.OperationA); err != nil || len(rows) != 1 {
+		t.Fatalf("driver with an existing device must remain eligible: rows=%d err=%v", len(rows), err)
+	}
+
 	issued, err := service.Create(ctx, supervisorToken, supervisorSession, applicationauth.DriverEnrollmentInvitationInput{
 		PersonID: fixture.PersonADriver, CompanyID: fixture.CompanyA, CompanyOperationID: &fixture.OperationA, ExpiresSeconds: 600,
 	})
